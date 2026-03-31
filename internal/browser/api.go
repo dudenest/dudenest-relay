@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-
-	"github.com/dudenest/dudenest-relay/internal/browser/providers"
 )
 
 // Server exposes browser auth sessions over HTTP for Flutter to consume.
@@ -25,10 +23,10 @@ func NewServer(display, listenAddr, oauthURL string) *Server {
 // Run starts the HTTP server (blocking).
 func (srv *Server) Run() error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/auth/session", srv.handleSession)    // POST: create session
-	mux.HandleFunc("/auth/input", srv.handleInput)        // POST: send text to field
-	mux.HandleFunc("/auth/click", srv.handleClick)        // POST: click element
-	mux.HandleFunc("/auth/status/", srv.handleStatus)     // GET:  session status
+	mux.HandleFunc("/auth/session", srv.handleSession)
+	mux.HandleFunc("/auth/input", srv.handleInput)
+	mux.HandleFunc("/auth/click", srv.handleClick)
+	mux.HandleFunc("/auth/status/", srv.handleStatus)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	fmt.Printf("browser-auth API listening on %s\n", srv.listenAddr)
 	return http.ListenAndServe(srv.listenAddr, mux)
@@ -36,27 +34,22 @@ func (srv *Server) Run() error {
 
 // --- Request / Response types ---
 
-type sessionReq struct {
-	Provider string `json:"provider"` // "gdrive"
-}
-
+type sessionReq struct{ Provider string `json:"provider"` }
 type inputReq struct {
 	SessionID string `json:"session_id"`
 	Selector  string `json:"selector"`
 	Text      string `json:"text"`
 }
-
 type clickReq struct {
 	SessionID string `json:"session_id"`
 	Selector  string `json:"selector"`
 }
-
 type stepResp struct {
-	SessionID     string              `json:"session_id,omitempty"`
-	Status        string              `json:"status"`
-	Fields        []providers.Field   `json:"fields,omitempty"`
-	ScreenshotB64 string              `json:"screenshot_b64,omitempty"`
-	Error         string              `json:"error,omitempty"`
+	SessionID     string  `json:"session_id,omitempty"`
+	Status        string  `json:"status"`
+	Fields        []Field `json:"fields,omitempty"`
+	ScreenshotB64 string  `json:"screenshot_b64,omitempty"`
+	Error         string  `json:"error,omitempty"`
 }
 
 // --- Handlers ---
@@ -81,7 +74,7 @@ func (srv *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s, _ := srv.mgr.Get(sid)
-	step, err := providers.GDriveStartFlow(s, srv.oauthURL)
+	step, err := GDriveStartFlow(s, srv.oauthURL)
 	if err != nil {
 		srv.mgr.Close(sid)
 		jsonError(w, "gdrive flow start: "+err.Error(), 500)
@@ -105,21 +98,20 @@ func (srv *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), 404)
 		return
 	}
-	// Determine current step by selector type
-	var step *providers.GDriveStep
+	var step *GDriveStep
 	switch {
-	case strings.Contains(req.Selector, "email") || req.Selector == providers.SelectorEmail:
-		step, err = providers.GDriveSubmitEmail(s, req.Text)
-	case strings.Contains(req.Selector, "password") || req.Selector == providers.SelectorPassword:
-		step, err = providers.GDriveSubmitPassword(s, req.Text, srv.oauthURL)
-	case strings.Contains(req.Selector, "totp") || strings.Contains(req.Selector, "tel"):
-		step, err = providers.GDriveSubmit2FA(s, req.Text, srv.oauthURL)
+	case strings.Contains(req.Selector, "email"):
+		step, err = GDriveSubmitEmail(s, req.Text)
+	case strings.Contains(req.Selector, "password"):
+		step, err = GDriveSubmitPassword(s, req.Text, srv.oauthURL)
+	case strings.Contains(req.Selector, "tel") || strings.Contains(req.Selector, "totp"):
+		step, err = GDriveSubmit2FA(s, req.Text, srv.oauthURL)
 	default:
 		if err2 := s.SendKeys(req.Selector, req.Text); err2 != nil {
 			jsonError(w, "sendkeys: "+err2.Error(), 500)
 			return
 		}
-		step = &providers.GDriveStep{Status: "ok"}
+		step = &GDriveStep{Status: "ok"}
 	}
 	if err != nil {
 		jsonError(w, err.Error(), 500)
