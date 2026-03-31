@@ -4,7 +4,6 @@ package browser
 import (
 	"encoding/base64"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 )
