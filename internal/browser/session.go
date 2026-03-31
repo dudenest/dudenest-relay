@@ -19,23 +19,26 @@ type Session struct {
 	created  time.Time
 }
 
-// NewSession creates a Chromium session.
-// Uses --headless=new mode (no Xvfb required, reliable on servers, good bot-detection profile).
-// display parameter kept for API compatibility but ignored in headless mode.
+// NewSession creates a Chromium session using --headless=new (no Xvfb needed).
+// DefaultExecAllocatorOptions contains old --headless; we build opts from scratch to avoid conflict.
+// display kept for API compat but unused in headless mode.
 func NewSession(id, display string) (*Session, error) {
-	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", "new"),           // new headless: full Chromium, not old --headless
+	opts := []chromedp.ExecAllocatorOption{
+		chromedp.NoFirstRun,
+		chromedp.NoDefaultBrowserCheck,
+		chromedp.Flag("headless", "new"),                                // new headless: full Chromium renderer
 		chromedp.Flag("no-sandbox", true),
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("disable-dev-shm-usage", true),
 		chromedp.Flag("disable-setuid-sandbox", true),
-		chromedp.Flag("disable-blink-features", "AutomationControlled"), // reduce bot detection
+		chromedp.Flag("disable-blink-features", "AutomationControlled"), // reduce bot fingerprint
 		chromedp.Flag("disable-extensions", true),
+		chromedp.Flag("mute-audio", true),
 		chromedp.WindowSize(1280, 800),
-	)
+		chromedp.ExecPath("chromium"),
+	}
 	allocCtx, allocCnl := chromedp.NewExecAllocator(context.Background(), opts...)
-	ctx, cancel := chromedp.NewContext(allocCtx)
-	// Warm up — verify browser starts
+	ctx, cancel := chromedp.NewContext(allocCtx, chromedp.WithLogf(func(f string, a ...any) {})) // silent logs
 	if err := chromedp.Run(ctx); err != nil {
 		cancel()
 		allocCnl()
