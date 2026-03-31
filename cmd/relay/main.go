@@ -11,15 +11,21 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dudenest/dudenest-relay/internal/cloudconn/local"
+	megaconn "github.com/dudenest/dudenest-relay/internal/cloudconn/mega"
 	"github.com/dudenest/dudenest-relay/internal/crypto"
 	"github.com/dudenest/dudenest-relay/internal/pipeline"
+	"github.com/dudenest/dudenest-relay/pkg/types"
 )
 
 var (
-	masterKey  string
-	storePath  string
-	cloudPath  string
-	outputPath string
+	masterKey    string
+	storePath    string
+	cloudPath    string
+	outputPath   string
+	provider     string
+	megaEmail    string
+	megaPassword string
+	megaBasePath string
 )
 
 func main() {
@@ -29,7 +35,13 @@ func main() {
 	}
 	root.PersistentFlags().StringVar(&masterKey, "key", "", "master key hex (32 bytes) or password")
 	root.PersistentFlags().StringVar(&storePath, "map-store", "/tmp/dudenest-maps", "path for FileMap storage")
-	root.PersistentFlags().StringVar(&cloudPath, "cloud-path", "/tmp/dudenest-blocks", "local cloud provider path (PoC)")
+	root.PersistentFlags().StringVar(&provider, "provider", "local", "cloud provider: local, mega")
+	// local provider flags
+	root.PersistentFlags().StringVar(&cloudPath, "cloud-path", "/tmp/dudenest-blocks", "local cloud provider path")
+	// MEGA flags
+	root.PersistentFlags().StringVar(&megaEmail, "mega-email", "", "MEGA.nz account email")
+	root.PersistentFlags().StringVar(&megaPassword, "mega-password", "", "MEGA.nz account password")
+	root.PersistentFlags().StringVar(&megaBasePath, "mega-path", "dudenest-relay", "MEGA.nz base folder path")
 
 	root.AddCommand(uploadCmd(), downloadCmd(), infoCmd(), benchCmd())
 	if err := root.Execute(); err != nil {
@@ -44,9 +56,20 @@ func getKey() ([]byte, error) {
 	if len(masterKey) == 64 { // hex encoded 32 bytes
 		return hex.DecodeString(masterKey)
 	}
-	// treat as password — derive key
 	key := crypto.DeriveKeyFromPassword(masterKey, "dudenest-relay-salt-v1")
 	return key, nil
+}
+
+func getCloud() (types.CloudProvider, error) {
+	switch provider {
+	case "mega":
+		if megaEmail == "" || megaPassword == "" {
+			return nil, fmt.Errorf("--mega-email and --mega-password required for mega provider")
+		}
+		return megaconn.New(megaEmail, megaPassword, megaBasePath)
+	default: // "local"
+		return local.New(cloudPath), nil
+	}
 }
 
 func getPipeline() (*pipeline.Pipeline, error) {
@@ -54,7 +77,10 @@ func getPipeline() (*pipeline.Pipeline, error) {
 	if err != nil {
 		return nil, err
 	}
-	cloud := local.New(cloudPath)
+	cloud, err := getCloud()
+	if err != nil {
+		return nil, fmt.Errorf("cloud init: %w", err)
+	}
 	return pipeline.New(key, cloud, storePath)
 }
 
@@ -120,9 +146,12 @@ func infoCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("dudenest-relay v0.0.1\n")
+			fmt.Printf("dudenest-relay v0.1.0\n")
 			fmt.Printf("Master key: %s...\n", hex.EncodeToString(key[:4]))
-			fmt.Printf("Cloud path: %s\n", cloudPath)
+			fmt.Printf("Provider:   %s\n", provider)
+			if provider == "local" {
+				fmt.Printf("Cloud path: %s\n", cloudPath)
+			}
 			fmt.Printf("Map store:  %s\n", storePath)
 			fmt.Printf("Chunk size: 8 MB\n")
 			fmt.Printf("Erasure:    6+3 Reed-Solomon (tolerates 3 failures)\n")
@@ -142,7 +171,7 @@ func benchCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Benchmarking %s...\n", args[0])
+			fmt.Printf("Benchmarking %s (provider: %s)...\n", args[0], provider)
 			start := time.Now()
 			fm, err := p.Upload(args[0])
 			if err != nil {
