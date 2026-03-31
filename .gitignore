@@ -8,4 +8,5 @@
 vendor/
 .env
 .AI
-relay
+/relay
+relay.exe
