@@ -19,14 +19,19 @@ type Session struct {
 	created  time.Time
 }
 
-// NewSession creates a Chromium session using the given display (e.g. ":99").
+// NewSession creates a Chromium session.
+// Uses --headless=new mode (no Xvfb required, reliable on servers, good bot-detection profile).
+// display parameter kept for API compatibility but ignored in headless mode.
 func NewSession(id, display string) (*Session, error) {
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Flag("headless", "new"),           // new headless: full Chromium, not old --headless
 		chromedp.Flag("no-sandbox", true),
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("disable-dev-shm-usage", true),
 		chromedp.Flag("disable-setuid-sandbox", true),
-		chromedp.Env("DISPLAY="+display),
+		chromedp.Flag("disable-blink-features", "AutomationControlled"), // reduce bot detection
+		chromedp.Flag("disable-extensions", true),
+		chromedp.WindowSize(1280, 800),
 	)
 	allocCtx, allocCnl := chromedp.NewExecAllocator(context.Background(), opts...)
 	ctx, cancel := chromedp.NewContext(allocCtx)
