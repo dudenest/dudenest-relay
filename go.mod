@@ -3,6 +3,7 @@ module github.com/dudenest/dudenest-relay
 go 1.24
 
 require (
+	github.com/chromedp/chromedp v0.13.6
 	github.com/google/uuid v1.6.0
 	github.com/klauspost/reedsolomon v1.12.1
 	github.com/spf13/cobra v1.8.1
