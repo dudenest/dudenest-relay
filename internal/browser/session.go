@@ -68,20 +68,18 @@ func (s *Session) Screenshot(selector string) ([]byte, error) {
 }
 
 // SendKeys types text into the element matching selector.
+// WaitVisible skipped — hangs on Google pages in headless=new; Navigate+Sleep(3s) ensures readiness.
 func (s *Session) SendKeys(selector, text string) error {
 	return chromedp.Run(s.ctx,
-		chromedp.WaitVisible(selector, chromedp.ByQuery),
 		chromedp.Click(selector, chromedp.ByQuery),
 		chromedp.SendKeys(selector, text, chromedp.ByQuery),
 	)
 }
 
 // Click clicks the element matching selector.
+// WaitVisible skipped — hangs on Google pages in headless=new.
 func (s *Session) Click(selector string) error {
-	return chromedp.Run(s.ctx,
-		chromedp.WaitVisible(selector, chromedp.ByQuery),
-		chromedp.Click(selector, chromedp.ByQuery),
-	)
+	return chromedp.Run(s.ctx, chromedp.Click(selector, chromedp.ByQuery))
 }
 
 // WaitVisible waits up to timeout for selector to appear.
