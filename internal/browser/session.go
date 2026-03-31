@@ -47,9 +47,10 @@ func NewSession(id, display string) (*Session, error) {
 	return &Session{id: id, ctx: ctx, cancel: cancel, allocCtx: allocCtx, allocCnl: allocCnl, created: time.Now()}, nil
 }
 
-// Navigate navigates to url and waits for DOMContentLoaded.
+// Navigate navigates to url and waits 3s for page settle.
+// WaitReady is unreliable on Google pages in headless mode.
 func (s *Session) Navigate(url string) error {
-	return chromedp.Run(s.ctx, chromedp.Navigate(url), chromedp.WaitReady("body", chromedp.ByQuery))
+	return chromedp.Run(s.ctx, chromedp.Navigate(url), chromedp.Sleep(3*time.Second))
 }
 
 // Screenshot captures a PNG of the element matching selector.
