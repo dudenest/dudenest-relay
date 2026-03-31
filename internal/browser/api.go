@@ -68,18 +68,24 @@ func (srv *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "unsupported provider: "+req.Provider, 400)
 		return
 	}
+	fmt.Println("handleSession: creating browser session...")
 	sid, err := srv.mgr.Create()
 	if err != nil {
+		fmt.Printf("handleSession: browser start failed: %v\n", err)
 		jsonError(w, "browser start failed: "+err.Error(), 500)
 		return
 	}
+	fmt.Printf("handleSession: session created: %s\n", sid)
 	s, _ := srv.mgr.Get(sid)
+	fmt.Println("handleSession: starting gdrive flow...")
 	step, err := GDriveStartFlow(s, srv.oauthURL)
 	if err != nil {
+		fmt.Printf("handleSession: gdrive flow error: %v\n", err)
 		srv.mgr.Close(sid)
 		jsonError(w, "gdrive flow start: "+err.Error(), 500)
 		return
 	}
+	fmt.Printf("handleSession: flow step=%s screenshot=%d bytes\n", step.Status, len(step.ScreenshotB64))
 	jsonOK(w, stepResp{SessionID: sid, Status: step.Status, Fields: step.Fields, ScreenshotB64: step.ScreenshotB64})
 }
 
