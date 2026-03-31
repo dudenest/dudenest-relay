@@ -4,6 +4,7 @@ package browser
 import (
 	"encoding/base64"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -40,16 +41,24 @@ func GDriveStartFlow(s *Session, oauthURL string) (*GDriveStep, error) {
 	if err := s.Navigate("https://accounts.google.com"); err != nil {
 		return nil, fmt.Errorf("navigate google: %w", err)
 	}
-	if err := s.WaitVisible(SelectorEmail, 10*time.Second); err != nil {
-		return nil, fmt.Errorf("email field not found: %w", err)
+	// Debug: take full screenshot immediately to see what Google renders in headless
+	shot, _ := screenshotOrFull(s, "body")
+	if pngBytes, err := base64.StdEncoding.DecodeString(shot); err == nil {
+		_ = os.WriteFile("/tmp/gdrive_debug.png", pngBytes, 0644) // SCP this to inspect
 	}
-	shot, err := screenshotOrFull(s, screenshotArea)
+	fmt.Println("gdrive: debug screenshot → /tmp/gdrive_debug.png")
+	// Wait for email field (10s timeout)
+	if err := s.WaitVisible(SelectorEmail, 10*time.Second); err != nil {
+		return &GDriveStep{ScreenshotB64: shot, Status: "debug_no_email_field"},
+			fmt.Errorf("email field not found: %w", err)
+	}
+	shot2, err := screenshotOrFull(s, screenshotArea)
 	if err != nil {
 		return nil, err
 	}
 	return &GDriveStep{
 		Fields:        []Field{{ID: "email", Selector: SelectorEmail, Type: "text", Label: "Adres Gmail"}},
-		ScreenshotB64: shot,
+		ScreenshotB64: shot2,
 		Status:        "needs_email",
 	}, nil
 }
