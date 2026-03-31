@@ -11,6 +11,8 @@ require (
 	github.com/spf13/cobra v1.8.1
 	github.com/t3rm1n4l/go-mega v0.0.0-20251120131202-6845944c051c
 	golang.org/x/crypto v0.45.0
+	golang.org/x/oauth2 v0.28.0
+	google.golang.org/api v0.231.0
 )
 
 require (

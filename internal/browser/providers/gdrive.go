@@ -30,17 +30,16 @@ type Field struct {
 	Label    string // Human-readable label for Flutter UI
 }
 
-// Google DOM selectors — updated 2026-03-31, may need maintenance
+// Google DOM selectors — exported for use in api.go, updated 2026-03-31, may need maintenance.
 const (
-	selEmail        = `input[type="email"]`
-	selEmailNext    = `#identifierNext`
-	selPassword     = `input[type="password"]`
-	selPasswordNext = `#passwordNext`
-	sel2FA          = `input[type="tel"], input[id="totpPin"]` // TOTP or SMS
-	sel2FANext      = `#totpNext, #idvAggChallengeNext`
-	selConsent      = `#submit_approve_access, button[id="submit_approve_access"]`
-	selGoogleBody   = `body`
-	screenshotArea  = `#view_container, form`                 // Main login form container
+	SelectorEmail    = `input[type="email"]`
+	SelectorPassword = `input[type="password"]`
+	SelectorEmailNext     = `#identifierNext`
+	SelectorPasswordNext  = `#passwordNext`
+	sel2FA           = `input[type="tel"], input[id="totpPin"]` // TOTP or SMS
+	sel2FANext       = `#totpNext, #idvAggChallengeNext`
+	selConsent       = `#submit_approve_access, button[id="submit_approve_access"]`
+	screenshotArea   = `#view_container, form`                 // Main login form container
 )
 
 // GDriveStartFlow navigates to Google login page and returns the first step.
@@ -48,7 +47,7 @@ func GDriveStartFlow(s *browser.Session, oauthURL string) (*GDriveStep, error) {
 	if err := s.Navigate("https://accounts.google.com"); err != nil {
 		return nil, fmt.Errorf("navigate google: %w", err)
 	}
-	if err := s.WaitVisible(selEmail, 10*time.Second); err != nil {
+	if err := s.WaitVisible(SelectorEmail, 10*time.Second); err != nil {
 		return nil, fmt.Errorf("email field not found: %w", err)
 	}
 	shot, err := screenshotOrFull(s, screenshotArea)
@@ -56,7 +55,7 @@ func GDriveStartFlow(s *browser.Session, oauthURL string) (*GDriveStep, error) {
 		return nil, err
 	}
 	return &GDriveStep{
-		Fields:        []Field{{ID: "email", Selector: selEmail, Type: "text", Label: "Adres Gmail"}},
+		Fields:        []Field{{ID: "email", Selector: SelectorEmail, Type: "text", Label: "Adres Gmail"}},
 		ScreenshotB64: shot,
 		Status:        "needs_email",
 	}, nil
@@ -64,13 +63,13 @@ func GDriveStartFlow(s *browser.Session, oauthURL string) (*GDriveStep, error) {
 
 // GDriveSubmitEmail types the email and clicks Next, returns password step.
 func GDriveSubmitEmail(s *browser.Session, email string) (*GDriveStep, error) {
-	if err := s.SendKeys(selEmail, email); err != nil {
+	if err := s.SendKeys(SelectorEmail, email); err != nil {
 		return nil, fmt.Errorf("type email: %w", err)
 	}
-	if err := s.Click(selEmailNext); err != nil {
+	if err := s.Click(SelectorEmailNext); err != nil {
 		return nil, fmt.Errorf("click next: %w", err)
 	}
-	if err := s.WaitVisible(selPassword, 10*time.Second); err != nil {
+	if err := s.WaitVisible(SelectorPassword, 10*time.Second); err != nil {
 		return nil, fmt.Errorf("password field not found: %w", err)
 	}
 	shot, err := screenshotOrFull(s, screenshotArea)
@@ -78,7 +77,7 @@ func GDriveSubmitEmail(s *browser.Session, email string) (*GDriveStep, error) {
 		return nil, err
 	}
 	return &GDriveStep{
-		Fields:        []Field{{ID: "password", Selector: selPassword, Type: "password", Label: "Hasło"}},
+		Fields:        []Field{{ID: "password", Selector: SelectorPassword, Type: "password", Label: "Hasło"}},
 		ScreenshotB64: shot,
 		Status:        "needs_password",
 	}, nil
@@ -86,10 +85,10 @@ func GDriveSubmitEmail(s *browser.Session, email string) (*GDriveStep, error) {
 
 // GDriveSubmitPassword types password, clicks Next, detects next state (2FA or consent).
 func GDriveSubmitPassword(s *browser.Session, password string, oauthURL string) (*GDriveStep, error) {
-	if err := s.SendKeys(selPassword, password); err != nil {
+	if err := s.SendKeys(SelectorPassword, password); err != nil {
 		return nil, fmt.Errorf("type password: %w", err)
 	}
-	if err := s.Click(selPasswordNext); err != nil {
+	if err := s.Click(SelectorPasswordNext); err != nil {
 		return nil, fmt.Errorf("click next: %w", err)
 	}
 	time.Sleep(2 * time.Second) // Allow redirect to settle

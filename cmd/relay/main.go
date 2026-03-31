@@ -43,7 +43,9 @@ func main() {
 	root.PersistentFlags().StringVar(&megaPassword, "mega-password", "", "MEGA.nz account password")
 	root.PersistentFlags().StringVar(&megaBasePath, "mega-path", "dudenest-relay", "MEGA.nz base folder path")
 
-	root.AddCommand(uploadCmd(), downloadCmd(), infoCmd(), benchCmd())
+	authCmd := &cobra.Command{Use: "auth", Short: "Authenticate cloud provider accounts"}
+	authCmd.AddCommand(authGDriveCmd())
+	root.AddCommand(uploadCmd(), downloadCmd(), infoCmd(), benchCmd(), serveAuthCmd(), authCmd)
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
