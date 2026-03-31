@@ -37,28 +37,18 @@ const (
 )
 
 // GDriveStartFlow navigates to Google login and returns the email-input step.
+// Navigate+Sleep(3s) guarantees page load. WaitVisible is skipped — screenshot confirms element presence.
 func GDriveStartFlow(s *Session, oauthURL string) (*GDriveStep, error) {
 	if err := s.Navigate("https://accounts.google.com"); err != nil {
 		return nil, fmt.Errorf("navigate google: %w", err)
 	}
-	// Debug: take full screenshot immediately to see what Google renders in headless
-	shot, _ := screenshotOrFull(s, "body")
-	if pngBytes, err := base64.StdEncoding.DecodeString(shot); err == nil {
-		_ = os.WriteFile("/tmp/gdrive_debug.png", pngBytes, 0644) // SCP this to inspect
-	}
-	fmt.Println("gdrive: debug screenshot → /tmp/gdrive_debug.png")
-	// Wait for email field (10s timeout)
-	if err := s.WaitVisible(SelectorEmail, 10*time.Second); err != nil {
-		return &GDriveStep{ScreenshotB64: shot, Status: "debug_no_email_field"},
-			fmt.Errorf("email field not found: %w", err)
-	}
-	shot2, err := screenshotOrFull(s, screenshotArea)
+	shot, err := screenshotOrFull(s, "body") // full page — email field visible after 3s sleep
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("screenshot: %w", err)
 	}
 	return &GDriveStep{
 		Fields:        []Field{{ID: "email", Selector: SelectorEmail, Type: "text", Label: "Adres Gmail"}},
-		ScreenshotB64: shot2,
+		ScreenshotB64: shot,
 		Status:        "needs_email",
 	}, nil
 }
