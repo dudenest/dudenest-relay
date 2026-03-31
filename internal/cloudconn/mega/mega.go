@@ -3,6 +3,7 @@ package mega
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -12,9 +13,8 @@ import (
 // Provider stores blocks on MEGA.nz.
 type Provider struct {
 	client   *gm.Mega
-	rootNode *gm.Node
+	root     *gm.Node
 	basePath string
-	email    string
 }
 
 // New authenticates with MEGA and returns a Provider.
@@ -23,11 +23,7 @@ func New(email, password, basePath string) (*Provider, error) {
 	if err := m.Login(email, password); err != nil {
 		return nil, fmt.Errorf("mega login: %w", err)
 	}
-	root, err := m.FS.HashLookup(m.FS.GetRoot())
-	if err != nil {
-		return nil, fmt.Errorf("mega root: %w", err)
-	}
-	p := &Provider{client: m, rootNode: root, basePath: basePath, email: email}
+	p := &Provider{client: m, root: m.FS.GetRoot(), basePath: basePath}
 	if err := p.ensureDir(basePath); err != nil {
 		return nil, fmt.Errorf("mega mkdir base: %w", err)
 	}
@@ -45,8 +41,19 @@ func (p *Provider) Upload(path string, data []byte) error {
 	if err != nil {
 		return fmt.Errorf("parent node %s: %w", dir, err)
 	}
+	// MEGA API requires a local file path — write to temp
+	tmp, err := os.CreateTemp("", "relay-mega-*.shard")
+	if err != nil {
+		return fmt.Errorf("tempfile: %w", err)
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temp: %w", err)
+	}
+	tmp.Close()
 	filename := filepath.Base(path)
-	_, err = p.client.UploadFile("", data, filename, parent, nil)
+	_, err = p.client.UploadFile(tmp.Name(), parent, filename, nil)
 	return err
 }
 
@@ -55,7 +62,17 @@ func (p *Provider) Download(path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("node %s: %w", path, err)
 	}
-	return p.client.DownloadFile(node, "")
+	tmp, err := os.CreateTemp("", "relay-mega-dl-*.shard")
+	if err != nil {
+		return nil, fmt.Errorf("tempfile: %w", err)
+	}
+	tmpPath := tmp.Name()
+	tmp.Close()
+	defer os.Remove(tmpPath)
+	if err := p.client.DownloadFile(node, tmpPath, nil); err != nil {
+		return nil, fmt.Errorf("download: %w", err)
+	}
+	return os.ReadFile(tmpPath)
 }
 
 func (p *Provider) Delete(path string) error {
@@ -71,16 +88,20 @@ func (p *Provider) Available() bool {
 	return err == nil
 }
 
-// ensureDir creates the directory path recursively if it doesn't exist.
+// ensureDir creates the directory path recursively.
 func (p *Provider) ensureDir(path string) error {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
-	current := p.rootNode
+	current := p.root
 	for _, part := range parts {
 		if part == "" {
 			continue
 		}
+		children, err := p.client.FS.GetChildren(current)
+		if err != nil {
+			return fmt.Errorf("children: %w", err)
+		}
 		found := false
-		for _, child := range p.client.FS.GetChildren(current) {
+		for _, child := range children {
 			if child.GetName() == part && child.GetType() == gm.FOLDER {
 				current = child
 				found = true
@@ -101,13 +122,17 @@ func (p *Provider) ensureDir(path string) error {
 // getNode resolves a path string to a MEGA node.
 func (p *Provider) getNode(path string) (*gm.Node, error) {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
-	current := p.rootNode
+	current := p.root
 	for _, part := range parts {
 		if part == "" {
 			continue
 		}
+		children, err := p.client.FS.GetChildren(current)
+		if err != nil {
+			return nil, fmt.Errorf("children: %w", err)
+		}
 		found := false
-		for _, child := range p.client.FS.GetChildren(current) {
+		for _, child := range children {
 			if child.GetName() == part {
 				current = child
 				found = true
