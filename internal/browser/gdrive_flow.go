@@ -88,6 +88,9 @@ func GDriveSubmitPassword(s *Session, password string) (*GDriveStep, error) {
 	shot, _ := screenshotOrFull(s, screenshotArea)
 	currentURL, _ := s.CurrentURL() // detect verification type via URL (reliable in headless=new)
 	fmt.Printf("GDriveSubmitPassword: url=%s\n", currentURL)
+	if strings.Contains(currentURL, "signin/rejected") {
+		return nil, fmt.Errorf("google rejected sign-in (bad password or security block): %s", currentURL)
+	}
 	if strings.Contains(currentURL, "challenge/ipp") || strings.Contains(currentURL, "challenge/sms") ||
 		strings.Contains(currentURL, "challenge/phone") {
 		return &GDriveStep{ // SMS/phone code verification
@@ -173,7 +176,8 @@ func gdriveDetectConsentOrDone(s *Session) (*GDriveStep, error) {
 }
 
 func gdriveIsCallback(url string) bool {
-	return strings.Contains(url, "localhost:8085") || strings.Contains(url, "urn:ietf:wg:oauth:2.0:oob")
+	// Must start with callback URL — not just contain it (avoid false match on redirect_uri param)
+	return strings.HasPrefix(url, "http://localhost:8085") || strings.Contains(url, "urn:ietf:wg:oauth:2.0:oob")
 }
 
 func screenshotOrFull(s *Session, selector string) (string, error) {
