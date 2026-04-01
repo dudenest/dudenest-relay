@@ -31,7 +31,6 @@ func NewSession(id, display string) (*Session, error) {
 		chromedp.NoDefaultBrowserCheck,
 		chromedp.Flag("no-sandbox", true),                               // required for root
 		chromedp.Flag("disable-dev-shm-usage", true),                   // avoid /dev/shm OOM
-		chromedp.Flag("disable-setuid-sandbox", true),
 		chromedp.Flag("disable-blink-features", "AutomationControlled"), // hide navigator.webdriver
 		chromedp.Flag("disable-infobars", true),
 		chromedp.Flag("disable-extensions", true),
