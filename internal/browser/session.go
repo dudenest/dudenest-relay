@@ -73,19 +73,25 @@ func (s *Session) ElementExists(selector string) bool {
 	return exists
 }
 
-// SendKeys types text into the element matching selector.
-// WaitVisible skipped — hangs on Google pages in headless=new; Navigate+Sleep(3s) ensures readiness.
+// SendKeys types text into an input field via JS — avoids chromedp DOM polling which hangs in headless=new.
+// Uses React-compatible native value setter + input/change events so framework picks up the change.
 func (s *Session) SendKeys(selector, text string) error {
-	return chromedp.Run(s.ctx,
-		chromedp.Click(selector, chromedp.ByQuery),
-		chromedp.SendKeys(selector, text, chromedp.ByQuery),
-	)
+	script := fmt.Sprintf(`(function(){
+		var el = document.querySelector(%q);
+		if(!el) return;
+		var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+		setter.call(el, %q);
+		el.dispatchEvent(new Event('input',{bubbles:true}));
+		el.dispatchEvent(new Event('change',{bubbles:true}));
+	})()`, selector, text)
+	return chromedp.Run(s.ctx, chromedp.Evaluate(script, nil))
 }
 
-// Click clicks the element matching selector.
-// WaitVisible skipped — hangs on Google pages in headless=new.
+// Click clicks an element via JS — avoids chromedp DOM polling which hangs in headless=new.
 func (s *Session) Click(selector string) error {
-	return chromedp.Run(s.ctx, chromedp.Click(selector, chromedp.ByQuery))
+	return chromedp.Run(s.ctx, chromedp.Evaluate(
+		fmt.Sprintf("(function(){var el=document.querySelector(%q);if(el)el.click();})()", selector), nil,
+	))
 }
 
 // WaitVisible waits up to timeout for selector to appear.
