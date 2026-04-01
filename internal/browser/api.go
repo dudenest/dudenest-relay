@@ -5,19 +5,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
+
+	"golang.org/x/oauth2"
 )
 
 // Server exposes browser auth sessions over HTTP for Flutter to consume.
 type Server struct {
 	mgr        *Manager
 	listenAddr string
-	oauthURL   string // Google OAuth2 authorization URL (built from client_id)
+	oauthURL   string        // Google OAuth2 authorization URL (built from client_id)
+	oauthCfg   *oauth2.Config // for token exchange after consent
+	configDir  string        // where to save tokens (~/.config/dudenest)
 }
 
 // NewServer creates an API server. display e.g. ":99", listenAddr e.g. "0.0.0.0:8086".
-func NewServer(display, listenAddr, oauthURL string) *Server {
-	return &Server{mgr: NewManager(display), listenAddr: listenAddr, oauthURL: oauthURL}
+func NewServer(display, listenAddr, oauthURL string, oauthCfg *oauth2.Config, configDir string) *Server {
+	return &Server{mgr: NewManager(display), listenAddr: listenAddr, oauthURL: oauthURL, oauthCfg: oauthCfg, configDir: configDir}
 }
 
 // Run starts the HTTP server (blocking).
@@ -144,6 +150,48 @@ func (srv *Server) handleClick(w http.ResponseWriter, r *http.Request) {
 	s, err := srv.mgr.Get(req.SessionID)
 	if err != nil {
 		jsonError(w, err.Error(), 404)
+		return
+	}
+	// Consent click: full OAuth flow — click + wait for callback + exchange code + save token
+	if strings.Contains(req.Selector, "submit_approve_access") {
+		callbackURL, err := GDriveApproveConsent(s)
+		if err != nil {
+			jsonError(w, "consent: "+err.Error(), 500)
+			return
+		}
+		parsed, err := url.Parse(callbackURL)
+		if err != nil {
+			jsonError(w, "parse callback URL: "+err.Error(), 500)
+			return
+		}
+		code := parsed.Query().Get("code")
+		if code == "" {
+			jsonError(w, "no code in callback URL: "+callbackURL, 500)
+			return
+		}
+		token, err := ExchangeCode(srv.oauthCfg, code)
+		if err != nil {
+			jsonError(w, "token exchange: "+err.Error(), 500)
+			return
+		}
+		email, err := GetEmailFromToken(srv.oauthCfg, token)
+		if err != nil {
+			email = "unknown@gmail.com" // non-fatal: token works even without email
+		}
+		gt := &GDriveToken{
+			AccessToken:  token.AccessToken,
+			TokenType:    token.TokenType,
+			RefreshToken: token.RefreshToken,
+			Expiry:       token.Expiry,
+			Email:        email,
+			ProviderID:   "gdrive_" + fmt.Sprintf("%d", time.Now().UnixMilli()),
+		}
+		if err := SaveToken(srv.configDir, gt.ProviderID, gt); err != nil {
+			jsonError(w, "save token: "+err.Error(), 500)
+			return
+		}
+		srv.mgr.Close(req.SessionID)
+		jsonOK(w, stepResp{Status: "done", Fields: []Field{{ID: "email", Label: email}}})
 		return
 	}
 	if err := s.Click(req.Selector); err != nil {

@@ -31,7 +31,7 @@ func serveAuthCmd() *cobra.Command {
 			}
 			cfg := browser.BuildOAuthConfig(cs)
 			oauthURL := browser.BuildAuthURL(cfg)
-			srv := browser.NewServer(authDisplay, authListenAddr, oauthURL)
+			srv := browser.NewServer(authDisplay, authListenAddr, oauthURL, cfg, authConfigDir)
 			fmt.Printf("OAuth2 URL: %s\n", oauthURL)
 			return srv.Run()
 		},
