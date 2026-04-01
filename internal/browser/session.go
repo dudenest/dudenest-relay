@@ -54,17 +54,23 @@ func (s *Session) Navigate(url string) error {
 }
 
 // Screenshot captures a PNG of the element matching selector.
-// Falls back to full-page screenshot if selector not found.
+// WaitVisible skipped — falls back to full-page immediately on error.
 func (s *Session) Screenshot(selector string) ([]byte, error) {
 	var buf []byte
-	err := chromedp.Run(s.ctx,
-		chromedp.WaitVisible(selector, chromedp.ByQuery),
-		chromedp.Screenshot(selector, &buf, chromedp.NodeVisible, chromedp.ByQuery),
-	)
+	err := chromedp.Run(s.ctx, chromedp.Screenshot(selector, &buf, chromedp.NodeVisible, chromedp.ByQuery))
 	if err != nil { // Fallback: full page
 		err = chromedp.Run(s.ctx, chromedp.FullScreenshot(&buf, 90))
 	}
 	return buf, err
+}
+
+// ElementExists returns true if selector matches at least one DOM element.
+func (s *Session) ElementExists(selector string) bool {
+	var exists bool
+	chromedp.Run(s.ctx, chromedp.Evaluate( //nolint:errcheck
+		fmt.Sprintf("document.querySelector(%q) !== null", selector), &exists,
+	))
+	return exists
 }
 
 // SendKeys types text into the element matching selector.

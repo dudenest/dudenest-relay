@@ -53,6 +53,7 @@ func GDriveStartFlow(s *Session, oauthURL string) (*GDriveStep, error) {
 }
 
 // GDriveSubmitEmail types the email, clicks Next, returns password step.
+// Uses Sleep(3s) instead of WaitVisible — WaitVisible hangs in headless=new on Google pages.
 func GDriveSubmitEmail(s *Session, email string) (*GDriveStep, error) {
 	if err := s.SendKeys(SelectorEmail, email); err != nil {
 		return nil, fmt.Errorf("type email: %w", err)
@@ -60,13 +61,8 @@ func GDriveSubmitEmail(s *Session, email string) (*GDriveStep, error) {
 	if err := s.Click(selEmailNext); err != nil {
 		return nil, fmt.Errorf("click next: %w", err)
 	}
-	if err := s.WaitVisible(SelectorPassword, 10*time.Second); err != nil {
-		return nil, fmt.Errorf("password field not found: %w", err)
-	}
-	shot, err := screenshotOrFull(s, screenshotArea)
-	if err != nil {
-		return nil, err
-	}
+	time.Sleep(3 * time.Second)
+	shot, _ := screenshotOrFull(s, screenshotArea)
 	return &GDriveStep{
 		Fields:        []Field{{ID: "password", Selector: SelectorPassword, Type: "password", Label: "Hasło"}},
 		ScreenshotB64: shot,
@@ -82,9 +78,9 @@ func GDriveSubmitPassword(s *Session, password, oauthURL string) (*GDriveStep, e
 	if err := s.Click(selPasswordNext); err != nil {
 		return nil, fmt.Errorf("click next: %w", err)
 	}
-	time.Sleep(2 * time.Second)
+	time.Sleep(3 * time.Second) // wait for page transition after password submit
 	shot, _ := screenshotOrFull(s, screenshotArea)
-	if err := s.WaitVisible(sel2FA, 3*time.Second); err == nil {
+	if s.ElementExists(sel2FA) { // 2FA field detected via JS — no WaitVisible (hangs in headless=new)
 		return &GDriveStep{
 			Fields:        []Field{{ID: "2fa_code", Selector: sel2FA, Type: "number", Label: "Kod weryfikacyjny"}},
 			ScreenshotB64: shot,
@@ -136,7 +132,7 @@ func gdriveDetectConsentOrDone(s *Session) (*GDriveStep, error) {
 	if gdriveIsCallback(url) {
 		return &GDriveStep{Status: "done"}, nil
 	}
-	if err := s.WaitVisible(selConsent, 5*time.Second); err == nil {
+	if s.ElementExists(selConsent) { // consent button detected via JS — no WaitVisible
 		shot, _ := screenshotOrFull(s, `form`)
 		return &GDriveStep{
 			Fields:        []Field{{ID: "consent", Selector: selConsent, Type: "button", Label: "Zatwierdź dostęp"}},
