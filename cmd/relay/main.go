@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	gdriveconn "github.com/dudenest/dudenest-relay/internal/cloudconn/gdrive"
 	"github.com/dudenest/dudenest-relay/internal/cloudconn/local"
 	megaconn "github.com/dudenest/dudenest-relay/internal/cloudconn/mega"
 	"github.com/dudenest/dudenest-relay/internal/crypto"
@@ -18,14 +19,17 @@ import (
 )
 
 var (
-	masterKey    string
-	storePath    string
-	cloudPath    string
-	outputPath   string
-	provider     string
-	megaEmail    string
-	megaPassword string
-	megaBasePath string
+	masterKey        string
+	storePath        string
+	cloudPath        string
+	outputPath       string
+	provider         string
+	megaEmail        string
+	megaPassword     string
+	megaBasePath     string
+	gdriveTokenPath  string
+	gdriveSecretPath string
+	gdriveBasePath   string
 )
 
 func main() {
@@ -35,13 +39,17 @@ func main() {
 	}
 	root.PersistentFlags().StringVar(&masterKey, "key", "", "master key hex (32 bytes) or password")
 	root.PersistentFlags().StringVar(&storePath, "map-store", "/tmp/dudenest-maps", "path for FileMap storage")
-	root.PersistentFlags().StringVar(&provider, "provider", "local", "cloud provider: local, mega")
+	root.PersistentFlags().StringVar(&provider, "provider", "local", "cloud provider: local, mega, gdrive")
 	// local provider flags
 	root.PersistentFlags().StringVar(&cloudPath, "cloud-path", "/tmp/dudenest-blocks", "local cloud provider path")
 	// MEGA flags
 	root.PersistentFlags().StringVar(&megaEmail, "mega-email", "", "MEGA.nz account email")
 	root.PersistentFlags().StringVar(&megaPassword, "mega-password", "", "MEGA.nz account password")
 	root.PersistentFlags().StringVar(&megaBasePath, "mega-path", "dudenest-relay", "MEGA.nz base folder path")
+	// GDrive flags
+	root.PersistentFlags().StringVar(&gdriveTokenPath, "gdrive-token", "", "path to gdrive_<id>.json token file")
+	root.PersistentFlags().StringVar(&gdriveSecretPath, "gdrive-secret", "/root/.config/dudenest/gdrive_client_secret.json", "path to client_secret.json")
+	root.PersistentFlags().StringVar(&gdriveBasePath, "gdrive-path", "dudenest-relay", "Google Drive base folder name")
 
 	authCmd := &cobra.Command{Use: "auth", Short: "Authenticate cloud provider accounts"}
 	authCmd.AddCommand(authGDriveCmd())
@@ -69,6 +77,11 @@ func getCloud() (types.CloudProvider, error) {
 			return nil, fmt.Errorf("--mega-email and --mega-password required for mega provider")
 		}
 		return megaconn.New(megaEmail, megaPassword, megaBasePath)
+	case "gdrive":
+		if gdriveTokenPath == "" {
+			return nil, fmt.Errorf("--gdrive-token required for gdrive provider")
+		}
+		return gdriveconn.New(gdriveTokenPath, gdriveSecretPath, gdriveBasePath)
 	default: // "local"
 		return local.New(cloudPath), nil
 	}
