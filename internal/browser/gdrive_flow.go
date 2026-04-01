@@ -12,7 +12,7 @@ import (
 type GDriveStep struct {
 	Fields        []Field // Input fields to show in Flutter UI
 	ScreenshotB64 string  // Base64 PNG of the relevant page area
-	Status        string  // "needs_email"|"needs_password"|"needs_2fa"|"needs_consent"|"done"
+	Status        string  // "needs_email"|"needs_password"|"needs_phone"|"needs_sms"|"needs_2fa"|"needs_consent"|"done"|"error"
 }
 
 // Field describes one input the user needs to fill.
@@ -92,9 +92,22 @@ func GDriveSubmitPassword(s *Session, password, oauthURL string) (*GDriveStep, e
 	if strings.Contains(currentURL, "signin/rejected") {
 		return nil, fmt.Errorf("google rejected sign-in (security block or bad password)")
 	}
-	if strings.Contains(currentURL, "challenge/ipp") || strings.Contains(currentURL, "challenge/sms") ||
-		strings.Contains(currentURL, "challenge/phone") {
-		return &GDriveStep{ // SMS/phone verification
+	if strings.Contains(currentURL, "challenge/dp") { // device protection — requires approval on other device
+		return &GDriveStep{
+			Fields:        []Field{{ID: "device_approval", Selector: "", Type: "info", Label: "Zatwierdź logowanie na innym urządzeniu Google, następnie kliknij Dalej"}},
+			ScreenshotB64: shot,
+			Status:        "needs_device_approval",
+		}, nil
+	}
+	if strings.Contains(currentURL, "challenge/ipp/collect") || strings.Contains(currentURL, "challenge/ipp") {
+		return &GDriveStep{ // phone number entry — Google asks user to enter their phone number
+			Fields:        []Field{{ID: "phone_number", Selector: selPhoneNumber, Type: "tel", Label: "Numer telefonu (z kierunkowym, np. +48600123456)"}},
+			ScreenshotB64: shot,
+			Status:        "needs_phone",
+		}, nil
+	}
+	if strings.Contains(currentURL, "challenge/sms") || strings.Contains(currentURL, "challenge/phone") {
+		return &GDriveStep{ // SMS code entry
 			Fields:        []Field{{ID: "sms_code", Selector: selSMSCode, Type: "number", Label: "Kod SMS"}},
 			ScreenshotB64: shot,
 			Status:        "needs_sms",
@@ -142,6 +155,51 @@ func GDriveSubmitSMSCode(s *Session, code, oauthURL string) (*GDriveStep, error)
 		_ = s.Click(`button[type="button"]`) // generic fallback
 	}
 	time.Sleep(3 * time.Second)
+	if err := s.Navigate(oauthURL); err != nil {
+		return nil, fmt.Errorf("navigate oauth consent: %w", err)
+	}
+	return gdriveDetectConsentOrDone(s)
+}
+
+// GDriveSubmitPhone enters phone number on ipp/collect page and waits for SMS challenge.
+func GDriveSubmitPhone(s *Session, phone, oauthURL string) (*GDriveStep, error) {
+	if err := s.SendKeys(selPhoneNumber, phone); err != nil {
+		return nil, fmt.Errorf("type phone: %w", err)
+	}
+	if s.ElementExists(selPhoneNext) {
+		if err := s.Click(selPhoneNext); err != nil {
+			return nil, fmt.Errorf("click phone next: %w", err)
+		}
+	} else {
+		_ = s.Click(`button[type="button"]`) // generic fallback
+	}
+	time.Sleep(4 * time.Second)
+	shot, _ := screenshotOrFull(s, screenshotArea)
+	currentURL, _ := s.CurrentURL()
+	fmt.Printf("GDriveSubmitPhone: url=%s\n", currentURL)
+	if strings.Contains(currentURL, "challenge/sms") || strings.Contains(currentURL, "challenge/ipp") {
+		return &GDriveStep{
+			Fields:        []Field{{ID: "sms_code", Selector: selSMSCode, Type: "number", Label: "Kod SMS"}},
+			ScreenshotB64: shot,
+			Status:        "needs_sms",
+		}, nil
+	}
+	return &GDriveStep{ScreenshotB64: shot, Status: "needs_sms"}, nil // optimistic — SMS was likely sent
+}
+
+// GDriveApproveDevice polls current URL after device approval — user must approve on other device first.
+func GDriveApproveDevice(s *Session, oauthURL string) (*GDriveStep, error) {
+	time.Sleep(3 * time.Second)
+	currentURL, _ := s.CurrentURL()
+	shot, _ := screenshotOrFull(s, screenshotArea)
+	fmt.Printf("GDriveApproveDevice: url=%s\n", currentURL)
+	if strings.Contains(currentURL, "challenge/dp") { // still waiting
+		return &GDriveStep{
+			Fields:        []Field{{ID: "device_approval", Selector: "", Type: "info", Label: "Nadal czekam na zatwierdzenie na innym urządzeniu..."}},
+			ScreenshotB64: shot,
+			Status:        "needs_device_approval",
+		}, nil
+	}
 	if err := s.Navigate(oauthURL); err != nil {
 		return nil, fmt.Errorf("navigate oauth consent: %w", err)
 	}

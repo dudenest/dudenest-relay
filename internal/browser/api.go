@@ -116,7 +116,11 @@ func (srv *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 		step, err = GDriveSubmitEmail(s, req.Text)
 	case strings.Contains(req.Selector, "password"):
 		step, err = GDriveSubmitPassword(s, req.Text, srv.oauthURL)
-	case strings.Contains(req.Selector, "sms") || strings.Contains(req.Selector, "phone"):
+	case strings.Contains(req.Selector, "phone_number"):
+		step, err = GDriveSubmitPhone(s, req.Text, srv.oauthURL)
+	case strings.Contains(req.Selector, "device_approval"):
+		step, err = GDriveApproveDevice(s, srv.oauthURL)
+	case strings.Contains(req.Selector, "sms"):
 		step, err = GDriveSubmitSMSCode(s, req.Text, srv.oauthURL)
 	case strings.Contains(req.Selector, "tel") || strings.Contains(req.Selector, "totp"):
 		step, err = GDriveSubmit2FA(s, req.Text, srv.oauthURL)
