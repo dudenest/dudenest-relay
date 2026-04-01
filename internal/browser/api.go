@@ -115,11 +115,11 @@ func (srv *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 	case strings.Contains(req.Selector, "email"):
 		step, err = GDriveSubmitEmail(s, req.Text)
 	case strings.Contains(req.Selector, "password"):
-		step, err = GDriveSubmitPassword(s, req.Text, srv.oauthURL)
+		step, err = GDriveSubmitPassword(s, req.Text)
 	case strings.Contains(req.Selector, "sms") || strings.Contains(req.Selector, "phone"):
-		step, err = GDriveSubmitSMSCode(s, req.Text, srv.oauthURL)
+		step, err = GDriveSubmitSMSCode(s, req.Text)
 	case strings.Contains(req.Selector, "tel") || strings.Contains(req.Selector, "totp"):
-		step, err = GDriveSubmit2FA(s, req.Text, srv.oauthURL)
+		step, err = GDriveSubmit2FA(s, req.Text)
 	default:
 		if err2 := s.SendKeys(req.Selector, req.Text); err2 != nil {
 			jsonError(w, "sendkeys: "+err2.Error(), 500)

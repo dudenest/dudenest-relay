@@ -40,13 +40,13 @@ const (
 	screenshotArea   = `#view_container`
 )
 
-// GDriveStartFlow navigates to Google login and returns the email-input step.
-// Navigate+Sleep(3s) guarantees page load. WaitVisible is skipped — screenshot confirms element presence.
+// GDriveStartFlow navigates to oauthURL so Google handles the full flow (email→password→consent).
+// Navigate oauthURL directly — Google redirects to login, then auto-redirects to consent after auth.
 func GDriveStartFlow(s *Session, oauthURL string) (*GDriveStep, error) {
-	if err := s.Navigate("https://accounts.google.com"); err != nil {
-		return nil, fmt.Errorf("navigate google: %w", err)
+	if err := s.Navigate(oauthURL); err != nil {
+		return nil, fmt.Errorf("navigate oauth: %w", err)
 	}
-	shot, err := screenshotOrFull(s, "body") // full page — email field visible after 3s sleep
+	shot, err := screenshotOrFull(s, "body")
 	if err != nil {
 		return nil, fmt.Errorf("screenshot: %w", err)
 	}
@@ -75,8 +75,9 @@ func GDriveSubmitEmail(s *Session, email string) (*GDriveStep, error) {
 	}, nil
 }
 
-// GDriveSubmitPassword types password, clicks Next, detects 2FA or consent.
-func GDriveSubmitPassword(s *Session, password, oauthURL string) (*GDriveStep, error) {
+// GDriveSubmitPassword types password, clicks Next, detects 2FA/SMS or consent.
+// No Navigate(oauthURL) needed — flow started from oauthURL so Google auto-redirects to consent.
+func GDriveSubmitPassword(s *Session, password string) (*GDriveStep, error) {
 	if err := s.SendKeys(SelectorPassword, password); err != nil {
 		return nil, fmt.Errorf("type password: %w", err)
 	}
@@ -85,8 +86,8 @@ func GDriveSubmitPassword(s *Session, password, oauthURL string) (*GDriveStep, e
 	}
 	time.Sleep(3 * time.Second) // wait for page transition after password submit
 	shot, _ := screenshotOrFull(s, screenshotArea)
-	// Detect verification type via current URL keywords (more reliable than selector in headless=new)
-	currentURL, _ := s.CurrentURL()
+	currentURL, _ := s.CurrentURL() // detect verification type via URL (reliable in headless=new)
+	fmt.Printf("GDriveSubmitPassword: url=%s\n", currentURL)
 	if strings.Contains(currentURL, "challenge/ipp") || strings.Contains(currentURL, "challenge/sms") ||
 		strings.Contains(currentURL, "challenge/phone") {
 		return &GDriveStep{ // SMS/phone code verification
@@ -95,41 +96,33 @@ func GDriveSubmitPassword(s *Session, password, oauthURL string) (*GDriveStep, e
 			Status:        "needs_sms",
 		}, nil
 	}
-	if s.ElementExists(sel2FA) { // TOTP 2FA field detected via JS — no WaitVisible (hangs in headless=new)
+	if s.ElementExists(sel2FA) { // TOTP 2FA detected via JS — no WaitVisible (hangs in headless=new)
 		return &GDriveStep{
 			Fields:        []Field{{ID: "2fa_code", Selector: sel2FA, Type: "number", Label: "Kod weryfikacyjny (TOTP)"}},
 			ScreenshotB64: shot,
 			Status:        "needs_2fa",
 		}, nil
 	}
-	if err := s.Navigate(oauthURL); err != nil {
-		return nil, fmt.Errorf("navigate oauth: %w", err)
-	}
 	return gdriveDetectConsentOrDone(s)
 }
 
-// GDriveSubmit2FA handles TOTP 2FA code submission, then navigates to consent.
-func GDriveSubmit2FA(s *Session, code, oauthURL string) (*GDriveStep, error) {
+// GDriveSubmit2FA handles TOTP 2FA code submission; Google auto-redirects to consent.
+func GDriveSubmit2FA(s *Session, code string) (*GDriveStep, error) {
 	if err := s.SendKeys(sel2FA, code); err != nil {
 		return nil, fmt.Errorf("type 2fa: %w", err)
 	}
 	if err := s.Click(sel2FANext); err != nil {
 		return nil, fmt.Errorf("click 2fa next: %w", err)
 	}
-	time.Sleep(2 * time.Second)
-	if err := s.Navigate(oauthURL); err != nil {
-		return nil, fmt.Errorf("navigate oauth: %w", err)
-	}
+	time.Sleep(3 * time.Second) // wait for Google to redirect after 2FA
 	return gdriveDetectConsentOrDone(s)
 }
 
-// GDriveSubmitSMSCode handles SMS verification code (sent to phone number).
-// Same input selector as TOTP but different Next button.
-func GDriveSubmitSMSCode(s *Session, code, oauthURL string) (*GDriveStep, error) {
+// GDriveSubmitSMSCode handles SMS verification code; Google auto-redirects to consent.
+func GDriveSubmitSMSCode(s *Session, code string) (*GDriveStep, error) {
 	if err := s.SendKeys(selSMSCode, code); err != nil {
 		return nil, fmt.Errorf("type sms code: %w", err)
 	}
-	// Try primary SMS next button; fall back to generic submit if not found
 	if s.ElementExists(selSMSNext) {
 		if err := s.Click(selSMSNext); err != nil {
 			return nil, fmt.Errorf("click sms next: %w", err)
@@ -137,10 +130,7 @@ func GDriveSubmitSMSCode(s *Session, code, oauthURL string) (*GDriveStep, error)
 	} else {
 		_ = s.Click(`button[type="button"]`) // generic fallback
 	}
-	time.Sleep(2 * time.Second)
-	if err := s.Navigate(oauthURL); err != nil {
-		return nil, fmt.Errorf("navigate oauth: %w", err)
-	}
+	time.Sleep(3 * time.Second)
 	return gdriveDetectConsentOrDone(s)
 }
 
