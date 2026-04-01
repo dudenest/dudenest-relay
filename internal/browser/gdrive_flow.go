@@ -152,6 +152,7 @@ func GDriveApproveConsent(s *Session) (string, error) {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		url, _ := s.CurrentURL()
+		fmt.Printf("GDriveApproveConsent: polling url=%s\n", url)
 		if gdriveIsCallback(url) {
 			return url, nil
 		}
@@ -165,6 +166,7 @@ func gdriveDetectConsentOrDone(s *Session) (*GDriveStep, error) {
 	if err != nil {
 		return nil, err
 	}
+	fmt.Printf("gdriveDetectConsentOrDone: url=%s consentExists=%v\n", url, s.ElementExists(selConsent))
 	if gdriveIsCallback(url) {
 		return &GDriveStep{Status: "done"}, nil
 	}
