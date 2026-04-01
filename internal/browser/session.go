@@ -19,9 +19,12 @@ type Session struct {
 	created  time.Time
 }
 
-// NewSession creates a Chromium session on a real X display (Xvfb :99 managed by xvfb-99.service).
+// NewSession creates a Chromium session on a real X display (TigerVNC :99 managed by tigervnc-99.service).
 // NOT headless — headless=new exposes "HeadlessChrome" in User-Agent which Google detects and blocks.
 // display parameter sets DISPLAY env var (e.g. ":99"). All sessions visible on that display via VNC.
+// Each session uses an isolated --user-data-dir=/tmp/relay-session-{id} to prevent Chromium singleton
+// delegation: without this, starting Chromium with an existing instance running (e.g. on :0) causes
+// the new window to appear on the existing instance's display instead of :99.
 func NewSession(id, display string) (*Session, error) {
 	opts := []chromedp.ExecAllocatorOption{
 		chromedp.NoFirstRun,
@@ -35,9 +38,10 @@ func NewSession(id, display string) (*Session, error) {
 		chromedp.Flag("mute-audio", true),
 		chromedp.Flag("window-size", "1280,1024"),
 		chromedp.Flag("window-position", "0,0"),
+		chromedp.Flag("user-data-dir", "/tmp/relay-session-"+id),       // isolated profile: prevents singleton delegation to :0
 		// Real UA: same as normal Chrome on Linux — NO "HeadlessChrome" word
 		chromedp.Flag("user-agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"),
-		chromedp.Env("DISPLAY="+display),                               // use Xvfb :99 (not headless)
+		chromedp.Env("DISPLAY="+display),                               // use TigerVNC :99 (not headless)
 		chromedp.ExecPath("chromium"),
 	}
 	allocCtx, allocCnl := chromedp.NewExecAllocator(context.Background(), opts...)
