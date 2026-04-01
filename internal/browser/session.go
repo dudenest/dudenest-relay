@@ -54,10 +54,12 @@ func (s *Session) Navigate(url string) error {
 }
 
 // Screenshot captures a PNG of the element matching selector.
-// WaitVisible skipped — falls back to full-page immediately on error.
+// Uses 2s timeout for element query — falls back to full-page if element not found (ByQuery retries otherwise).
 func (s *Session) Screenshot(selector string) ([]byte, error) {
 	var buf []byte
-	err := chromedp.Run(s.ctx, chromedp.Screenshot(selector, &buf, chromedp.NodeVisible, chromedp.ByQuery))
+	tctx, cancel := context.WithTimeout(s.ctx, 2*time.Second) // short timeout: ByQuery retries indefinitely
+	defer cancel()
+	err := chromedp.Run(tctx, chromedp.Screenshot(selector, &buf, chromedp.NodeVisible, chromedp.ByQuery))
 	if err != nil { // Fallback: full page
 		err = chromedp.Run(s.ctx, chromedp.FullScreenshot(&buf, 90))
 	}
