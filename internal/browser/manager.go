@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const sessionTimeout = 5 * time.Minute // Idle sessions auto-expire
+const sessionTimeout = 15 * time.Minute // Sessions auto-expire; keeps Chromium visible on :99 for visual inspection after auth
 
 // Manager manages browser sessions, one per auth flow.
 type Manager struct {

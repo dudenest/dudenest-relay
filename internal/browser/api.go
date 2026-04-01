@@ -33,6 +33,7 @@ func (srv *Server) Run() error {
 	mux.HandleFunc("/auth/input", srv.handleInput)
 	mux.HandleFunc("/auth/click", srv.handleClick)
 	mux.HandleFunc("/auth/status/", srv.handleStatus)
+	mux.HandleFunc("/auth/close/", srv.handleClose)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	fmt.Printf("browser-auth API listening on %s\n", srv.listenAddr)
 	return http.ListenAndServe(srv.listenAddr, mux)
@@ -135,9 +136,7 @@ func (srv *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), 500)
 		return
 	}
-	if step.Status == "done" {
-		srv.mgr.Close(req.SessionID)
-	}
+	// NOTE: session NOT closed on "done" — browser stays visible on :99 for visual inspection (auto-closes after 5min)
 	jsonOK(w, stepResp{Status: step.Status, Fields: step.Fields, ScreenshotB64: step.ScreenshotB64})
 }
 
@@ -194,7 +193,8 @@ func (srv *Server) handleClick(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "save token: "+err.Error(), 500)
 			return
 		}
-		srv.mgr.Close(req.SessionID)
+		// Navigate to Drive so :99 shows logged-in state for visual inspection; session auto-closes after 5min
+		_ = s.Navigate("https://drive.google.com")
 		jsonOK(w, stepResp{Status: "done", Fields: []Field{{ID: "email", Label: email}}})
 		return
 	}
@@ -213,6 +213,12 @@ func (srv *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, stepResp{Status: "active"})
+}
+
+func (srv *Server) handleClose(w http.ResponseWriter, r *http.Request) {
+	sid := strings.TrimPrefix(r.URL.Path, "/auth/close/")
+	srv.mgr.Close(sid)
+	jsonOK(w, stepResp{Status: "closed"})
 }
 
 func jsonOK(w http.ResponseWriter, v any) {
