@@ -23,14 +23,19 @@ type Field struct {
 	Label    string `json:"label"`    // Human-readable label for Flutter UI
 }
 
-// Google DOM selectors — updated 2026-03-31, may need maintenance if Google changes UI.
+// Google DOM selectors — updated 2026-04-01, may need maintenance if Google changes UI.
+// Verified with account chckbmkids@gmail.com on Chromium 146, headless=new.
 const (
 	SelectorEmail    = `input[type="email"]`
 	SelectorPassword = `input[type="password"]`
 	selEmailNext     = `#identifierNext`
 	selPasswordNext  = `#passwordNext`
-	sel2FA           = `input[type="tel"]`
-	sel2FANext       = `#totpNext`
+	sel2FA           = `input[type="tel"]`       // TOTP code input
+	sel2FANext       = `#totpNext`               // TOTP submit button
+	selSMSCode       = `input[type="tel"]`       // SMS code input (same selector as TOTP)
+	selSMSNext       = `#idvPreregisteredPhoneNext` // SMS submit — fallback: any button[type=button]
+	selPhoneNumber   = `input[type="tel"]`       // phone number entry (verify identity screen)
+	selPhoneNext     = `#idvPreregisteredPhoneNext`
 	selConsent       = `#submit_approve_access`
 	screenshotArea   = `#view_container`
 )
@@ -80,9 +85,19 @@ func GDriveSubmitPassword(s *Session, password, oauthURL string) (*GDriveStep, e
 	}
 	time.Sleep(3 * time.Second) // wait for page transition after password submit
 	shot, _ := screenshotOrFull(s, screenshotArea)
-	if s.ElementExists(sel2FA) { // 2FA field detected via JS — no WaitVisible (hangs in headless=new)
+	// Detect verification type via current URL keywords (more reliable than selector in headless=new)
+	currentURL, _ := s.CurrentURL()
+	if strings.Contains(currentURL, "challenge/ipp") || strings.Contains(currentURL, "challenge/sms") ||
+		strings.Contains(currentURL, "challenge/phone") {
+		return &GDriveStep{ // SMS/phone code verification
+			Fields:        []Field{{ID: "sms_code", Selector: selSMSCode, Type: "number", Label: "Kod SMS"}},
+			ScreenshotB64: shot,
+			Status:        "needs_sms",
+		}, nil
+	}
+	if s.ElementExists(sel2FA) { // TOTP 2FA field detected via JS — no WaitVisible (hangs in headless=new)
 		return &GDriveStep{
-			Fields:        []Field{{ID: "2fa_code", Selector: sel2FA, Type: "number", Label: "Kod weryfikacyjny"}},
+			Fields:        []Field{{ID: "2fa_code", Selector: sel2FA, Type: "number", Label: "Kod weryfikacyjny (TOTP)"}},
 			ScreenshotB64: shot,
 			Status:        "needs_2fa",
 		}, nil
@@ -93,13 +108,34 @@ func GDriveSubmitPassword(s *Session, password, oauthURL string) (*GDriveStep, e
 	return gdriveDetectConsentOrDone(s)
 }
 
-// GDriveSubmit2FA handles 2FA code submission, then navigates to consent.
+// GDriveSubmit2FA handles TOTP 2FA code submission, then navigates to consent.
 func GDriveSubmit2FA(s *Session, code, oauthURL string) (*GDriveStep, error) {
 	if err := s.SendKeys(sel2FA, code); err != nil {
 		return nil, fmt.Errorf("type 2fa: %w", err)
 	}
 	if err := s.Click(sel2FANext); err != nil {
 		return nil, fmt.Errorf("click 2fa next: %w", err)
+	}
+	time.Sleep(2 * time.Second)
+	if err := s.Navigate(oauthURL); err != nil {
+		return nil, fmt.Errorf("navigate oauth: %w", err)
+	}
+	return gdriveDetectConsentOrDone(s)
+}
+
+// GDriveSubmitSMSCode handles SMS verification code (sent to phone number).
+// Same input selector as TOTP but different Next button.
+func GDriveSubmitSMSCode(s *Session, code, oauthURL string) (*GDriveStep, error) {
+	if err := s.SendKeys(selSMSCode, code); err != nil {
+		return nil, fmt.Errorf("type sms code: %w", err)
+	}
+	// Try primary SMS next button; fall back to generic submit if not found
+	if s.ElementExists(selSMSNext) {
+		if err := s.Click(selSMSNext); err != nil {
+			return nil, fmt.Errorf("click sms next: %w", err)
+		}
+	} else {
+		_ = s.Click(`button[type="button"]`) // generic fallback
 	}
 	time.Sleep(2 * time.Second)
 	if err := s.Navigate(oauthURL); err != nil {
