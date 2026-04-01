@@ -19,22 +19,25 @@ type Session struct {
 	created  time.Time
 }
 
-// NewSession creates a Chromium session using --headless=new (no Xvfb needed).
-// DefaultExecAllocatorOptions contains old --headless; we build opts from scratch to avoid conflict.
-// display kept for API compat but unused in headless mode.
+// NewSession creates a Chromium session on a real X display (Xvfb :99 managed by xvfb-99.service).
+// NOT headless — headless=new exposes "HeadlessChrome" in User-Agent which Google detects and blocks.
+// display parameter sets DISPLAY env var (e.g. ":99"). All sessions visible on that display via VNC.
 func NewSession(id, display string) (*Session, error) {
 	opts := []chromedp.ExecAllocatorOption{
 		chromedp.NoFirstRun,
 		chromedp.NoDefaultBrowserCheck,
-		chromedp.Flag("headless", "new"),                                // new headless: full Chromium renderer
-		chromedp.Flag("no-sandbox", true),
-		chromedp.Flag("disable-gpu", true),
-		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.Flag("no-sandbox", true),                               // required for root
+		chromedp.Flag("disable-dev-shm-usage", true),                   // avoid /dev/shm OOM
 		chromedp.Flag("disable-setuid-sandbox", true),
-		chromedp.Flag("disable-blink-features", "AutomationControlled"), // reduce bot fingerprint
+		chromedp.Flag("disable-blink-features", "AutomationControlled"), // hide navigator.webdriver
+		chromedp.Flag("disable-infobars", true),
 		chromedp.Flag("disable-extensions", true),
 		chromedp.Flag("mute-audio", true),
-		chromedp.WindowSize(1280, 800),
+		chromedp.Flag("window-size", "1280,1024"),
+		chromedp.Flag("window-position", "0,0"),
+		// Real UA: same as normal Chrome on Linux — NO "HeadlessChrome" word
+		chromedp.Flag("user-agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"),
+		chromedp.Env("DISPLAY="+display),                               // use Xvfb :99 (not headless)
 		chromedp.ExecPath("chromium"),
 	}
 	allocCtx, allocCnl := chromedp.NewExecAllocator(context.Background(), opts...)
