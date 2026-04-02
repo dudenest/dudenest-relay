@@ -157,9 +157,13 @@ func (srv *Server) handleClick(w http.ResponseWriter, r *http.Request) {
 	}
 	// Consent click: full OAuth flow — click + wait for callback + exchange code + save token
 	if strings.Contains(req.Selector, "submit_approve_access") {
-		callbackURL, err := GDriveApproveConsent(s)
+		callbackURL, challenge, err := GDriveApproveConsent(s)
 		if err != nil {
 			jsonError(w, "consent: "+err.Error(), 500)
+			return
+		}
+		if challenge != nil { // intermediate challenge (phone/sms) — return to client
+			jsonOK(w, stepResp{Status: challenge.Status, Fields: challenge.Fields, ScreenshotB64: challenge.ScreenshotB64})
 			return
 		}
 		parsed, err := url.Parse(callbackURL)

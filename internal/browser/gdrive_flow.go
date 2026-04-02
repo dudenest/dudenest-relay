@@ -207,20 +207,22 @@ func GDriveApproveDevice(s *Session, oauthURL string) (*GDriveStep, error) {
 }
 
 // GDriveApproveConsent clicks the "Allow" button and polls for callback URL.
-// Handles accountchooser redirect that sometimes appears after consent click.
-func GDriveApproveConsent(s *Session) (string, error) {
+// Returns: (callbackURL, challengeStep, error)
+// - callbackURL non-empty: OAuth code ready for exchange
+// - challengeStep non-nil: intermediate challenge (phone/sms) needs user input
+func GDriveApproveConsent(s *Session) (string, *GDriveStep, error) {
 	if err := s.Click(selConsent); err != nil {
-		return "", fmt.Errorf("click consent: %w", err)
+		return "", nil, fmt.Errorf("click consent: %w", err)
 	}
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		url, _ := s.CurrentURL()
 		fmt.Printf("GDriveApproveConsent: polling url=%s\n", url)
 		if gdriveIsCallback(url) {
-			return url, nil
+			return url, nil, nil
 		}
 		if strings.Contains(url, "accountchooser") || strings.Contains(url, "AccountChooser") {
-			fmt.Printf("GDriveApproveConsent: account chooser after consent, clicking first account\n")
+			fmt.Printf("GDriveApproveConsent: account chooser, clicking first account\n")
 			_ = s.Click("div[data-identifier]")
 			time.Sleep(3 * time.Second)
 			continue
@@ -231,15 +233,25 @@ func GDriveApproveConsent(s *Session) (string, error) {
 			time.Sleep(3 * time.Second)
 			continue
 		}
-		if s.ElementExists(selConsent) { // consent button reappeared (re-click needed)
-			fmt.Printf("GDriveApproveConsent: consent button re-appeared, clicking again\n")
+		if strings.Contains(url, "challenge/ipp/collect") || strings.Contains(url, "challenge/ipp") {
+			shot, _ := screenshotOrFull(s, screenshotArea)
+			fmt.Printf("GDriveApproveConsent: phone challenge detected\n")
+			return "", &GDriveStep{Fields: []Field{{ID: "phone_number", Selector: selPhoneNumber, Type: "tel", Label: "Numer telefonu (z kierunkowym, np. +44...)"}}, ScreenshotB64: shot, Status: "needs_phone"}, nil
+		}
+		if strings.Contains(url, "challenge/sms") || strings.Contains(url, "challenge/phone") {
+			shot, _ := screenshotOrFull(s, screenshotArea)
+			fmt.Printf("GDriveApproveConsent: SMS challenge detected\n")
+			return "", &GDriveStep{Fields: []Field{{ID: "sms_code", Selector: selSMSCode, Type: "number", Label: "Kod SMS"}}, ScreenshotB64: shot, Status: "needs_sms"}, nil
+		}
+		if s.ElementExists(selConsent) {
+			fmt.Printf("GDriveApproveConsent: consent button re-appeared, re-clicking\n")
 			_ = s.Click(selConsent)
 			time.Sleep(2 * time.Second)
 			continue
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	return "", fmt.Errorf("callback URL not reached within 20s")
+	return "", nil, fmt.Errorf("callback URL not reached within 20s")
 }
 
 // gdriveDetectConsentOrDone resolves post-login state, auto-handling interstitial screens:
