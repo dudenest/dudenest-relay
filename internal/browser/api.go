@@ -157,13 +157,15 @@ func (srv *Server) handleClick(w http.ResponseWriter, r *http.Request) {
 	}
 	// Consent click: full OAuth flow — click + wait for callback + exchange code + save token
 	if strings.Contains(req.Selector, "submit_approve_access") {
-		// Start callback server BEFORE clicking consent — browser redirects to localhost:8085
+		// Bind :8085 synchronously BEFORE clicking — eliminates race where browser redirects before server is ready
 		type codeRes struct{ code string; err error }
 		codeCh := make(chan codeRes, 1)
-		go func() {
-			code, err := WaitForCallback(40 * time.Second)
-			codeCh <- codeRes{code, err}
-		}()
+		waitForCode, cbErr := StartCallbackServer(40 * time.Second)
+		if cbErr != nil {
+			jsonError(w, "callback server bind: "+cbErr.Error(), 500)
+			return
+		}
+		go func() { code, err := waitForCode(); codeCh <- codeRes{code, err} }()
 		callbackURL, challenge, err := GDriveApproveConsent(s)
 		if err != nil {
 			jsonError(w, "consent: "+err.Error(), 500)
