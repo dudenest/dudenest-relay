@@ -103,6 +103,21 @@ func (s *Session) TypeReal(selector, text string) error {
 	return chromedp.Run(ctx, chromedp.SendKeys(selector, text, chromedp.ByQuery))
 }
 
+// ClickNative clicks via CDP mouse events (not JS el.click()) — works on Google challenge pages
+// that ignore JS-initiated clicks. Uses 3s timeout to find the element.
+func (s *Session) ClickNative(selector string) error {
+	ctx, cancel := context.WithTimeout(s.ctx, 3*time.Second)
+	defer cancel()
+	return chromedp.Run(ctx, chromedp.Click(selector, chromedp.ByQuery))
+}
+
+// EvaluateResult executes JS and returns the string result (for debugging DOM state).
+func (s *Session) EvaluateResult(script string) string {
+	var result string
+	chromedp.Run(s.ctx, chromedp.Evaluate(script, &result)) //nolint:errcheck
+	return result
+}
+
 // Click clicks an element via JS — avoids chromedp DOM polling which hangs in headless=new.
 func (s *Session) Click(selector string) error {
 	return chromedp.Run(s.ctx, chromedp.Evaluate(
