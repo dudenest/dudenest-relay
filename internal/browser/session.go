@@ -95,6 +95,14 @@ func (s *Session) SendKeys(selector, text string) error {
 	return chromedp.Run(s.ctx, chromedp.Evaluate(script, nil))
 }
 
+// TypeReal simulates real keyboard typing (key events, not JS value setter). Use for
+// pages that ignore JS value changes (e.g. Google challenge/pwd confirmation page).
+func (s *Session) TypeReal(selector, text string) error {
+	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+	defer cancel()
+	return chromedp.Run(ctx, chromedp.SendKeys(selector, text, chromedp.ByQuery))
+}
+
 // Click clicks an element via JS — avoids chromedp DOM polling which hangs in headless=new.
 func (s *Session) Click(selector string) error {
 	return chromedp.Run(s.ctx, chromedp.Evaluate(

@@ -93,13 +93,10 @@ func GDriveSubmitPassword(s *Session, password, oauthURL string) (*GDriveStep, e
 		return nil, fmt.Errorf("google rejected sign-in (security block or bad password)")
 	}
 	if strings.Contains(currentURL, "challenge/pwd") { // "verify it's you" password re-confirmation on new device
-		fmt.Printf("GDriveSubmitPassword: pwd challenge, re-submitting password\n")
-		_ = s.SendKeys(SelectorPassword, password)
-		if s.ElementExists(selPasswordNext) {
-			_ = s.Click(selPasswordNext)
-		} else {
-			_ = s.Click(`button[type="submit"]`)
-		}
+		fmt.Printf("GDriveSubmitPassword: pwd challenge, re-submitting password via TypeReal\n")
+		_ = s.TypeReal(SelectorPassword, password) // real key events required — JS value setter ignored by Google
+		// Try multiple button selectors for challenge/pwd page
+		_ = s.Evaluate(`(function(){var btns=['#idvAggregateNext','#passwordNext','button[type="submit"]','div[role="button"]'];for(var i=0;i<btns.length;i++){var el=document.querySelector(btns[i]);if(el&&el.offsetParent!==null){el.click();return;}}})()`)
 		time.Sleep(5 * time.Second)
 		currentURL, _ = s.CurrentURL()
 		fmt.Printf("GDriveSubmitPassword: post-pwd-challenge url=%s\n", currentURL)
