@@ -363,7 +363,7 @@ func gdriveDetectConsentOrDone(s *Session) (*GDriveStep, error) {
 
 func gdriveIsCallback(url string) bool {
 	// Must start with callback URL — not just contain it (avoid false match on redirect_uri param)
-	return strings.HasPrefix(url, "http://localhost:8085") || strings.Contains(url, "urn:ietf:wg:oauth:2.0:oob")
+	return strings.HasPrefix(url, "http://127.0.0.1:8085") || strings.HasPrefix(url, "http://localhost:8085") || strings.Contains(url, "urn:ietf:wg:oauth:2.0:oob")
 }
 
 func screenshotOrFull(s *Session, selector string) (string, error) {

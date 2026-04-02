@@ -30,7 +30,7 @@ func StartCallbackServer(ctx context.Context, timeout time.Duration) (wait func(
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write([]byte(`<html><body><h2>Autoryzacja zakończona. Możesz zamknąć tę stronę.</h2></body></html>`))
 	})
-	ln, listenErr := net.Listen("tcp", fmt.Sprintf(":%d", callbackPort)) // bind port NOW (sync)
+	ln, listenErr := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", callbackPort)) // bind IPv4 only — Chrome may use ::1 for "localhost"
 	if listenErr != nil {
 		return nil, fmt.Errorf("callback server listen: %w", listenErr)
 	}
@@ -71,4 +71,4 @@ func WaitForCallback(timeout time.Duration) (string, error) {
 }
 
 // CallbackURL returns the redirect_uri to use in OAuth2 flow.
-func CallbackURL() string { return fmt.Sprintf("http://localhost:%d/oauth/callback", callbackPort) }
+func CallbackURL() string { return fmt.Sprintf("http://127.0.0.1:%d/oauth/callback", callbackPort) }
