@@ -325,7 +325,6 @@ func gdriveDetectConsentOrDone(s *Session) (*GDriveStep, error) {
 				time.Sleep(3 * time.Second)
 				continue
 			}
-			shot, _ := screenshotOrFull(s, screenshotArea)
 			fmt.Printf("gdriveDetectConsentOrDone: identifier page persists — session not established\n")
 			return nil, fmt.Errorf("google requires re-authentication (identifier page after login)")
 		}
