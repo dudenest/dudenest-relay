@@ -143,6 +143,8 @@ func GDriveSubmit2FA(s *Session, code, oauthURL string) (*GDriveStep, error) {
 }
 
 // GDriveSubmitSMSCode handles SMS verification code, then navigates to consent.
+// After clicking next, checks if browser already reached consent/callback (mid-consent flow)
+// to avoid re-navigating to oauthURL which would reset the phone challenge loop.
 func GDriveSubmitSMSCode(s *Session, code, oauthURL string) (*GDriveStep, error) {
 	if err := s.SendKeys(selSMSCode, code); err != nil {
 		return nil, fmt.Errorf("type sms code: %w", err)
@@ -155,6 +157,12 @@ func GDriveSubmitSMSCode(s *Session, code, oauthURL string) (*GDriveStep, error)
 		_ = s.Click(`button[type="button"]`) // generic fallback
 	}
 	time.Sleep(3 * time.Second)
+	currentURL, _ := s.CurrentURL()
+	fmt.Printf("GDriveSubmitSMSCode: post-sms url=%s\n", currentURL)
+	// If browser already redirected to consent/callback (mid-consent phone flow), don't re-navigate
+	if gdriveIsCallback(currentURL) || strings.Contains(currentURL, "signin/oauth/consent") || s.ElementExists(selConsent) {
+		return gdriveDetectConsentOrDone(s)
+	}
 	if err := s.Navigate(oauthURL); err != nil {
 		return nil, fmt.Errorf("navigate oauth consent: %w", err)
 	}
