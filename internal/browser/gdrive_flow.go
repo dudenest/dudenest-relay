@@ -92,6 +92,21 @@ func GDriveSubmitPassword(s *Session, password, oauthURL string) (*GDriveStep, e
 	if strings.Contains(currentURL, "signin/rejected") {
 		return nil, fmt.Errorf("google rejected sign-in (security block or bad password)")
 	}
+	if strings.Contains(currentURL, "challenge/pwd") { // "verify it's you" password re-confirmation on new device
+		fmt.Printf("GDriveSubmitPassword: pwd challenge, re-submitting password\n")
+		_ = s.SendKeys(SelectorPassword, password)
+		if s.ElementExists(selPasswordNext) {
+			_ = s.Click(selPasswordNext)
+		} else {
+			_ = s.Click(`button[type="submit"]`)
+		}
+		time.Sleep(5 * time.Second)
+		currentURL, _ = s.CurrentURL()
+		fmt.Printf("GDriveSubmitPassword: post-pwd-challenge url=%s\n", currentURL)
+		if strings.Contains(currentURL, "signin/rejected") {
+			return nil, fmt.Errorf("google rejected sign-in after pwd challenge")
+		}
+	}
 	if strings.Contains(currentURL, "challenge/dp") { // device protection — requires approval on other device
 		return &GDriveStep{
 			Fields:        []Field{{ID: "device_approval", Selector: "", Type: "info", Label: "Zatwierdź logowanie na innym urządzeniu Google, następnie kliknij Dalej"}},
@@ -303,6 +318,16 @@ func gdriveDetectConsentOrDone(s *Session) (*GDriveStep, error) {
 			shot, _ := screenshotOrFull(s, screenshotArea)
 			fmt.Printf("gdriveDetectConsentOrDone: phone challenge detected\n")
 			return &GDriveStep{Fields: []Field{{ID: "phone_number", Selector: selPhoneNumber, Type: "tel", Label: "Numer telefonu (z kierunkowym, np. +44...)"}}, ScreenshotB64: shot, Status: "needs_phone"}, nil
+		}
+		if strings.Contains(url, "v3/signin/identifier") { // Google requires re-login — session not established
+			if i < 2 {
+				fmt.Printf("gdriveDetectConsentOrDone[%d]: identifier page, waiting for redirect...\n", i)
+				time.Sleep(3 * time.Second)
+				continue
+			}
+			shot, _ := screenshotOrFull(s, screenshotArea)
+			fmt.Printf("gdriveDetectConsentOrDone: identifier page persists — session not established\n")
+			return nil, fmt.Errorf("google requires re-authentication (identifier page after login)")
 		}
 		if s.ElementExists(selConsent) { // consent button detected via JS
 			shot, _ := screenshotOrFull(s, `form`)
