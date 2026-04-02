@@ -223,22 +223,45 @@ func GDriveApproveConsent(s *Session) (string, error) {
 	return "", fmt.Errorf("callback URL not reached within 10s")
 }
 
+// gdriveDetectConsentOrDone resolves post-login state, auto-handling interstitial screens:
+// 1. Account chooser (accountchooser in URL) — clicks first account div[data-identifier]
+// 2. "App not verified" (app_not_verified in URL) — clicks Continue via JS text match
+// 3. Callback URL — done
+// 4. Consent page — needs_consent
 func gdriveDetectConsentOrDone(s *Session) (*GDriveStep, error) {
-	url, err := s.CurrentURL()
-	if err != nil {
-		return nil, err
-	}
-	fmt.Printf("gdriveDetectConsentOrDone: url=%s consentExists=%v\n", url, s.ElementExists(selConsent))
-	if gdriveIsCallback(url) {
-		return &GDriveStep{Status: "done"}, nil
-	}
-	if s.ElementExists(selConsent) { // consent button detected via JS — no WaitVisible
-		shot, _ := screenshotOrFull(s, `form`)
-		return &GDriveStep{
-			Fields:        []Field{{ID: "consent", Selector: selConsent, Type: "button", Label: "Zatwierdź dostęp"}},
-			ScreenshotB64: shot,
-			Status:        "needs_consent",
-		}, nil
+	for i := 0; i < 6; i++ { // up to 6 iterations to pass through interstitials
+		url, err := s.CurrentURL()
+		if err != nil {
+			return nil, err
+		}
+		fmt.Printf("gdriveDetectConsentOrDone[%d]: url=%s\n", i, url)
+		if gdriveIsCallback(url) {
+			return &GDriveStep{Status: "done"}, nil
+		}
+		// Account chooser — auto-click first account
+		if strings.Contains(url, "accountchooser") || strings.Contains(url, "AccountChooser") {
+			fmt.Printf("gdriveDetectConsentOrDone: account chooser detected, clicking first account\n")
+			_ = s.Click("div[data-identifier]")
+			time.Sleep(4 * time.Second)
+			continue
+		}
+		// "App not verified" warning — auto-click Continue (not "Back to safety")
+		if strings.Contains(url, "app_not_verified") || strings.Contains(url, "not_verified") {
+			fmt.Printf("gdriveDetectConsentOrDone: app_not_verified screen, clicking Continue\n")
+			// JS: find button/link with text "Continue" — avoids clicking "Back to safety"
+			_ = s.Evaluate(`(function(){var els=document.querySelectorAll('button,a[href]');for(var i=0;i<els.length;i++){if(els[i].textContent.trim()==='Continue'){els[i].click();return;}}})()`)
+			time.Sleep(3 * time.Second)
+			continue
+		}
+		if s.ElementExists(selConsent) { // consent button detected via JS
+			shot, _ := screenshotOrFull(s, `form`)
+			return &GDriveStep{
+				Fields:        []Field{{ID: "consent", Selector: selConsent, Type: "button", Label: "Zatwierdź dostęp"}},
+				ScreenshotB64: shot,
+				Status:        "needs_consent",
+			}, nil
+		}
+		time.Sleep(2 * time.Second) // page still loading — retry
 	}
 	shot, _ := screenshotOrFull(s, screenshotArea)
 	return &GDriveStep{ScreenshotB64: shot, Status: "needs_consent"}, nil

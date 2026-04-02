@@ -102,6 +102,11 @@ func (s *Session) Click(selector string) error {
 	))
 }
 
+// Evaluate executes arbitrary JS (fire-and-forget, result discarded).
+func (s *Session) Evaluate(script string) error {
+	return chromedp.Run(s.ctx, chromedp.Evaluate(script, nil))
+}
+
 // WaitVisible waits up to timeout for selector to appear.
 func (s *Session) WaitVisible(selector string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(s.ctx, timeout)
