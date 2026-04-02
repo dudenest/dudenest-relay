@@ -159,7 +159,14 @@ func GDriveSubmitSMSCode(s *Session, code, oauthURL string) (*GDriveStep, error)
 	time.Sleep(3 * time.Second)
 	currentURL, _ := s.CurrentURL()
 	fmt.Printf("GDriveSubmitSMSCode: post-sms url=%s\n", currentURL)
-	// If browser already redirected to consent/callback (mid-consent phone flow), don't re-navigate
+	// "App not verified" warning — click Continue to reach consent without re-navigating
+	if strings.Contains(currentURL, "signin/oauth/warning") || strings.Contains(currentURL, "oauth/warning") {
+		fmt.Printf("GDriveSubmitSMSCode: app warning detected, clicking Continue\n")
+		_ = s.Evaluate(`(function(){var els=document.querySelectorAll('button,a[href]');for(var i=0;i<els.length;i++){if(els[i].textContent.trim()==='Continue'){els[i].click();return;}}})()`)
+		time.Sleep(3 * time.Second)
+		return gdriveDetectConsentOrDone(s)
+	}
+	// Already on consent/callback — don't re-navigate (would lose phone verification trust)
 	if gdriveIsCallback(currentURL) || strings.Contains(currentURL, "signin/oauth/consent") || s.ElementExists(selConsent) {
 		return gdriveDetectConsentOrDone(s)
 	}
@@ -291,6 +298,11 @@ func gdriveDetectConsentOrDone(s *Session) (*GDriveStep, error) {
 			_ = s.Evaluate(`(function(){var els=document.querySelectorAll('button,a[href]');for(var i=0;i<els.length;i++){if(els[i].textContent.trim()==='Continue'){els[i].click();return;}}})()`)
 			time.Sleep(3 * time.Second)
 			continue
+		}
+		if strings.Contains(url, "challenge/ipp/collect") || strings.Contains(url, "challenge/ipp") {
+			shot, _ := screenshotOrFull(s, screenshotArea)
+			fmt.Printf("gdriveDetectConsentOrDone: phone challenge detected\n")
+			return &GDriveStep{Fields: []Field{{ID: "phone_number", Selector: selPhoneNumber, Type: "tel", Label: "Numer telefonu (z kierunkowym, np. +44...)"}}, ScreenshotB64: shot, Status: "needs_phone"}, nil
 		}
 		if s.ElementExists(selConsent) { // consent button detected via JS
 			shot, _ := screenshotOrFull(s, `form`)
