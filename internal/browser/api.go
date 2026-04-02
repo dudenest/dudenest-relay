@@ -2,6 +2,7 @@
 package browser
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -157,10 +158,13 @@ func (srv *Server) handleClick(w http.ResponseWriter, r *http.Request) {
 	}
 	// Consent click: full OAuth flow — click + wait for callback + exchange code + save token
 	if strings.Contains(req.Selector, "submit_approve_access") {
-		// Bind :8085 synchronously BEFORE clicking — eliminates race where browser redirects before server is ready
+		// Bind :8085 synchronously BEFORE clicking — eliminates race where browser redirects before server is ready.
+		// defer cancel() ensures port is freed when this handler returns (success or error).
 		type codeRes struct{ code string; err error }
 		codeCh := make(chan codeRes, 1)
-		waitForCode, cbErr := StartCallbackServer(40 * time.Second)
+		cbCtx, cancelCallback := context.WithCancel(r.Context())
+		defer cancelCallback() // frees :8085 immediately when handler returns
+		waitForCode, cbErr := StartCallbackServer(cbCtx, 40*time.Second)
 		if cbErr != nil {
 			jsonError(w, "callback server bind: "+cbErr.Error(), 500)
 			return
