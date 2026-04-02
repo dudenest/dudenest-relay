@@ -207,20 +207,39 @@ func GDriveApproveDevice(s *Session, oauthURL string) (*GDriveStep, error) {
 }
 
 // GDriveApproveConsent clicks the "Allow" button and polls for callback URL.
+// Handles accountchooser redirect that sometimes appears after consent click.
 func GDriveApproveConsent(s *Session) (string, error) {
 	if err := s.Click(selConsent); err != nil {
 		return "", fmt.Errorf("click consent: %w", err)
 	}
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		url, _ := s.CurrentURL()
 		fmt.Printf("GDriveApproveConsent: polling url=%s\n", url)
 		if gdriveIsCallback(url) {
 			return url, nil
 		}
+		if strings.Contains(url, "accountchooser") || strings.Contains(url, "AccountChooser") {
+			fmt.Printf("GDriveApproveConsent: account chooser after consent, clicking first account\n")
+			_ = s.Click("div[data-identifier]")
+			time.Sleep(3 * time.Second)
+			continue
+		}
+		if strings.Contains(url, "app_not_verified") || strings.Contains(url, "not_verified") {
+			fmt.Printf("GDriveApproveConsent: app_not_verified, clicking Continue\n")
+			_ = s.Evaluate(`(function(){var els=document.querySelectorAll('button,a[href]');for(var i=0;i<els.length;i++){if(els[i].textContent.trim()==='Continue'){els[i].click();return;}}})()`)
+			time.Sleep(3 * time.Second)
+			continue
+		}
+		if s.ElementExists(selConsent) { // consent button reappeared (re-click needed)
+			fmt.Printf("GDriveApproveConsent: consent button re-appeared, clicking again\n")
+			_ = s.Click(selConsent)
+			time.Sleep(2 * time.Second)
+			continue
+		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	return "", fmt.Errorf("callback URL not reached within 10s")
+	return "", fmt.Errorf("callback URL not reached within 20s")
 }
 
 // gdriveDetectConsentOrDone resolves post-login state, auto-handling interstitial screens:
