@@ -70,14 +70,5 @@ func WaitForCallback(timeout time.Duration) (string, error) {
 	return wait()
 }
 
-// WaitForCallback is kept for backward compatibility — wraps StartCallbackServer.
-func WaitForCallback(timeout time.Duration) (string, error) {
-	wait, err := StartCallbackServer(timeout)
-	if err != nil {
-		return "", err
-	}
-	return wait()
-}
-
 // CallbackURL returns the redirect_uri to use in OAuth2 flow.
 func CallbackURL() string { return fmt.Sprintf("http://localhost:%d/oauth/callback", callbackPort) }
