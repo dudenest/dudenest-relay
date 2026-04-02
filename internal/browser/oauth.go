@@ -18,17 +18,18 @@ type CallbackResult struct {
 }
 
 // WaitForCallback starts a one-shot HTTP server on :8085 and returns the OAuth2 code.
-// Blocks until callback received or timeout.
+// Blocks until callback received or timeout. Uses fresh ServeMux each call — safe for multiple calls.
 func WaitForCallback(timeout time.Duration) (string, error) {
 	ch := make(chan CallbackResult, 1)
-	srv := &http.Server{Addr: fmt.Sprintf(":%d", callbackPort)}
-	http.HandleFunc("/oauth/callback", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux() // fresh mux — avoids "pattern already registered" panic on second call
+	mux.HandleFunc("/oauth/callback", func(w http.ResponseWriter, r *http.Request) {
 		code := r.URL.Query().Get("code")
 		errMsg := r.URL.Query().Get("error")
 		ch <- CallbackResult{Code: code, Error: errMsg}
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write([]byte(`<html><body><h2>Autoryzacja zakończona. Możesz zamknąć tę stronę.</h2></body></html>`))
 	})
+	srv := &http.Server{Addr: fmt.Sprintf(":%d", callbackPort), Handler: mux}
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", callbackPort))
 	if err != nil {
 		return "", fmt.Errorf("callback server listen: %w", err)
