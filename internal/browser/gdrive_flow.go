@@ -276,9 +276,9 @@ func GDriveApproveConsent(s *Session) (string, *GDriveStep, error) {
 			time.Sleep(3 * time.Second)
 			continue
 		}
-		if strings.Contains(url, "app_not_verified") || strings.Contains(url, "not_verified") {
-			fmt.Printf("GDriveApproveConsent: app_not_verified, clicking Continue\n")
-			_ = s.Evaluate(`(function(){var els=document.querySelectorAll('button,a[href]');for(var i=0;i<els.length;i++){if(els[i].textContent.trim()==='Continue'){els[i].click();return;}}})()`)
+		if strings.Contains(url, "app_not_verified") || strings.Contains(url, "not_verified") || strings.Contains(url, "signin/oauth/warning") {
+			fmt.Printf("GDriveApproveConsent: app warning page, clicking Continue\n")
+			_ = s.Evaluate(`(function(){var els=document.querySelectorAll('button,a[href]');for(var i=0;i<els.length;i++){var t=els[i].textContent.trim();if(t==='Continue'||t==='Dalej'||t==='Kontynuuj'){els[i].click();return;}}})()`)
 			time.Sleep(3 * time.Second)
 			continue
 		}
