@@ -93,15 +93,34 @@ func GDriveSubmitPassword(s *Session, password, oauthURL string) (*GDriveStep, e
 		return nil, fmt.Errorf("google rejected sign-in (security block or bad password)")
 	}
 	if strings.Contains(currentURL, "challenge/pwd") { // "verify it's you" password re-confirmation on new device
-		fmt.Printf("GDriveSubmitPassword: pwd challenge, re-submitting password via TypeReal\n")
-		_ = s.TypeReal(SelectorPassword, password) // real key events required — JS value setter ignored by Google
-		// Try multiple button selectors for challenge/pwd page
-		_ = s.Evaluate(`(function(){var btns=['#idvAggregateNext','#passwordNext','button[type="submit"]','div[role="button"]'];for(var i=0;i<btns.length;i++){var el=document.querySelector(btns[i]);if(el&&el.offsetParent!==null){el.click();return;}}})()`)
-		time.Sleep(5 * time.Second)
+		fmt.Printf("GDriveSubmitPassword: pwd challenge detected\n")
+		// Click to focus input, then set value + dispatch keyboard Enter key
+		_ = s.Click(SelectorPassword)
+		time.Sleep(300 * time.Millisecond)
+		errT := s.TypeReal(SelectorPassword, password)
+		fmt.Printf("GDriveSubmitPassword: TypeReal error=%v\n", errT)
+		// Also set via JS + dispatch Enter key (belt-and-suspenders)
+		_ = s.Evaluate(fmt.Sprintf(`(function(){
+			var inp=document.querySelector(%q);if(!inp)return;
+			var setter=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+			setter.call(inp,%q);
+			['input','change'].forEach(function(t){inp.dispatchEvent(new Event(t,{bubbles:true}));});
+			inp.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',keyCode:13,bubbles:true,cancelable:true}));
+			inp.dispatchEvent(new KeyboardEvent('keyup',{key:'Enter',keyCode:13,bubbles:true}));
+		})()`, SelectorPassword, password))
+		time.Sleep(500 * time.Millisecond)
+		// Click visible button (any selector that matches)
+		_ = s.Evaluate(`(function(){var ss=['#idvAggregateNext','#passwordNext','[data-idom-class*="next"]','button[type="submit"]','div[role="button"]'];for(var i=0;i<ss.length;i++){var el=document.querySelector(ss[i]);if(el&&el.getBoundingClientRect().height>0){el.click();return;}}})()`)
+		time.Sleep(6 * time.Second)
 		currentURL, _ = s.CurrentURL()
 		fmt.Printf("GDriveSubmitPassword: post-pwd-challenge url=%s\n", currentURL)
 		if strings.Contains(currentURL, "signin/rejected") {
 			return nil, fmt.Errorf("google rejected sign-in after pwd challenge")
+		}
+		if strings.Contains(currentURL, "challenge/pwd") {
+			// Still on challenge/pwd — return it as user-facing step
+			fmt.Printf("GDriveSubmitPassword: pwd challenge persists, returning to user\n")
+			return &GDriveStep{Fields: []Field{{ID: "password", Selector: SelectorPassword, Type: "password", Label: "Potwierdź hasło (weryfikacja Google)"}}, ScreenshotB64: shot, Status: "needs_password"}, nil
 		}
 	}
 	if strings.Contains(currentURL, "challenge/dp") { // device protection — requires approval on other device
