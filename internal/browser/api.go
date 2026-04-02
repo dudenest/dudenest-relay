@@ -157,6 +157,13 @@ func (srv *Server) handleClick(w http.ResponseWriter, r *http.Request) {
 	}
 	// Consent click: full OAuth flow — click + wait for callback + exchange code + save token
 	if strings.Contains(req.Selector, "submit_approve_access") {
+		// Start callback server BEFORE clicking consent — browser redirects to localhost:8085
+		type codeRes struct{ code string; err error }
+		codeCh := make(chan codeRes, 1)
+		go func() {
+			code, err := WaitForCallback(40 * time.Second)
+			codeCh <- codeRes{code, err}
+		}()
 		callbackURL, challenge, err := GDriveApproveConsent(s)
 		if err != nil {
 			jsonError(w, "consent: "+err.Error(), 500)
@@ -166,12 +173,31 @@ func (srv *Server) handleClick(w http.ResponseWriter, r *http.Request) {
 			jsonOK(w, stepResp{Status: challenge.Status, Fields: challenge.Fields, ScreenshotB64: challenge.ScreenshotB64})
 			return
 		}
-		parsed, err := url.Parse(callbackURL)
-		if err != nil {
-			jsonError(w, "parse callback URL: "+err.Error(), 500)
-			return
+		// Get code — prefer callback server (handles ERR_CONNECTION_REFUSED case), fallback to URL
+		var code string
+		select {
+		case res := <-codeCh:
+			if res.err != nil {
+				jsonError(w, "callback server: "+res.err.Error(), 500)
+				return
+			}
+			code = res.code
+		default: // callback server not yet received — try URL
+			parsed, err := url.Parse(callbackURL)
+			if err != nil {
+				jsonError(w, "parse callback URL: "+err.Error(), 500)
+				return
+			}
+			code = parsed.Query().Get("code")
 		}
-		code := parsed.Query().Get("code")
+		if code == "" { // wait for callback server as last resort
+			res := <-codeCh
+			if res.err != nil {
+				jsonError(w, "callback: "+res.err.Error(), 500)
+				return
+			}
+			code = res.code
+		}
 		if code == "" {
 			jsonError(w, "no code in callback URL: "+callbackURL, 500)
 			return
