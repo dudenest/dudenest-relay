@@ -116,19 +116,25 @@ func (fs *fileServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
-	tmp, err := os.CreateTemp("", "relay-upload-*-"+header.Filename)
+	tmpDir, err := os.MkdirTemp("", "relay-upload-*") // unique dir → file named as original
+	if err != nil {
+		jsonErr(w, "tmp dir: "+err.Error(), 500)
+		return
+	}
+	defer os.RemoveAll(tmpDir)
+	tmpPath := filepath.Join(tmpDir, header.Filename)
+	tmp, err := os.Create(tmpPath)
 	if err != nil {
 		jsonErr(w, "tmp file: "+err.Error(), 500)
 		return
 	}
-	defer os.Remove(tmp.Name())
 	if _, err := io.Copy(tmp, f); err != nil {
 		tmp.Close()
 		jsonErr(w, "write tmp: "+err.Error(), 500)
 		return
 	}
 	tmp.Close()
-	fm, err := fs.p.Upload(tmp.Name())
+	fm, err := fs.p.Upload(tmpPath)
 	if err != nil {
 		jsonErr(w, "upload: "+err.Error(), 500)
 		return
