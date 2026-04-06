@@ -52,7 +52,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	mux.HandleFunc("/files/", fs.handleFile)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }) //nolint:errcheck
 	fmt.Printf("relay serve listening on %s (provider: %s)\n", serveListen, provider)
-	return http.ListenAndServe(serveListen, mux)
+	return http.ListenAndServe(serveListen, corsMiddleware(mux))
 }
 
 // fileServer handles /files/* endpoints using the pipeline.
@@ -174,6 +174,20 @@ func (fs *fileServer) handleDelete(w http.ResponseWriter, r *http.Request, fileI
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "file_id": fileID}) //nolint:errcheck
+}
+
+// corsMiddleware adds CORS headers for Flutter web clients.
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func jsonErr(w http.ResponseWriter, msg string, code int) {
