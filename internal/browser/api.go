@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -35,6 +37,7 @@ func (srv *Server) Run() error {
 	mux.HandleFunc("/auth/click", srv.handleClick)
 	mux.HandleFunc("/auth/status/", srv.handleStatus)
 	mux.HandleFunc("/auth/close/", srv.handleClose)
+	mux.HandleFunc("/providers", srv.handleProviders)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	fmt.Printf("browser-auth API listening on %s\n", srv.listenAddr)
 	return http.ListenAndServe(srv.listenAddr, mux)
@@ -255,6 +258,44 @@ func (srv *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 	sid := strings.TrimPrefix(r.URL.Path, "/auth/close/")
 	srv.mgr.Close(sid)
 	jsonOK(w, stepResp{Status: "closed"})
+}
+
+type providerInfo struct {
+	ID         string  `json:"id"`
+	Type       string  `json:"type"`
+	Email      string  `json:"email"`
+	QuotaTotal float64 `json:"quota_total_gb"`
+	QuotaUsed  float64 `json:"quota_used_gb"`
+	Available  bool    `json:"available"`
+}
+type providersResp struct{ Providers []providerInfo `json:"providers"` }
+
+func (srv *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	dir := filepath.Join(srv.configDir, "providers")
+	entries, _ := os.ReadDir(dir)
+	providers := []providerInfo{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		t, err := LoadToken(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		pi := providerInfo{ID: t.ProviderID, Type: "gdrive", Email: t.Email}
+		total, used, err := GetDriveQuota(srv.oauthCfg, t)
+		if err == nil {
+			pi.QuotaTotal = float64(total) / 1e9
+			pi.QuotaUsed = float64(used) / 1e9
+			pi.Available = true
+		}
+		providers = append(providers, pi)
+	}
+	jsonOK(w, providersResp{Providers: providers})
 }
 
 func jsonOK(w http.ResponseWriter, v any) {

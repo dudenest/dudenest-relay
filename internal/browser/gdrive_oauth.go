@@ -86,6 +86,35 @@ func GetEmailFromToken(cfg *oauth2.Config, token *oauth2.Token) (string, error) 
 	return about.User.EmailAddress, nil
 }
 
+// LoadToken reads a GDriveToken from a file.
+func LoadToken(path string) (*GDriveToken, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var t GDriveToken
+	if err := json.Unmarshal(data, &t); err != nil {
+		return nil, fmt.Errorf("parse token: %w", err)
+	}
+	return &t, nil
+}
+
+// GetDriveQuota returns (totalBytes, usedBytes) for a GDrive account.
+func GetDriveQuota(cfg *oauth2.Config, t *GDriveToken) (totalBytes, usedBytes int64, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	oauthTok := &oauth2.Token{AccessToken: t.AccessToken, TokenType: t.TokenType, RefreshToken: t.RefreshToken, Expiry: t.Expiry}
+	svc, err := drive.New(cfg.Client(ctx, oauthTok)) //nolint:staticcheck
+	if err != nil {
+		return 0, 0, err
+	}
+	about, err := svc.About.Get().Fields("storageQuota").Do()
+	if err != nil {
+		return 0, 0, err
+	}
+	return about.StorageQuota.Limit, about.StorageQuota.Usage, nil
+}
+
 // SaveToken persists a GDriveToken to the providers directory.
 func SaveToken(configDir, providerID string, t *GDriveToken) error {
 	dir := filepath.Join(configDir, "providers")
