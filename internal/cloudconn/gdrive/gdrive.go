@@ -33,7 +33,7 @@ type Provider struct {
 	svc          *drive.Service
 	baseFolderID string
 	folderCache  map[string]string
-	mu           sync.RWMutex // protects folderCache
+	mu           sync.Mutex // serializes ensurePath — prevents duplicate folder TOCTOU race
 }
 
 // New creates a Provider. tokenPath = gdrive_<id>.json, clientSecretPath = client_secret.json.
@@ -129,17 +129,17 @@ func (p *Provider) Available() bool {
 }
 
 // ensurePath resolves dir (relative to base folder) creating folders as needed.
-// Thread-safe: uses RWMutex for folderCache reads and writes.
+// Serialized via write lock for entire traversal — prevents TOCTOU race where
+// concurrent goroutines all miss cache and create duplicate GDrive folders.
 func (p *Provider) ensurePath(dir string) (string, error) {
 	if dir == "" || dir == "." {
 		return p.baseFolderID, nil
 	}
-	p.mu.RLock()
-	if id, ok := p.folderCache[dir]; ok {
-		p.mu.RUnlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if id, ok := p.folderCache[dir]; ok { // fast path: full path cached
 		return id, nil
 	}
-	p.mu.RUnlock()
 	parts := strings.Split(strings.Trim(dir, "/"), "/")
 	parentID := p.baseFolderID
 	accumulated := ""
@@ -152,20 +152,15 @@ func (p *Provider) ensurePath(dir string) (string, error) {
 		} else {
 			accumulated = part
 		}
-		p.mu.RLock()
-		if id, ok := p.folderCache[accumulated]; ok {
+		if id, ok := p.folderCache[accumulated]; ok { // partial path cached
 			parentID = id
-			p.mu.RUnlock()
 			continue
 		}
-		p.mu.RUnlock()
 		id, err := p.ensureFolder(part, parentID)
 		if err != nil {
 			return "", fmt.Errorf("folder %s: %w", accumulated, err)
 		}
-		p.mu.Lock()
 		p.folderCache[accumulated] = id
-		p.mu.Unlock()
 		parentID = id
 	}
 	return parentID, nil
