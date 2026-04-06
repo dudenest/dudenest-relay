@@ -29,15 +29,20 @@ func NewServer(display, listenAddr, oauthURL string, oauthCfg *oauth2.Config, co
 	return &Server{mgr: NewManager(display), listenAddr: listenAddr, oauthURL: oauthURL, oauthCfg: oauthCfg, configDir: configDir}
 }
 
-// Run starts the HTTP server (blocking).
-func (srv *Server) Run() error {
-	mux := http.NewServeMux()
+// RegisterRoutes adds all browser-auth and provider routes to mux.
+func (srv *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/auth/session", srv.handleSession)
 	mux.HandleFunc("/auth/input", srv.handleInput)
 	mux.HandleFunc("/auth/click", srv.handleClick)
 	mux.HandleFunc("/auth/status/", srv.handleStatus)
 	mux.HandleFunc("/auth/close/", srv.handleClose)
 	mux.HandleFunc("/providers", srv.handleProviders)
+}
+
+// Run starts the HTTP server (blocking).
+func (srv *Server) Run() error {
+	mux := http.NewServeMux()
+	srv.RegisterRoutes(mux)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	fmt.Printf("browser-auth API listening on %s\n", srv.listenAddr)
 	return http.ListenAndServe(srv.listenAddr, mux)

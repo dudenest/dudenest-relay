@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/dudenest/dudenest-relay/pkg/types"
@@ -26,6 +27,9 @@ func New(storePath string) *Manager {
 	os.MkdirAll(storePath, 0700) //nolint:errcheck
 	return &Manager{storePath: storePath}
 }
+
+// StorePath returns the local directory where FileMaps are stored.
+func (m *Manager) StorePath() string { return m.storePath }
 
 // NewFileMap creates a FileMap for a file at path.
 func NewFileMap(path string) (*types.FileMap, error) {
@@ -71,6 +75,29 @@ func (m *Manager) Load(fileID string) (*types.FileMap, error) {
 		return nil, err
 	}
 	return &fm, nil
+}
+
+// List returns all FileMaps from local storage, sorted newest first.
+func (m *Manager) List() ([]*types.FileMap, error) {
+	entries, err := os.ReadDir(m.storePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var maps []*types.FileMap
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		fm, err := m.Load(strings.TrimSuffix(e.Name(), ".json"))
+		if err != nil {
+			continue
+		}
+		maps = append(maps, fm)
+	}
+	return maps, nil
 }
 
 // Verify checks that a reconstructed file matches the FileMap hash.
