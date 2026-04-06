@@ -120,10 +120,12 @@ func (p *Pipeline) Download(fileID, outputPath string) error {
 				cloudPath := parseCloudPath(block.Location)
 				data, dlErr := p.cloud.Download(cloudPath)
 				if dlErr != nil {
+					fmt.Printf("[DEBUG] shard %d dl error: %v\n", block.ShardIdx, dlErr)
 					return // shard unavailable — RS reconstructs from remaining
 				}
 				plainShard, decErr := p.enc.Decrypt(block.ID, data)
 				if decErr != nil {
+					fmt.Printf("[DEBUG] shard %d decrypt error: %v\n", block.ShardIdx, decErr)
 					return // corrupted shard — RS handles
 				}
 				_ = mu // suppress unused warning; shards[idx] writes are non-overlapping
