@@ -1,4 +1,8 @@
 // api.go — HTTP REST API server for browser auth sessions (used by Flutter UI).
+// Auth methods supported:
+//   A. Flutter-side OAuth  — GET /auth/url → Flutter opens browser (user IP ✅) → POST /auth/exchange
+//   B. Browser automation  — POST /auth/session → chromedp on relay (self-hosted only)
+//   C. WebSocket requests  — relay sends auth_request to Flutter via /ws
 package browser
 
 import (
@@ -13,29 +17,38 @@ import (
 	"time"
 
 	"golang.org/x/oauth2"
+
+	"github.com/dudenest/dudenest-relay/internal/ws"
 )
 
 // Server exposes browser auth sessions over HTTP for Flutter to consume.
 type Server struct {
 	mgr        *Manager
 	listenAddr string
-	oauthURL   string        // Google OAuth2 authorization URL (built from client_id)
+	oauthURL   string         // Google OAuth2 authorization URL (built from client_id)
 	oauthCfg   *oauth2.Config // for token exchange after consent
-	configDir  string        // where to save tokens (~/.config/dudenest)
+	configDir  string         // where to save tokens (~/.config/dudenest)
+	wsHub      *ws.Hub        // optional — broadcasts auth_request to Flutter (nil = disabled)
 }
 
 // NewServer creates an API server. display e.g. ":99", listenAddr e.g. "0.0.0.0:8086".
-func NewServer(display, listenAddr, oauthURL string, oauthCfg *oauth2.Config, configDir string) *Server {
-	return &Server{mgr: NewManager(display), listenAddr: listenAddr, oauthURL: oauthURL, oauthCfg: oauthCfg, configDir: configDir}
+// wsHub may be nil (WebSocket disabled). Use ws.NewHub() for relay-initiated auth.
+func NewServer(display, listenAddr, oauthURL string, oauthCfg *oauth2.Config, configDir string, wsHub *ws.Hub) *Server {
+	return &Server{mgr: NewManager(display), listenAddr: listenAddr, oauthURL: oauthURL, oauthCfg: oauthCfg, configDir: configDir, wsHub: wsHub}
 }
 
 // RegisterRoutes adds all browser-auth and provider routes to mux.
 func (srv *Server) RegisterRoutes(mux *http.ServeMux) {
+	// Method A: Flutter-side OAuth (user's IP for login ✅)
+	mux.HandleFunc("/auth/url", srv.handleAuthURL)
+	mux.HandleFunc("/auth/exchange", srv.handleExchange)
+	// Method B: Browser automation (chromedp on relay, self-hosted only)
 	mux.HandleFunc("/auth/session", srv.handleSession)
 	mux.HandleFunc("/auth/input", srv.handleInput)
 	mux.HandleFunc("/auth/click", srv.handleClick)
 	mux.HandleFunc("/auth/status/", srv.handleStatus)
 	mux.HandleFunc("/auth/close/", srv.handleClose)
+	// Providers list
 	mux.HandleFunc("/providers", srv.handleProviders)
 }
 
@@ -46,6 +59,61 @@ func (srv *Server) Run() error {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	fmt.Printf("browser-auth API listening on %s\n", srv.listenAddr)
 	return http.ListenAndServe(srv.listenAddr, mux)
+}
+
+// --- Method A: Flutter-side OAuth handlers ---
+
+// handleAuthURL returns an OAuth2 authorization URL for Flutter to open in a system browser.
+// Flutter specifies its own callback URI so the auth code returns to the user's device (user's IP ✅).
+// GET /auth/url?provider=gdrive&callback=com.dudenest.app://oauth/callback
+func (srv *Server) handleAuthURL(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet { http.Error(w, "GET only", http.StatusMethodNotAllowed); return }
+	provider := r.URL.Query().Get("provider")
+	callbackURI := r.URL.Query().Get("callback")
+	if provider == "" { provider = "gdrive" }
+	if provider != "gdrive" { jsonError(w, "unsupported provider: "+provider, 400); return }
+	cfg := *srv.oauthCfg // copy — do not mutate original
+	if callbackURI != "" { cfg.RedirectURL = callbackURI } // Flutter's redirect URI (custom scheme or localhost)
+	authURL := cfg.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
+	jsonOK(w, map[string]string{"url": authURL, "provider": provider, "redirect_uri": cfg.RedirectURL})
+}
+
+// handleExchange exchanges an OAuth2 code (received by Flutter) for a token, stores it on relay.
+// The code was obtained on user's device (user's IP) — relay only does the token exchange (acceptable).
+// POST /auth/exchange {provider, code, redirect_uri, request_id?}
+func (srv *Server) handleExchange(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost { http.Error(w, "POST only", http.StatusMethodNotAllowed); return }
+	var req struct {
+		Provider    string `json:"provider"`
+		Code        string `json:"code"`
+		RedirectURI string `json:"redirect_uri"`
+		RequestID   string `json:"request_id,omitempty"` // correlates with ws auth_request
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { jsonError(w, "invalid JSON: "+err.Error(), 400); return }
+	if req.Provider == "" { req.Provider = "gdrive" }
+	if req.Provider != "gdrive" { jsonError(w, "unsupported provider: "+req.Provider, 400); return }
+	if req.Code == "" { jsonError(w, "code required", 400); return }
+	cfg := *srv.oauthCfg
+	if req.RedirectURI != "" { cfg.RedirectURL = req.RedirectURI } // must match what Flutter used when opening the URL
+	token, err := ExchangeCode(&cfg, req.Code)
+	if err != nil { jsonError(w, "token exchange: "+err.Error(), 500); return }
+	email, err := GetEmailFromToken(&cfg, token)
+	if err != nil { email = "unknown@gmail.com" } // non-fatal
+	gt := &GDriveToken{
+		AccessToken:  token.AccessToken,
+		TokenType:    token.TokenType,
+		RefreshToken: token.RefreshToken,
+		Expiry:       token.Expiry,
+		Email:        email,
+		ProviderID:   "gdrive_" + fmt.Sprintf("%d", time.Now().UnixMilli()),
+	}
+	if err := SaveToken(srv.configDir, gt.ProviderID, gt); err != nil { jsonError(w, "save token: "+err.Error(), 500); return }
+	// Notify Flutter via WebSocket if this was a relay-initiated auth request
+	if req.RequestID != "" && srv.wsHub != nil {
+		srv.wsHub.Broadcast(ws.Message{Type: "auth_done", RequestID: req.RequestID, Provider: req.Provider, Email: email})
+	}
+	fmt.Printf("handleExchange: provider saved — %s (%s)\n", email, gt.ProviderID)
+	jsonOK(w, map[string]string{"status": "ok", "email": email, "provider_id": gt.ProviderID})
 }
 
 // --- Request / Response types ---

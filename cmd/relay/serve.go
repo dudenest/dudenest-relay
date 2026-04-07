@@ -16,6 +16,7 @@ import (
 
 	"github.com/dudenest/dudenest-relay/internal/browser"
 	"github.com/dudenest/dudenest-relay/internal/thumbnail"
+	"github.com/dudenest/dudenest-relay/internal/ws"
 	"github.com/dudenest/dudenest-relay/pkg/types"
 )
 
@@ -45,18 +46,20 @@ func runServe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load client_secret: %w", err)
 	}
 	cfg := browser.BuildOAuthConfig(cs)
-	authSrv := browser.NewServer(authDisplay, serveListen, browser.BuildAuthURL(cfg), cfg, authConfigDir)
+	wsHub := ws.NewHub() // WebSocket hub: Flutter connects here, relay sends auth_request messages
+	authSrv := browser.NewServer(authDisplay, serveListen, browser.BuildAuthURL(cfg), cfg, authConfigDir, wsHub)
 	tc, err := thumbnail.NewCache(authConfigDir)
 	if err != nil {
 		return fmt.Errorf("thumbnail cache: %w", err)
 	}
 	mux := http.NewServeMux()
 	authSrv.RegisterRoutes(mux)
+	mux.Handle("/ws", wsHub) // WebSocket: Flutter connects for relay→Flutter auth requests
 	fs := &fileServer{p: p, thumbCache: tc}
 	mux.HandleFunc("/files", fs.handleList)
 	mux.HandleFunc("/files/", fs.handleFile)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }) //nolint:errcheck
-	fmt.Printf("relay serve listening on %s (provider: %s)\n", serveListen, provider)
+	fmt.Printf("relay serve listening on %s (provider: %s, ws: /ws)\n", serveListen, provider)
 	return http.ListenAndServe(serveListen, corsMiddleware(mux))
 }
 
