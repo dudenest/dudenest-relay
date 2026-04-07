@@ -10,7 +10,7 @@ require (
 	github.com/klauspost/reedsolomon v1.12.1
 	github.com/spf13/cobra v1.8.1
 	github.com/t3rm1n4l/go-mega v0.0.0-20251120131202-6845944c051c
-	github.com/tyler-smith/go-bip39 v1.1.3
+	github.com/tyler-smith/go-bip39 v1.1.0
 	golang.org/x/crypto v0.45.0
 	golang.org/x/oauth2 v0.29.0
 	google.golang.org/api v0.231.0
