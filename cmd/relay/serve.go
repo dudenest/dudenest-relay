@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dudenest/dudenest-relay/internal/browser"
+	"github.com/dudenest/dudenest-relay/internal/thumbnail"
 	"github.com/dudenest/dudenest-relay/pkg/types"
 )
 
@@ -45,9 +46,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 	cfg := browser.BuildOAuthConfig(cs)
 	authSrv := browser.NewServer(authDisplay, serveListen, browser.BuildAuthURL(cfg), cfg, authConfigDir)
+	tc, err := thumbnail.NewCache(authConfigDir)
+	if err != nil {
+		return fmt.Errorf("thumbnail cache: %w", err)
+	}
 	mux := http.NewServeMux()
 	authSrv.RegisterRoutes(mux)
-	fs := &fileServer{p: p}
+	fs := &fileServer{p: p, thumbCache: tc}
 	mux.HandleFunc("/files", fs.handleList)
 	mux.HandleFunc("/files/", fs.handleFile)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }) //nolint:errcheck
@@ -56,12 +61,15 @@ func runServe(cmd *cobra.Command, args []string) error {
 }
 
 // fileServer handles /files/* endpoints using the pipeline.
-type fileServer struct{ p interface {
-	Upload(filePath string) (*types.FileMap, error)
-	Download(fileID, outputPath string) error
-	ListFiles() ([]*types.FileMap, error)
-	DeleteFile(fileID string) error
-} }
+type fileServer struct {
+	p interface {
+		Upload(filePath string) (*types.FileMap, error)
+		Download(fileID, outputPath string) error
+		ListFiles() ([]*types.FileMap, error)
+		DeleteFile(fileID string) error
+	}
+	thumbCache *thumbnail.Cache
+}
 
 // handleList handles GET /files — returns list of uploaded FileMaps.
 func (fs *fileServer) handleList(w http.ResponseWriter, r *http.Request) {
@@ -89,12 +97,14 @@ func (fs *fileServer) handleList(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{"files": summaries}) //nolint:errcheck
 }
 
-// handleFile dispatches /files/{id} and /files/upload.
+// handleFile dispatches /files/{id}, /files/{id}/thumbnail, and /files/upload.
 func (fs *fileServer) handleFile(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/files/")
 	switch {
 	case path == "upload" && r.Method == http.MethodPost:
 		fs.handleUpload(w, r)
+	case strings.HasSuffix(path, "/thumbnail") && r.Method == http.MethodGet:
+		fs.handleThumbnail(w, r, strings.TrimSuffix(path, "/thumbnail"))
 	case path != "" && r.Method == http.MethodGet:
 		fs.handleDownload(w, r, path)
 	case path != "" && r.Method == http.MethodDelete:
@@ -139,6 +149,9 @@ func (fs *fileServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "upload: "+err.Error(), 500)
 		return
 	}
+	if fs.thumbCache != nil { // generate thumbnail while local file still exists
+		thumbnail.Generate(tmpPath, fs.thumbCache.Path(fm.FileID)) //nolint:errcheck
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 		"file_id": fm.FileID,
@@ -169,6 +182,40 @@ func (fs *fileServer) handleDownload(w http.ResponseWriter, r *http.Request, fil
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", "attachment")
+	w.Write(data) //nolint:errcheck
+}
+
+// handleThumbnail serves a cached 200×200 JPEG thumbnail; lazy-generates on first request.
+func (fs *fileServer) handleThumbnail(w http.ResponseWriter, r *http.Request, fileID string) {
+	if fileID == "" {
+		http.NotFound(w, r)
+		return
+	}
+	thumbPath := fs.thumbCache.Path(fileID)
+	if !fs.thumbCache.Exists(fileID) { // lazy-generate: download full file once, then cache
+		tmp, err := os.CreateTemp("", "relay-thumb-*")
+		if err != nil {
+			jsonErr(w, "tmp file: "+err.Error(), 500)
+			return
+		}
+		tmp.Close()
+		defer os.Remove(tmp.Name())
+		if err := fs.p.Download(fileID, tmp.Name()); err != nil {
+			jsonErr(w, "download for thumbnail: "+err.Error(), 500)
+			return
+		}
+		if err := thumbnail.Generate(tmp.Name(), thumbPath); err != nil {
+			jsonErr(w, "generate thumbnail: "+err.Error(), 500)
+			return
+		}
+	}
+	data, err := os.ReadFile(thumbPath)
+	if err != nil {
+		jsonErr(w, "read thumbnail: "+err.Error(), 500)
+		return
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
 	w.Write(data) //nolint:errcheck
 }
 
