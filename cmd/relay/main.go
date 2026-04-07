@@ -53,7 +53,7 @@ func main() {
 
 	authCmd := &cobra.Command{Use: "auth", Short: "Authenticate cloud provider accounts"}
 	authCmd.AddCommand(authGDriveCmd())
-	root.AddCommand(uploadCmd(), downloadCmd(), infoCmd(), benchCmd(), serveCmd(), serveAuthCmd(), authCmd)
+	root.AddCommand(uploadCmd(), downloadCmd(), infoCmd(), benchCmd(), serveCmd(), serveAuthCmd(), authCmd, setupCmd(), recoverCmd())
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
