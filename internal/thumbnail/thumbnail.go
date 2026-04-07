@@ -5,10 +5,11 @@ package thumbnail
 
 import (
 	"image"
+	"image/color"
 	"image/draw"
 	"image/jpeg"
-	_ "image/gif"  // register gif decoder
-	_ "image/png"  // register png decoder
+	_ "image/gif" // register gif decoder
+	_ "image/png" // register png decoder
 	"os"
 	"path/filepath"
 )
@@ -89,12 +90,12 @@ func nearest(src image.Image, w, h int) *image.NRGBA {
 	return dst
 }
 
-// nrgbaAt reads any pixel as NRGBA without interface overhead on hot path.
-func nrgbaAt(img image.Image, x, y int) (c image.NRGBA) {
+// nrgbaAt reads any pixel as color.NRGBA without interface overhead on hot path.
+func nrgbaAt(img image.Image, x, y int) color.NRGBA {
 	r, g, b, a := img.At(x, y).RGBA()
-	if a == 0 { return image.NRGBA{} }
+	if a == 0 { return color.NRGBA{} }
 	// pre-multiply → straight alpha
-	return image.NRGBA{
+	return color.NRGBA{
 		R: uint8(r * 0xff / a),
 		G: uint8(g * 0xff / a),
 		B: uint8(b * 0xff / a),
