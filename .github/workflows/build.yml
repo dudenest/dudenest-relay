@@ -22,6 +22,8 @@ jobs:
         with:
           go-version: '1.24'
           cache: true
+      - name: Configure git auth for Go modules
+        run: git config --global url."https://${{ github.token }}@github.com/".insteadOf "https://github.com/"
       - name: Download dependencies
         run: go mod tidy
       - name: Run tests
@@ -53,6 +55,8 @@ jobs:
           go-version: '1.24'
           cache: true
 
+      - name: Configure git auth for Go modules
+        run: git config --global url."https://${{ github.token }}@github.com/".insteadOf "https://github.com/"
       - name: Download dependencies
         run: go mod tidy
       - name: Build ${{ matrix.desc }}
