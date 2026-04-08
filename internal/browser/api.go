@@ -179,7 +179,7 @@ func (srv *Server) cancelPrevCallback() {
 	srv.cbMu.Unlock()
 	if cancel != nil {
 		cancel()
-		time.Sleep(300 * time.Millisecond) // give OS time to free the port
+		time.Sleep(2500 * time.Millisecond) // wait for http.Server.Shutdown (2s timeout) + OS port release
 	}
 }
 
@@ -223,8 +223,12 @@ func (srv *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	go func() { // background: wait for OAuth code → exchange → save token → notify Flutter
-		defer cbCancel()
-		srv.cbMu.Lock(); srv.cbCancel = nil; srv.cbMu.Unlock() // clear cancel reference when done
+		defer func() { // clear srv.cbCancel only after goroutine finishes (not at start — would break cancelPrevCallback)
+			cbCancel()
+			srv.cbMu.Lock()
+			if srv.cbCancel == cbCancel { srv.cbCancel = nil } // clear only if still our cancel (not replaced by newer session)
+			srv.cbMu.Unlock()
+		}()
 		code, cErr := waitForCode()
 		if cErr != nil {
 			fmt.Printf("handleSession: noVNC callback error for %s: %v\n", sid, cErr)
