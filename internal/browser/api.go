@@ -84,7 +84,8 @@ func (srv *Server) handleAuthURL(w http.ResponseWriter, r *http.Request) {
 	if provider != "gdrive" { jsonError(w, "unsupported provider: "+provider, 400); return }
 	cfg := *srv.selectOAuthCfg(callbackURI) // copy — web vs desktop client based on callback URI
 	if callbackURI != "" { cfg.RedirectURL = callbackURI }
-	authURL := cfg.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
+	// prompt=consent forces Google to always issue a new refresh_token (even on re-auth)
+	authURL := cfg.AuthCodeURL("state-token", oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
 	jsonOK(w, map[string]string{"url": authURL, "provider": provider, "redirect_uri": cfg.RedirectURL})
 }
 
@@ -109,14 +110,17 @@ func (srv *Server) handleExchange(w http.ResponseWriter, r *http.Request) {
 	if err != nil { jsonError(w, "token exchange: "+err.Error(), 500); return }
 	email, err := GetEmailFromToken(&cfg, token)
 	if err != nil { email = "unknown@gmail.com" } // non-fatal
+	rt := token.RefreshToken
+	if rt == "" { rt = existingRefreshToken(srv.configDir, email) } // Google omits rt on re-auth; preserve existing
 	gt := &GDriveToken{
 		AccessToken:  token.AccessToken,
 		TokenType:    token.TokenType,
-		RefreshToken: token.RefreshToken,
+		RefreshToken: rt,
 		Expiry:       token.Expiry,
 		Email:        email,
 		ProviderID:   upsertProviderID(srv.configDir, email), // reuse existing ID if email known
 	}
+	if rt == "" { fmt.Printf("handleExchange: WARNING — no refresh_token for %s (add prompt=consent)\n", email) }
 	if err := SaveToken(srv.configDir, gt.ProviderID, gt); err != nil { jsonError(w, "save token: "+err.Error(), 500); return }
 	// Notify Flutter via WebSocket if this was a relay-initiated auth request
 	if req.RequestID != "" && srv.wsHub != nil {
@@ -303,10 +307,12 @@ func (srv *Server) handleClick(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			email = "unknown@gmail.com" // non-fatal: token works even without email
 		}
+		rt := token.RefreshToken
+		if rt == "" { rt = existingRefreshToken(srv.configDir, email) }
 		gt := &GDriveToken{
 			AccessToken:  token.AccessToken,
 			TokenType:    token.TokenType,
-			RefreshToken: token.RefreshToken,
+			RefreshToken: rt,
 			Expiry:       token.Expiry,
 			Email:        email,
 			ProviderID:   upsertProviderID(srv.configDir, email), // reuse existing ID if email known

@@ -154,6 +154,7 @@ func overwriteToken(path string, t *GDriveToken) error {
 
 // upsertProviderID returns an existing ProviderID for the email (to avoid duplicate files),
 // or generates a new one if the account is new.
+// Also returns the existing refresh_token so callers can preserve it if the new token lacks one.
 func upsertProviderID(configDir, email string) string {
 	dir := filepath.Join(configDir, "providers")
 	entries, _ := os.ReadDir(dir)
@@ -168,6 +169,23 @@ func upsertProviderID(configDir, email string) string {
 		}
 	}
 	return "gdrive_" + fmt.Sprintf("%d", time.Now().UnixMilli())
+}
+
+// existingRefreshToken returns the stored refresh_token for an email, or "" if not found.
+// Used to preserve a valid refresh_token when re-auth returns an empty one (Google omits it on re-auth).
+func existingRefreshToken(configDir, email string) string {
+	dir := filepath.Join(configDir, "providers")
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		t, err := LoadToken(filepath.Join(dir, e.Name()))
+		if err == nil && strings.EqualFold(t.Email, email) && t.RefreshToken != "" {
+			return t.RefreshToken
+		}
+	}
+	return ""
 }
 
 // GetDriveQuotaRefreshing returns (refreshed token or nil, totalBytes, usedBytes, error).
