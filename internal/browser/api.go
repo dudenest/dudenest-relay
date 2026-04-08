@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -33,6 +34,8 @@ type Server struct {
 	webOAuthCfg   *oauth2.Config // web client (redirect: https://dudenest.com/auth); nil = unsupported
 	configDir     string         // where to save tokens (~/.config/dudenest)
 	wsHub         *ws.Hub        // optional — broadcasts auth_request to Flutter (nil = disabled)
+	cbMu          sync.Mutex     // protects cbCancel — only one callback server at a time
+	cbCancel      context.CancelFunc // cancel function for the active callback server
 }
 
 // NewServer creates an API server. display e.g. ":99", listenAddr e.g. "0.0.0.0:8086".
@@ -168,6 +171,18 @@ type stepResp struct {
 
 // --- Handlers ---
 
+// cancelPrevCallback cancels any active callback server and waits for port :8085 to free.
+func (srv *Server) cancelPrevCallback() {
+	srv.cbMu.Lock()
+	cancel := srv.cbCancel
+	srv.cbCancel = nil
+	srv.cbMu.Unlock()
+	if cancel != nil {
+		cancel()
+		time.Sleep(300 * time.Millisecond) // give OS time to free the port
+	}
+}
+
 // handleSession starts a browser session and returns a noVNC URL for the user to interact with.
 // Flow: Chromium opens OAuth URL on :99 → user authenticates via noVNC → callback caught → token saved → auth_done broadcast.
 func (srv *Server) handleSession(w http.ResponseWriter, r *http.Request) {
@@ -197,7 +212,9 @@ func (srv *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "navigate to OAuth URL: "+err.Error(), 500)
 		return
 	}
+	srv.cancelPrevCallback() // free port :8085 if previous session's callback server is still running
 	cbCtx, cbCancel := context.WithTimeout(context.Background(), 10*time.Minute) // user has 10min to complete login
+	srv.cbMu.Lock(); srv.cbCancel = cbCancel; srv.cbMu.Unlock() // register cancel for future cleanup
 	waitForCode, cbErr := StartCallbackServer(cbCtx, 10*time.Minute)
 	if cbErr != nil {
 		cbCancel()
@@ -207,6 +224,7 @@ func (srv *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 	go func() { // background: wait for OAuth code → exchange → save token → notify Flutter
 		defer cbCancel()
+		srv.cbMu.Lock(); srv.cbCancel = nil; srv.cbMu.Unlock() // clear cancel reference when done
 		code, cErr := waitForCode()
 		if cErr != nil {
 			fmt.Printf("handleSession: noVNC callback error for %s: %v\n", sid, cErr)
