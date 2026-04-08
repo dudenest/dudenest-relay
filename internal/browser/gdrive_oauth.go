@@ -34,6 +34,7 @@ type GDriveToken struct {
 	Expiry       time.Time `json:"expiry"`
 	Email        string    `json:"email"`
 	ProviderID   string    `json:"provider_id"`
+	ClientID     string    `json:"client_id,omitempty"` // which OAuth client issued this token (web vs desktop)
 }
 
 // LoadClientSecret reads and parses client_secret.json.

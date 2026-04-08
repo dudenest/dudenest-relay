@@ -47,6 +47,15 @@ func (srv *Server) selectOAuthCfg(callbackURI string) *oauth2.Config {
 	return srv.oauthCfg
 }
 
+// cfgForToken returns the oauth2.Config that issued a token (matched by ClientID).
+// Falls back to desktop client for legacy tokens without ClientID stored.
+func (srv *Server) cfgForToken(t *GDriveToken) *oauth2.Config {
+	if t.ClientID != "" && srv.webOAuthCfg != nil && t.ClientID == srv.webOAuthCfg.ClientID {
+		return srv.webOAuthCfg
+	}
+	return srv.oauthCfg
+}
+
 // RegisterRoutes adds all browser-auth and provider routes to mux.
 func (srv *Server) RegisterRoutes(mux *http.ServeMux) {
 	// Method A: Flutter-side OAuth (user's IP for login ✅)
@@ -119,8 +128,9 @@ func (srv *Server) handleExchange(w http.ResponseWriter, r *http.Request) {
 		Expiry:       token.Expiry,
 		Email:        email,
 		ProviderID:   upsertProviderID(srv.configDir, email), // reuse existing ID if email known
+		ClientID:     cfg.ClientID,                           // remember which client issued this token
 	}
-	if rt == "" { fmt.Printf("handleExchange: WARNING — no refresh_token for %s (add prompt=consent)\n", email) }
+	if rt == "" { fmt.Printf("handleExchange: WARNING — no refresh_token for %s\n", email) }
 	if err := SaveToken(srv.configDir, gt.ProviderID, gt); err != nil { jsonError(w, "save token: "+err.Error(), 500); return }
 	// Notify Flutter via WebSocket if this was a relay-initiated auth request
 	if req.RequestID != "" && srv.wsHub != nil {
@@ -385,7 +395,8 @@ func (srv *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 		}
 		seen[t.Email] = true
 		pi := providerInfo{ID: t.ProviderID, Type: "gdrive", Email: t.Email}
-		newTok, total, used, quotaErr := GetDriveQuotaRefreshing(srv.oauthCfg, t)
+		cfg := srv.cfgForToken(t) // select web or desktop client based on which issued this token
+		newTok, total, used, quotaErr := GetDriveQuotaRefreshing(cfg, t)
 		if quotaErr == nil {
 			pi.QuotaTotal = float64(total) / 1e9
 			pi.QuotaUsed = float64(used) / 1e9
