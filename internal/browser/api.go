@@ -6,9 +6,12 @@
 package browser
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -67,6 +70,9 @@ func (srv *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/auth/click", srv.handleClick)
 	mux.HandleFunc("/auth/status/", srv.handleStatus)
 	mux.HandleFunc("/auth/close/", srv.handleClose)
+	// Method C: noVNC proxy (relay:8086/vnc/* → localhost:6080/*)
+	mux.Handle("/vnc", http.HandlerFunc(srv.handleVNCProxy))
+	mux.Handle("/vnc/", http.HandlerFunc(srv.handleVNCProxy))
 	// Providers list
 	mux.HandleFunc("/providers", srv.handleProviders)
 }
@@ -162,6 +168,8 @@ type stepResp struct {
 
 // --- Handlers ---
 
+// handleSession starts a browser session and returns a noVNC URL for the user to interact with.
+// Flow: Chromium opens OAuth URL on :99 → user authenticates via noVNC → callback caught → token saved → auth_done broadcast.
 func (srv *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -176,25 +184,65 @@ func (srv *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "unsupported provider: "+req.Provider, 400)
 		return
 	}
-	fmt.Println("handleSession: creating browser session...")
+	fmt.Println("handleSession: starting noVNC browser auth session...")
 	sid, err := srv.mgr.Create()
 	if err != nil {
 		fmt.Printf("handleSession: browser start failed: %v\n", err)
 		jsonError(w, "browser start failed: "+err.Error(), 500)
 		return
 	}
-	fmt.Printf("handleSession: session created: %s\n", sid)
 	s, _ := srv.mgr.Get(sid)
-	fmt.Println("handleSession: starting gdrive flow...")
-	step, err := GDriveStartFlow(s, srv.oauthURL)
-	if err != nil {
-		fmt.Printf("handleSession: gdrive flow error: %v\n", err)
+	if err := s.Navigate(srv.oauthURL); err != nil { // open OAuth URL on display :99 (visible via noVNC)
 		srv.mgr.Close(sid)
-		jsonError(w, "gdrive flow start: "+err.Error(), 500)
+		jsonError(w, "navigate to OAuth URL: "+err.Error(), 500)
 		return
 	}
-	fmt.Printf("handleSession: flow step=%s screenshot=%d bytes\n", step.Status, len(step.ScreenshotB64))
-	jsonOK(w, stepResp{SessionID: sid, Status: step.Status, Fields: step.Fields, ScreenshotB64: step.ScreenshotB64})
+	cbCtx, cbCancel := context.WithTimeout(context.Background(), 10*time.Minute) // user has 10min to complete login
+	waitForCode, cbErr := StartCallbackServer(cbCtx, 10*time.Minute)
+	if cbErr != nil {
+		cbCancel()
+		srv.mgr.Close(sid)
+		jsonError(w, "callback server: "+cbErr.Error(), 500)
+		return
+	}
+	go func() { // background: wait for OAuth code → exchange → save token → notify Flutter
+		defer cbCancel()
+		code, cErr := waitForCode()
+		if cErr != nil {
+			fmt.Printf("handleSession: noVNC callback error for %s: %v\n", sid, cErr)
+			srv.mgr.Close(sid)
+			return
+		}
+		token, xErr := ExchangeCode(srv.oauthCfg, code)
+		if xErr != nil {
+			fmt.Printf("handleSession: exchange error for %s: %v\n", sid, xErr)
+			srv.mgr.Close(sid)
+			return
+		}
+		email, _ := GetEmailFromToken(srv.oauthCfg, token)
+		if email == "" { email = "unknown@gmail.com" }
+		rt := token.RefreshToken
+		if rt == "" { rt = existingRefreshToken(srv.configDir, email) }
+		gt := &GDriveToken{
+			AccessToken: token.AccessToken, TokenType: token.TokenType, RefreshToken: rt,
+			Expiry: token.Expiry, Email: email, ProviderID: upsertProviderID(srv.configDir, email),
+			ClientID: srv.oauthCfg.ClientID,
+		}
+		if sErr := SaveToken(srv.configDir, gt.ProviderID, gt); sErr != nil {
+			fmt.Printf("handleSession: save token error for %s: %v\n", sid, sErr)
+		}
+		fmt.Printf("handleSession: noVNC auth done — %s (%s)\n", email, gt.ProviderID)
+		if srv.wsHub != nil {
+			srv.wsHub.Broadcast(ws.Message{Type: "auth_done", Provider: "gdrive", Email: email})
+		}
+		time.Sleep(30 * time.Second) // keep Chromium visible briefly for inspection
+		srv.mgr.Close(sid)
+	}()
+	scheme := "http"
+	if r.TLS != nil { scheme = "https" }
+	vncURL := fmt.Sprintf("%s://%s/vnc/dudenest.html?session=%s", scheme, r.Host, sid)
+	fmt.Printf("handleSession: noVNC URL: %s\n", vncURL)
+	jsonOK(w, map[string]string{"session_id": sid, "status": "vnc_ready", "vnc_url": vncURL})
 }
 
 func (srv *Server) handleInput(w http.ResponseWriter, r *http.Request) {
@@ -341,6 +389,58 @@ func (srv *Server) handleClick(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, stepResp{Status: "clicked"})
+}
+
+// handleVNCProxy proxies /vnc/* to localhost:6080/* (noVNC/websockify).
+// Static files (HTML/JS) proxied via HTTP; WebSocket (VNC stream) tunneled via TCP hijacking.
+// Auth: session query param required for WebSocket (VNC stream); static files are open.
+func (srv *Server) handleVNCProxy(w http.ResponseWriter, r *http.Request) {
+	const backendAddr = "127.0.0.1:6080"
+	path := strings.TrimPrefix(r.URL.Path, "/vnc")
+	if path == "" || path == "/" { path = "/dudenest.html" }
+	if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") { // WebSocket: VNC stream — require valid session
+		sid := r.URL.Query().Get("session")
+		if sid == "" { http.Error(w, "missing session param", http.StatusUnauthorized); return }
+		if _, err := srv.mgr.Get(sid); err != nil { http.Error(w, "invalid or expired session", http.StatusForbidden); return }
+		srv.tunnelWebSocket(w, r, backendAddr, path)
+		return
+	}
+	// Regular HTTP: proxy static noVNC assets (dudenest.html, core/rfb.js, etc.)
+	backendURL := &url.URL{Scheme: "http", Host: backendAddr, Path: path}
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, backendURL.String(), r.Body)
+	if err != nil { http.Error(w, "proxy request: "+err.Error(), 500); return }
+	for k, vv := range r.Header { req.Header[k] = vv }
+	resp, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil { http.Error(w, "backend error: "+err.Error(), 502); return }
+	defer resp.Body.Close()
+	for k, vv := range resp.Header { w.Header()[k] = vv }
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body) //nolint:errcheck
+}
+
+// tunnelWebSocket creates a bidirectional TCP tunnel for WebSocket upgrade requests.
+func (srv *Server) tunnelWebSocket(w http.ResponseWriter, r *http.Request, backendAddr, backendPath string) {
+	backendConn, err := net.DialTimeout("tcp", backendAddr, 5*time.Second)
+	if err != nil { http.Error(w, "backend dial: "+err.Error(), 502); return }
+	defer backendConn.Close()
+	backendReq, _ := http.NewRequest(r.Method, "http://"+backendAddr+backendPath, nil)
+	backendReq.Header = r.Header.Clone()
+	backendReq.Header.Set("Host", backendAddr)
+	if err := backendReq.Write(backendConn); err != nil { return }
+	backendBuf := bufio.NewReader(backendConn)
+	resp, err := http.ReadResponse(backendBuf, backendReq)
+	if err != nil || resp.StatusCode != http.StatusSwitchingProtocols { return }
+	hj, ok := w.(http.Hijacker)
+	if !ok { http.Error(w, "hijack not supported", 500); return }
+	clientConn, clientBuf, err := hj.Hijack()
+	if err != nil { return }
+	defer clientConn.Close()
+	if err := resp.Write(clientBuf); err != nil { return }
+	if err := clientBuf.Flush(); err != nil { return }
+	done := make(chan struct{}, 2)
+	go func() { io.Copy(backendConn, clientBuf); done <- struct{}{} }()    //nolint:errcheck
+	go func() { io.Copy(clientConn, backendBuf); done <- struct{}{} }() //nolint:errcheck
+	<-done
 }
 
 func (srv *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
