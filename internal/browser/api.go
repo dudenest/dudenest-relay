@@ -115,7 +115,7 @@ func (srv *Server) handleExchange(w http.ResponseWriter, r *http.Request) {
 		RefreshToken: token.RefreshToken,
 		Expiry:       token.Expiry,
 		Email:        email,
-		ProviderID:   "gdrive_" + fmt.Sprintf("%d", time.Now().UnixMilli()),
+		ProviderID:   upsertProviderID(srv.configDir, email), // reuse existing ID if email known
 	}
 	if err := SaveToken(srv.configDir, gt.ProviderID, gt); err != nil { jsonError(w, "save token: "+err.Error(), 500); return }
 	// Notify Flutter via WebSocket if this was a relay-initiated auth request
@@ -309,7 +309,7 @@ func (srv *Server) handleClick(w http.ResponseWriter, r *http.Request) {
 			RefreshToken: token.RefreshToken,
 			Expiry:       token.Expiry,
 			Email:        email,
-			ProviderID:   "gdrive_" + fmt.Sprintf("%d", time.Now().UnixMilli()),
+			ProviderID:   upsertProviderID(srv.configDir, email), // reuse existing ID if email known
 		}
 		if err := SaveToken(srv.configDir, gt.ProviderID, gt); err != nil {
 			jsonError(w, "save token: "+err.Error(), 500)
@@ -350,6 +350,7 @@ type providerInfo struct {
 	QuotaTotal float64 `json:"quota_total_gb"`
 	QuotaUsed  float64 `json:"quota_used_gb"`
 	Available  bool    `json:"available"`
+	LastError  string  `json:"last_error,omitempty"` // reason when available=false
 }
 type providersResp struct{ Providers []providerInfo `json:"providers"` }
 
@@ -360,21 +361,42 @@ func (srv *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 	}
 	dir := filepath.Join(srv.configDir, "providers")
 	entries, _ := os.ReadDir(dir)
+	seen := map[string]bool{} // deduplicate by email
 	providers := []providerInfo{}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
-		t, err := LoadToken(filepath.Join(dir, e.Name()))
+		tokenPath := filepath.Join(dir, e.Name())
+		t, err := LoadToken(tokenPath)
 		if err != nil {
+			fmt.Printf("handleProviders: skip %s: %v\n", e.Name(), err)
 			continue
 		}
+		if seen[t.Email] { // skip duplicate (same email, multiple files)
+			fmt.Printf("handleProviders: skip duplicate %s (%s)\n", t.Email, e.Name())
+			continue
+		}
+		seen[t.Email] = true
 		pi := providerInfo{ID: t.ProviderID, Type: "gdrive", Email: t.Email}
-		total, used, err := GetDriveQuota(srv.oauthCfg, t)
-		if err == nil {
+		newTok, total, used, quotaErr := GetDriveQuotaRefreshing(srv.oauthCfg, t)
+		if quotaErr == nil {
 			pi.QuotaTotal = float64(total) / 1e9
 			pi.QuotaUsed = float64(used) / 1e9
 			pi.Available = true
+			if newTok != nil && newTok.AccessToken != t.AccessToken { // token was refreshed — save to disk
+				t.AccessToken = newTok.AccessToken
+				t.Expiry = newTok.Expiry
+				if newTok.RefreshToken != "" { t.RefreshToken = newTok.RefreshToken }
+				if saveErr := overwriteToken(tokenPath, t); saveErr != nil {
+					fmt.Printf("handleProviders: save refreshed token %s: %v\n", t.Email, saveErr)
+				} else {
+					fmt.Printf("handleProviders: refreshed token saved for %s\n", t.Email)
+				}
+			}
+		} else {
+			pi.LastError = classifyTokenError(quotaErr)
+			fmt.Printf("handleProviders: %s (%s) unavailable: %v → %s\n", t.Email, t.ProviderID, quotaErr, pi.LastError)
 		}
 		providers = append(providers, pi)
 	}

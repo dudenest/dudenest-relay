@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -140,4 +141,86 @@ func SaveToken(configDir, providerID string, t *GDriveToken) error {
 		return err
 	}
 	return os.WriteFile(path, data, 0600)
+}
+
+// overwriteToken writes an updated token to an existing file path (for refresh persistence).
+func overwriteToken(path string, t *GDriveToken) error {
+	data, err := json.MarshalIndent(t, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0600)
+}
+
+// upsertProviderID returns an existing ProviderID for the email (to avoid duplicate files),
+// or generates a new one if the account is new.
+func upsertProviderID(configDir, email string) string {
+	dir := filepath.Join(configDir, "providers")
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		t, err := LoadToken(filepath.Join(dir, e.Name()))
+		if err == nil && strings.EqualFold(t.Email, email) {
+			fmt.Printf("upsertProviderID: updating existing account %s (%s)\n", email, t.ProviderID)
+			return t.ProviderID
+		}
+	}
+	return "gdrive_" + fmt.Sprintf("%d", time.Now().UnixMilli())
+}
+
+// GetDriveQuotaRefreshing returns (refreshed token or nil, totalBytes, usedBytes, error).
+// The oauth2 transport may silently refresh the access token; we detect this and return
+// the new token so the caller can persist it to disk.
+func GetDriveQuotaRefreshing(cfg *oauth2.Config, t *GDriveToken) (*oauth2.Token, int64, int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	oauthTok := &oauth2.Token{AccessToken: t.AccessToken, TokenType: t.TokenType, RefreshToken: t.RefreshToken, Expiry: t.Expiry}
+	// ReuseTokenSource allows us to detect if a refresh happened
+	ts := cfg.TokenSource(ctx, oauthTok)
+	currentTok, err := ts.Token() // triggers refresh if access token is expired
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("token refresh: %w", err)
+	}
+	client := oauth2.NewClient(ctx, ts)
+	svc, err := drive.New(client) //nolint:staticcheck
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	about, err := svc.About.Get().Fields("storageQuota").Do()
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	// Return refreshed token only if access token changed (nil = no refresh needed)
+	var refreshed *oauth2.Token
+	if currentTok.AccessToken != t.AccessToken {
+		refreshed = currentTok
+	}
+	return refreshed, about.StorageQuota.Limit, about.StorageQuota.Usage, nil
+}
+
+// classifyTokenError returns a human-readable reason for a Drive API error.
+func classifyTokenError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "token has been expired or revoked"),
+		strings.Contains(msg, "invalid_grant"):
+		return "Token revoked or expired (re-add account)"
+	case strings.Contains(msg, "Token refresh failed") || strings.Contains(msg, "token refresh"):
+		return "Token refresh failed — re-add account"
+	case strings.Contains(msg, "connection refused") || strings.Contains(msg, "no such host"):
+		return "Relay cannot reach Google Drive (network)"
+	case strings.Contains(msg, "deadline exceeded") || strings.Contains(msg, "timeout"):
+		return "Timeout connecting to Google Drive"
+	case strings.Contains(msg, "403"):
+		return "Access denied — token may be revoked"
+	case strings.Contains(msg, "401"):
+		return "Unauthorized — token expired, re-add account"
+	default:
+		return "Unavailable: " + msg
+	}
 }
