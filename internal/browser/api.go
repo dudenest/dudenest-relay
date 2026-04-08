@@ -223,12 +223,7 @@ func (srv *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	go func() { // background: wait for OAuth code → exchange → save token → notify Flutter
-		defer func() { // clear srv.cbCancel only after goroutine finishes (not at start — would break cancelPrevCallback)
-			cbCancel()
-			srv.cbMu.Lock()
-			if srv.cbCancel == cbCancel { srv.cbCancel = nil } // clear only if still our cancel (not replaced by newer session)
-			srv.cbMu.Unlock()
-		}()
+		defer cbCancel() // cancel context on finish — srv.cbCancel stays set until next cancelPrevCallback() (calling stale cancel is a no-op)
 		code, cErr := waitForCode()
 		if cErr != nil {
 			fmt.Printf("handleSession: noVNC callback error for %s: %v\n", sid, cErr)
