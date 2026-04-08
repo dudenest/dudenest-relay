@@ -23,18 +23,28 @@ import (
 
 // Server exposes browser auth sessions over HTTP for Flutter to consume.
 type Server struct {
-	mgr        *Manager
-	listenAddr string
-	oauthURL   string         // Google OAuth2 authorization URL (built from client_id)
-	oauthCfg   *oauth2.Config // for token exchange after consent
-	configDir  string         // where to save tokens (~/.config/dudenest)
-	wsHub      *ws.Hub        // optional — broadcasts auth_request to Flutter (nil = disabled)
+	mgr           *Manager
+	listenAddr    string
+	oauthURL      string         // Google OAuth2 authorization URL (built from client_id)
+	oauthCfg      *oauth2.Config // desktop/mobile client (redirect: http://localhost or custom scheme)
+	webOAuthCfg   *oauth2.Config // web client (redirect: https://dudenest.com/auth); nil = unsupported
+	configDir     string         // where to save tokens (~/.config/dudenest)
+	wsHub         *ws.Hub        // optional — broadcasts auth_request to Flutter (nil = disabled)
 }
 
 // NewServer creates an API server. display e.g. ":99", listenAddr e.g. "0.0.0.0:8086".
-// wsHub may be nil (WebSocket disabled). Use ws.NewHub() for relay-initiated auth.
-func NewServer(display, listenAddr, oauthURL string, oauthCfg *oauth2.Config, configDir string, wsHub *ws.Hub) *Server {
-	return &Server{mgr: NewManager(display), listenAddr: listenAddr, oauthURL: oauthURL, oauthCfg: oauthCfg, configDir: configDir, wsHub: wsHub}
+// webOAuthCfg may be nil (web OAuth disabled). wsHub may be nil (WebSocket disabled).
+func NewServer(display, listenAddr, oauthURL string, oauthCfg, webOAuthCfg *oauth2.Config, configDir string, wsHub *ws.Hub) *Server {
+	return &Server{mgr: NewManager(display), listenAddr: listenAddr, oauthURL: oauthURL, oauthCfg: oauthCfg, webOAuthCfg: webOAuthCfg, configDir: configDir, wsHub: wsHub}
+}
+
+// selectOAuthCfg returns the appropriate OAuth config based on the callback URI.
+// HTTPS callbacks (Flutter web) use the web client; all others use the desktop client.
+func (srv *Server) selectOAuthCfg(callbackURI string) *oauth2.Config {
+	if strings.HasPrefix(callbackURI, "https://") && srv.webOAuthCfg != nil {
+		return srv.webOAuthCfg
+	}
+	return srv.oauthCfg
 }
 
 // RegisterRoutes adds all browser-auth and provider routes to mux.
@@ -72,8 +82,8 @@ func (srv *Server) handleAuthURL(w http.ResponseWriter, r *http.Request) {
 	callbackURI := r.URL.Query().Get("callback")
 	if provider == "" { provider = "gdrive" }
 	if provider != "gdrive" { jsonError(w, "unsupported provider: "+provider, 400); return }
-	cfg := *srv.oauthCfg // copy — do not mutate original
-	if callbackURI != "" { cfg.RedirectURL = callbackURI } // Flutter's redirect URI (custom scheme or localhost)
+	cfg := *srv.selectOAuthCfg(callbackURI) // copy — web vs desktop client based on callback URI
+	if callbackURI != "" { cfg.RedirectURL = callbackURI }
 	authURL := cfg.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
 	jsonOK(w, map[string]string{"url": authURL, "provider": provider, "redirect_uri": cfg.RedirectURL})
 }
@@ -93,8 +103,8 @@ func (srv *Server) handleExchange(w http.ResponseWriter, r *http.Request) {
 	if req.Provider == "" { req.Provider = "gdrive" }
 	if req.Provider != "gdrive" { jsonError(w, "unsupported provider: "+req.Provider, 400); return }
 	if req.Code == "" { jsonError(w, "code required", 400); return }
-	cfg := *srv.oauthCfg
-	if req.RedirectURI != "" { cfg.RedirectURL = req.RedirectURI } // must match what Flutter used when opening the URL
+	cfg := *srv.selectOAuthCfg(req.RedirectURI) // must use same client as handleAuthURL used
+	if req.RedirectURI != "" { cfg.RedirectURL = req.RedirectURI }
 	token, err := ExchangeCode(&cfg, req.Code)
 	if err != nil { jsonError(w, "token exchange: "+err.Error(), 500); return }
 	email, err := GetEmailFromToken(&cfg, token)

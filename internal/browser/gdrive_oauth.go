@@ -59,6 +59,19 @@ func BuildOAuthConfig(cs *GDriveClientSecret) *oauth2.Config {
 	}
 }
 
+// BuildWebOAuthConfig creates an oauth2.Config for the Web Application OAuth client.
+// Used when Flutter web sends https://dudenest.com/auth as the callback URI.
+// GDRIVE_WEB_CLIENT_ID and GDRIVE_WEB_CLIENT_SECRET must be set in the environment.
+func BuildWebOAuthConfig(clientID, clientSecret string) *oauth2.Config {
+	return &oauth2.Config{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		Scopes:       []string{drive.DriveFileScope},
+		Endpoint:     google.Endpoint,
+		RedirectURL:  "https://dudenest.com/auth", // Flutter web callback URL
+	}
+}
+
 // BuildAuthURL returns the URL to navigate Chromium to for user consent.
 func BuildAuthURL(cfg *oauth2.Config) string {
 	return cfg.AuthCodeURL("state-token", oauth2.AccessTypeOffline)

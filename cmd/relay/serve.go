@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/oauth2"
 
 	"github.com/dudenest/dudenest-relay/internal/browser"
 	"github.com/dudenest/dudenest-relay/internal/thumbnail"
@@ -46,8 +47,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load client_secret: %w", err)
 	}
 	cfg := browser.BuildOAuthConfig(cs)
+	var webCfg *oauth2.Config // web client for https://dudenest.com/auth callbacks (Flutter web)
+	if id, secret := os.Getenv("GDRIVE_WEB_CLIENT_ID"), os.Getenv("GDRIVE_WEB_CLIENT_SECRET"); id != "" && secret != "" {
+		webCfg = browser.BuildWebOAuthConfig(id, secret)
+		fmt.Println("relay serve: web OAuth client loaded (GDRIVE_WEB_CLIENT_ID)")
+	}
 	wsHub := ws.NewHub() // WebSocket hub: Flutter connects here, relay sends auth_request messages
-	authSrv := browser.NewServer(authDisplay, serveListen, browser.BuildAuthURL(cfg), cfg, authConfigDir, wsHub)
+	authSrv := browser.NewServer(authDisplay, serveListen, browser.BuildAuthURL(cfg), cfg, webCfg, authConfigDir, wsHub)
 	tc, err := thumbnail.NewCache(authConfigDir)
 	if err != nil {
 		return fmt.Errorf("thumbnail cache: %w", err)
