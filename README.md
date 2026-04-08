@@ -1,6 +1,6 @@
 # dudenest-relay
 
-![Status](https://img.shields.io/badge/Status-Pre--Alpha-orange) ![Language](https://img.shields.io/badge/Language-Go-00ADD8) ![License](https://img.shields.io/badge/License-Apache%202.0-green) ![Hardware](https://img.shields.io/badge/Hardware-Raspberry%20Pi%20Zero%202W%2B-red)
+![Version](https://img.shields.io/badge/Version-v0.3.0-blue) ![Status](https://img.shields.io/badge/Status-Pre--Alpha-orange) ![Language](https://img.shields.io/badge/Language-Go-00ADD8) ![License](https://img.shields.io/badge/License-Apache%202.0-green) ![Hardware](https://img.shields.io/badge/Hardware-Raspberry%20Pi%20Zero%202W%2B-red) ![Last Update](https://img.shields.io/badge/Update-2026--04--08-lightgrey)
 
 **The privacy-preserving bridge between your Dudenest app and your cloud storage accounts.**
 
