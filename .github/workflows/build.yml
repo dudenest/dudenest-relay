@@ -148,7 +148,11 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_RELAY_KEY }}" > ~/.ssh/id_relay
           chmod 600 ~/.ssh/id_relay
-          ssh-keyscan -H 192.168.0.119 >> ~/.ssh/known_hosts 2>/dev/null
+          cat >> ~/.ssh/known_hosts << 'EOF'
+          |1|2m6MVnuf0Zuf3z/RKz3kX2uGmXA=|dJK/G7F0JhxEfZVd9408bh1gtZY= ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEYudfc8afzLb6qXA+tk4LDHB5aTfxFDiuCDOYBzj9x51e13i+34+vWj4UbUd/8vNLezNrJ/B9Ojl+9B2xhG9F0=
+          |1|THiiAf+rjQVEYdOsks3Dw0Ai4+s=|9jZt5ZpfcTLviRKU1O6Y03j5d3w= ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCpX+9BKh/cvHUvlckdZAMLgrP1q0UvBZfGqP1H7wiOVasHEftPz5k7A40ywQDoN63rhA/DmcPDc19DUTcRBbPY0Oh/5Gu1Q3tD66dCmgNxusg5fKP5tdsai4enZ1sxiFY/XbkSb1M67wshYV46JI2HXqHiXCyp9GpA8EbF/bRSU3P78AfOsU2fT4iQWCT4cYRkqIiPw7CJrRgOyb4/luqYMB/keO2/5Y6BQKTDHt1aL2Fp69hnuAzUgVzPCVDo40mhsYhdp9We0R4uDiyl5/BCGjSNu84G4g2yM3hMQ8Rm63edE5dQcM+n8PxjYm3WM+VjJaPgArdh6Pr+KZ+SZO0TV14oQNOLzHUB6dox5/QvpqND2d2uYsFuVt80ScKonG1CQwGH+mfHcO65j3t5Lk2vCPECCCCmcoI1VITZVt2H3bKb/prEa0IH2EPpRLcplPycXzXQQ/HN+ar826EdXI9qAIdZ3cUvHHy+3bT8Sg25koi9Y54WRxpSvtmrocH3f6E=
+          |1|TFYULGsoqG5PC+G2EVhFoc3wXdY=|YC/txGdEda105b0uhOFnCTcb8+c= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILOMuMu0FwC7XN/zMLMQXAjyOyP1ovyTFwa/gM0kBgt8
+          EOF
           chmod 644 ~/.ssh/known_hosts
 
       - name: Deploy to relay-poc
