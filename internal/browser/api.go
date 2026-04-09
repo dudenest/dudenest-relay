@@ -256,7 +256,7 @@ func (srv *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		srv.mgr.Close(sid)
 	}()
 	scheme := "http"
-	if r.TLS != nil { scheme = "https" }
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" { scheme = "https" } // Cloudflare sets X-Forwarded-Proto
 	vncURL := fmt.Sprintf("%s://%s/vnc/dudenest.html?session=%s", scheme, r.Host, sid)
 	fmt.Printf("handleSession: noVNC URL: %s\n", vncURL)
 	jsonOK(w, map[string]string{"session_id": sid, "status": "vnc_ready", "vnc_url": vncURL})
