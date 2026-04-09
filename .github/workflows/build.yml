@@ -7,6 +7,9 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   # ─────────────────────────────────────────────
   # Test on native Go (github-hosted)
@@ -132,7 +135,7 @@ jobs:
   deploy:
     needs: build
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, netol-swarm]  # self-hosted runner on NETOL network — can reach 192.168.0.x directly
     steps:
       - name: Download amd64 artifact
         uses: actions/download-artifact@v4
@@ -145,21 +148,14 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_RELAY_KEY }}" > ~/.ssh/id_relay
           chmod 600 ~/.ssh/id_relay
-          cat >> ~/.ssh/known_hosts << 'EOF'
-          |1|rahCzPh0k+sKf6KoQ/kcfokWtDw=|Drsi+Ebw40kTNx7SMrMnemKMIBg= ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC6dCTZjmnASgsKloiB4QMHLjf6R9muZij/vnt848BVaXWoRUWMHF4Y6Bdk5z1foH3beKSi9enywBIMU8npSUUuCXUUQ4KsWGJJgcAXpAfaEwEzA4xT4e84pmfJUAtLKC1dKwV3InRfgnlX36K1zVwa9+404HKRKfx07HmnK8hzc81y+9CxNbrdzkmFbL91JJF2IJFjKhxLtZowgaBHUGIEJz81Vn8sb0pfnyATSLdULKOrLQya71c2gB+Etm55lYkbbLMKN8IafYuEVdMaASxF3l9yDIPl+Ol6lUCT/e0ZyazwbO7G+FaxGxOIgJ61OdGuy6UiA7cZiBATNu+GBf1YimZAP2s1VkSrJvzHq6UEUrqMrpFVjpYbooWRomquhrNiZmmd8A2bhZ1M5RAY7HHWwa69Vs6XbKT/GWbCDy+S7+cq6aqlkSC1wus3ehP7xuPonkhflrL2d+vKXgVideK7T4/YfEOtyr5WenDveDLBGip3dQDnIu/tT2VIONjv1bM=
-          |1|nZoXDD78gn7lcVLQYPnseZEK64E=|hd3rw7DwdIp4P1x71IWmmnG3/Tk= ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBHZzkTmRr963zcHRlhMr3e5hSQska1lFKaCWVvotRudFXxiCcWqKw0CNV/zz3SdqOQ9H7BSKpj3TcTE31aSGQM4=
-          |1|OHXQsKSMZll0p+c8j5DN3xd8yPg=|CRR8hS3nUWNvJhxp4o8nA+AcN7g= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILKuexLNicIN69PcnFjKa6tKU4adkeGrI4y6X/nba0iQ
-          |1|JyBFdm9rCvD078QcxK9To1ZT5ts=|/q8rPj6LywPcoS5J3nXXYSkhJR0= ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCpX+9BKh/cvHUvlckdZAMLgrP1q0UvBZfGqP1H7wiOVasHEftPz5k7A40ywQDoN63rhA/DmcPDc19DUTcRBbPY0Oh/5Gu1Q3tD66dCmgNxusg5fKP5tdsai4enZ1sxiFY/XbkSb1M67wshYV46JI2HXqHiXCyp9GpA8EbF/bRSU3P78AfOsU2fT4iQWCT4cYRkqIiPw7CJrRgOyb4/luqYMB/keO2/5Y6BQKTDHt1aL2Fp69hnuAzUgVzPCVDo40mhsYhdp9We0R4uDiyl5/BCGjSNu84G4g2yM3hMQ8Rm63edE5dQcM+n8PxjYm3WM+VjJaPgArdh6Pr+KZ+SZO0TV14oQNOLzHUB6dox5/QvpqND2d2uYsFuVt80ScKonG1CQwGH+mfHcO65j3t5Lk2vCPECCCCmcoI1VITZVt2H3bKb/prEa0IH2EPpRLcplPycXzXQQ/HN+ar826EdXI9qAIdZ3cUvHHy+3bT8Sg25koi9Y54WRxpSvtmrocH3f6E=
-          |1|8nKpY1ayi9YH2LLQ9ZE/LiUIcS0=|ONe3NQRQljlPXdrpzHIvTtrkK4c= ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEYudfc8afzLb6qXA+tk4LDHB5aTfxFDiuCDOYBzj9x51e13i+34+vWj4UbUd/8vNLezNrJ/B9Ojl+9B2xhG9F0=
-          |1|AVOj4dMuTO1iVr6QW8xrVa28Ysg=|8fsy790bbuD2330gZqm7yqQBfqk= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILOMuMu0FwC7XN/zMLMQXAjyOyP1ovyTFwa/gM0kBgt8
-          EOF
+          ssh-keyscan -H 192.168.0.119 >> ~/.ssh/known_hosts 2>/dev/null
           chmod 644 ~/.ssh/known_hosts
 
       - name: Deploy to relay-poc
         run: |
           chmod +x dist/relay-linux-amd64
-          scp -i ~/.ssh/id_relay -J root@10.51.1.101 dist/relay-linux-amd64 root@192.168.0.119:/tmp/relay-new
-          ssh -i ~/.ssh/id_relay -J root@10.51.1.101 root@192.168.0.119 \
+          scp -i ~/.ssh/id_relay dist/relay-linux-amd64 root@192.168.0.119:/tmp/relay-new
+          ssh -i ~/.ssh/id_relay root@192.168.0.119 \
             'mv /tmp/relay-new /usr/local/bin/relay && systemctl restart relay.service && systemctl is-active relay.service'
 
   # ─────────────────────────────────────────────
