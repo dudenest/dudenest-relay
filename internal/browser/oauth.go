@@ -27,8 +27,8 @@ func StartCallbackServer(ctx context.Context, timeout time.Duration) (wait func(
 		code := r.URL.Query().Get("code")
 		errMsg := r.URL.Query().Get("error")
 		ch <- CallbackResult{Code: code, Error: errMsg}
-		w.Header().Set("Content-Type", "text/html")
-		_, _ = w.Write([]byte(`<html><body><h2>Authorization complete. You can close this page.</h2></body></html>`))
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<html><head><meta charset="utf-8"></head><body><h2>Authorization complete. You can close this page.</h2></body></html>`))
 	})
 	ln, listenErr := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", callbackPort)) // bind IPv4 only — Chrome may use ::1 for "localhost"
 	if listenErr != nil {
