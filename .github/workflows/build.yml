@@ -169,11 +169,16 @@ jobs:
           docker exec deployer sh -c "
             apk add --no-cache openssh-client && \
             chmod 600 /root/.ssh/id_relay && \
+            cat > /root/.ssh/config << 'SEC'
+            Host 10.51.1.101 192.168.0.119
+              IdentityFile /root/.ssh/id_relay
+              UserKnownHostsFile /root/.ssh/known_hosts
+              StrictHostKeyChecking yes
+            SEC
+            chmod 600 /root/.ssh/config && \
             chmod +x /dist/relay-linux-amd64 && \
-            scp -i /root/.ssh/id_relay -o UserKnownHostsFile=/root/.ssh/known_hosts -o ProxyJump=root@10.51.1.101 \
-              /dist/relay-linux-amd64 root@192.168.0.119:/tmp/relay-new && \
-            ssh -i /root/.ssh/id_relay -o UserKnownHostsFile=/root/.ssh/known_hosts -o ProxyJump=root@10.51.1.101 \
-              root@192.168.0.119 'mv /tmp/relay-new /usr/local/bin/relay && systemctl restart relay.service && systemctl is-active relay.service'
+            scp -o ProxyJump=root@10.51.1.101 /dist/relay-linux-amd64 root@192.168.0.119:/tmp/relay-new && \
+            ssh -o ProxyJump=root@10.51.1.101 root@192.168.0.119 'mv /tmp/relay-new /usr/local/bin/relay && systemctl restart relay.service && systemctl is-active relay.service'
           "
           
           # 5. Cleanup
