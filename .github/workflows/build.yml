@@ -158,8 +158,8 @@ jobs:
       - name: Deploy to relay-poc
         run: |
           chmod +x dist/relay-linux-amd64
-          scp -i ~/.ssh/id_relay dist/relay-linux-amd64 root@192.168.0.119:/tmp/relay-new
-          ssh -i ~/.ssh/id_relay root@192.168.0.119 \
+          scp -i ~/.ssh/id_relay -o ProxyJump=root@10.51.1.101 dist/relay-linux-amd64 root@192.168.0.119:/tmp/relay-new
+          ssh -i ~/.ssh/id_relay -o ProxyJump=root@10.51.1.101 root@192.168.0.119 \
             'mv /tmp/relay-new /usr/local/bin/relay && systemctl restart relay.service && systemctl is-active relay.service'
 
   # ─────────────────────────────────────────────
