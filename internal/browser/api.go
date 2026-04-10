@@ -22,9 +22,9 @@ import (
 
 	"golang.org/x/oauth2"
 
+	"github.com/dudenest/dudenest-relay/internal/auth"
 	"github.com/dudenest/dudenest-relay/internal/ws"
-)
-
+	)
 // Server exposes browser auth sessions over HTTP for Flutter to consume.
 type Server struct {
 	mgr           *Manager
@@ -65,21 +65,38 @@ func (srv *Server) cfgForToken(t *GDriveToken) *oauth2.Config {
 // RegisterRoutes adds all browser-auth and provider routes to mux.
 func (srv *Server) RegisterRoutes(mux *http.ServeMux) {
 	// Method A: Flutter-side OAuth (user's IP for login ✅)
-	mux.HandleFunc("/auth/url", srv.handleAuthURL)
-	mux.HandleFunc("/auth/exchange", srv.handleExchange)
+	mux.HandleFunc("/auth/url", requireAuth(srv.handleAuthURL))
+	mux.HandleFunc("/auth/exchange", requireAuth(srv.handleExchange))
 	// Method B: Browser automation (chromedp on relay, self-hosted only)
-	mux.HandleFunc("/auth/session", srv.handleSession)
-	mux.HandleFunc("/auth/input", srv.handleInput)
-	mux.HandleFunc("/auth/click", srv.handleClick)
-	mux.HandleFunc("/auth/status/", srv.handleStatus)
-	mux.HandleFunc("/auth/close/", srv.handleClose)
+	mux.HandleFunc("/auth/session", requireAuth(srv.handleSession))
+	mux.HandleFunc("/auth/input", requireAuth(srv.handleInput))
+	mux.HandleFunc("/auth/click", requireAuth(srv.handleClick))
+	mux.HandleFunc("/auth/status/", requireAuth(srv.handleStatus))
+	mux.HandleFunc("/auth/close/", requireAuth(srv.handleClose))
 	// Method C: noVNC proxy (relay:8086/vnc/* → localhost:6080/*)
 	mux.Handle("/vnc", http.HandlerFunc(srv.handleVNCProxy))
 	mux.Handle("/vnc/", http.HandlerFunc(srv.handleVNCProxy))
 	// Providers list
-	mux.HandleFunc("/providers", srv.handleProviders)
+	mux.HandleFunc("/providers", requireAuth(srv.handleProviders))
 }
 
+// requireAuth validates JWT Bearer token from dudenest-backend.
+func requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		_, err := auth.ValidateJWT(token)
+		if err != nil {
+			http.Error(w, "invalid token: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	}
+}
 // Run starts the HTTP server (blocking).
 func (srv *Server) Run() error {
 	mux := http.NewServeMux()

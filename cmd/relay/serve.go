@@ -15,7 +15,9 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/oauth2"
 
+	"github.com/dudenest/dudenest-relay/internal/auth"
 	"github.com/dudenest/dudenest-relay/internal/browser"
+
 	"github.com/dudenest/dudenest-relay/internal/thumbnail"
 	"github.com/dudenest/dudenest-relay/internal/ws"
 	"github.com/dudenest/dudenest-relay/pkg/types"
@@ -62,9 +64,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 	authSrv.RegisterRoutes(mux)
 	mux.Handle("/ws", wsHub) // WebSocket: Flutter connects for relay→Flutter auth requests
 	fs := &fileServer{p: p, thumbCache: tc}
-	mux.HandleFunc("/files", fs.handleList)
-	mux.HandleFunc("/files/", fs.handleFile)
+	mux.HandleFunc("/files", requireAuth(fs.handleList))
+	mux.HandleFunc("/files/", requireAuth(fs.handleFile))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }) //nolint:errcheck
+
 	fmt.Printf("relay serve listening on %s (provider: %s, ws: /ws)\n", serveListen, provider)
 	return http.ListenAndServe(serveListen, corsMiddleware(mux))
 }
@@ -236,22 +239,39 @@ func (fs *fileServer) handleDelete(w http.ResponseWriter, r *http.Request, fileI
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "file_id": fileID}) //nolint:errcheck
-}
+	}
 
-// corsMiddleware adds CORS headers for Flutter web clients.
-func corsMiddleware(next http.Handler) http.Handler {
+	// requireAuth validates JWT Bearer token from dudenest-backend.
+	func requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
+	return
+	}
+	token := strings.TrimPrefix(authHeader, "Bearer ")
+	_, err := auth.ValidateJWT(token)
+	if err != nil {
+	http.Error(w, "invalid token: "+err.Error(), http.StatusUnauthorized)
+	return
+	}
+	next.ServeHTTP(w, r)
+	}
+	}
+
+	// corsMiddleware adds CORS headers for Flutter web clients.
+	func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
+	        w.Header().Set("Access-Control-Allow-Origin", "*")
+	        w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+	        w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	        if r.Method == http.MethodOptions {
+	                w.WriteHeader(http.StatusNoContent)
+	                return
+	        }
+	        next.ServeHTTP(w, r)
 	})
-}
-
+	}
 func jsonErr(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
