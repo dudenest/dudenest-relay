@@ -243,22 +243,21 @@ func (fs *fileServer) handleDelete(w http.ResponseWriter, r *http.Request, fileI
 
 	// requireAuth validates JWT Bearer token from dudenest-backend.
 	func requireAuth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
-	http.Error(w, "unauthorized", http.StatusUnauthorized)
-	return
+		return func(w http.ResponseWriter, r *http.Request) {
+			authHeader := r.Header.Get("Authorization")
+			if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+				jsonErr(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			token := strings.TrimPrefix(authHeader, "Bearer ")
+			_, err := auth.ValidateJWT(token)
+			if err != nil {
+				jsonErr(w, "invalid token: "+err.Error(), http.StatusUnauthorized)
+				return
+			}
+			next.ServeHTTP(w, r)
+		}
 	}
-	token := strings.TrimPrefix(authHeader, "Bearer ")
-	_, err := auth.ValidateJWT(token)
-	if err != nil {
-	http.Error(w, "invalid token: "+err.Error(), http.StatusUnauthorized)
-	return
-	}
-	next.ServeHTTP(w, r)
-	}
-	}
-
 	// corsMiddleware adds CORS headers for Flutter web clients.
 	func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

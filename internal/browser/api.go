@@ -85,18 +85,19 @@ func requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			jsonError(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		token := strings.TrimPrefix(authHeader, "Bearer ")
 		_, err := auth.ValidateJWT(token)
 		if err != nil {
-			http.Error(w, "invalid token: "+err.Error(), http.StatusUnauthorized)
+			jsonError(w, "invalid token: "+err.Error(), http.StatusUnauthorized)
 			return
 		}
 		next.ServeHTTP(w, r)
 	}
 }
+
 // Run starts the HTTP server (blocking).
 func (srv *Server) Run() error {
 	mux := http.NewServeMux()
