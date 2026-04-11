@@ -1,6 +1,6 @@
 # dudenest-relay
 
-![Version](https://img.shields.io/badge/Version-v0.3.0-blue) ![Status](https://img.shields.io/badge/Status-Pre--Alpha-orange) ![Language](https://img.shields.io/badge/Language-Go-00ADD8) ![License](https://img.shields.io/badge/License-Apache%202.0-green) ![Hardware](https://img.shields.io/badge/Hardware-Raspberry%20Pi%20Zero%202W%2B-red) ![Last Update](https://img.shields.io/badge/Update-2026--04--08-lightgrey)
+![Version](https://img.shields.io/badge/Version-v0.4.1-blue) ![Status](https://img.shields.io/badge/Status-Pre--Alpha-orange) ![Language](https://img.shields.io/badge/Language-Go-00ADD8) ![License](https://img.shields.io/badge/License-Apache%202.0-green) ![Hardware](https://img.shields.io/badge/Hardware-Raspberry%20Pi%20Zero%202W%2B-red) ![Last Update](https://img.shields.io/badge/Update-2026--04--12-lightgrey)
 
 **The privacy-preserving bridge between your Dudenest app and your cloud storage accounts.**
 
@@ -175,3 +175,16 @@ Apache License 2.0
 
 **Author**: Dariusz Porczyński
 **Organization**: https://github.com/dudenest
+
+## Changelog
+
+### v0.4.1 — 2026-04-12 — Security & Stability
+- 🔐 **JWT Enforcement**: All Relay API endpoints now strictly require HS256 JWT authorization.
+- 🚀 **v0.4.1 Release**: Official cross-compiled binaries for Linux x86_64 and ARM64.
+- 🔧 **Service Restoration**: Successfully restored service on `relay-poc` after `pve101` host crash.
+
+### v0.4.0 — 2026-04-09 — Browser Auth & VNC UX
+- 🖥️ **noVNC Browser Auth**: Implemented integrated `/vnc` proxy for OAuth flow without leaving the app.
+- ✂️ **VNC Crop**: Optimized VNC view with 115px top crop to hide browser chrome and title bar.
+- 🐛 **Port 8085 Fix**: Resolved `cbCancel` lifecycle bug affecting authentication sessions.
+- 🌐 **HTTPS Protocol Forwarding**: Correctly handle `X-Forwarded-Proto: https` for Cloudflare tunnels.
