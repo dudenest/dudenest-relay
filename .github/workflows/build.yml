@@ -156,17 +156,18 @@ jobs:
           EOF
           chmod 644 .ssh/known_hosts
 
-          # 2. Create a temporary container (network host)
-          # We use a long-running sleep to keep it alive for 'docker cp' and 'docker exec'
-          docker create --name deployer --network host alpine:latest sleep 300
+          # 2. Create a temporary container (network host) with UNIQUE name
+          DEPLOYER="deployer-${{ github.run_id }}-${{ github.run_attempt }}"
+          docker rm -f $DEPLOYER 2>/dev/null || true
+          docker create --name $DEPLOYER --network host alpine:latest sleep 300
           
           # 3. Copy artifacts and SSH keys into the container
-          docker cp dist deployer:/dist
-          docker cp .ssh deployer:/root/.ssh
+          docker cp dist $DEPLOYER:/dist
+          docker cp .ssh $DEPLOYER:/root/.ssh
           
           # 4. Run the deployment commands inside the container
-          docker start deployer
-          docker exec deployer sh -c "
+          docker start $DEPLOYER
+          docker exec $DEPLOYER sh -c "
             apk add --no-cache openssh-client && \
             chmod 600 /root/.ssh/id_relay && \
             cat > /root/.ssh/config << 'SEC'
@@ -182,7 +183,7 @@ jobs:
           "
           
           # 5. Cleanup
-          docker rm -f deployer
+          docker rm -f $DEPLOYER
 
   # ─────────────────────────────────────────────
   # GitHub Release with all binaries (tags only)
