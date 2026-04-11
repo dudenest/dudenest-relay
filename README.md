@@ -150,10 +150,22 @@ pkg/
 
 ## Security
 
-- **Keys never leave Relay**: decryption keys derived on-device, never sent to Dudenest servers
-- **Per-block keys**: each block has unique HKDF-derived key
-- **Memory safety**: Go's memory model prevents buffer overflows
-- **Minimal attack surface**: Relay exposes only WireGuard port (no public ports needed)
+- **Zero-Knowledge**: Decryption keys and file maps never leave the Relay. Dudenest SaaS servers only see encrypted, erasure-coded chunks.
+- **API Hardening**: All Relay API endpoints (except `/health` and noVNC static assets) require JWT authentication.
+- **Shared Secret**: Relay validates tokens issued by `dudenest-backend` using a shared `JWT_SECRET`.
+- **Per-block keys**: Each block has a unique HKDF-derived key.
+- **Memory safety**: Go's memory model prevents buffer overflows.
+
+## Configuration (Environment Variables)
+
+The following variables must be set for the Relay to function securely:
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `RELAY_KEY` | Master encryption key (hex or pass) | `32-char-hex-string` |
+| `JWT_SECRET` | Shared secret for JWT validation | `HS256-signing-key` |
+| `GDRIVE_WEB_CLIENT_ID` | Google OAuth Web Client ID | `...googleusercontent.com` |
+| `GDRIVE_WEB_CLIENT_SECRET` | Google OAuth Web Client Secret | `GOCSPX-...` |
 
 ## License
 
