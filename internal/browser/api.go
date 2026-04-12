@@ -23,6 +23,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/dudenest/dudenest-relay/internal/auth"
+	"github.com/dudenest/dudenest-relay/pkg/types"
 	"github.com/dudenest/dudenest-relay/internal/ws"
 	)
 // Server exposes browser auth sessions over HTTP for Flutter to consume.
@@ -55,7 +56,7 @@ func (srv *Server) selectOAuthCfg(callbackURI string) *oauth2.Config {
 
 // cfgForToken returns the oauth2.Config that issued a token (matched by ClientID).
 // Falls back to desktop client for legacy tokens without ClientID stored.
-func (srv *Server) cfgForToken(t *GDriveToken) *oauth2.Config {
+func (srv *Server) cfgForToken(t *types.GDriveToken) *oauth2.Config {
 	if t.ClientID != "" && srv.webOAuthCfg != nil && t.ClientID == srv.webOAuthCfg.ClientID {
 		return srv.webOAuthCfg
 	}
@@ -148,7 +149,7 @@ func (srv *Server) handleExchange(w http.ResponseWriter, r *http.Request) {
 	if err != nil { email = "unknown@gmail.com" } // non-fatal
 	rt := token.RefreshToken
 	if rt == "" { rt = existingRefreshToken(srv.configDir, email) } // Google omits rt on re-auth; preserve existing
-	gt := &GDriveToken{
+	gt := &types.GDriveToken{
 		AccessToken:  token.AccessToken,
 		TokenType:    token.TokenType,
 		RefreshToken: rt,
@@ -258,7 +259,7 @@ func (srv *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		if email == "" { email = "unknown@gmail.com" }
 		rt := token.RefreshToken
 		if rt == "" { rt = existingRefreshToken(srv.configDir, email) }
-		gt := &GDriveToken{
+		gt := &types.GDriveToken{
 			AccessToken: token.AccessToken, TokenType: token.TokenType, RefreshToken: rt,
 			Expiry: token.Expiry, Email: email, ProviderID: upsertProviderID(srv.configDir, email),
 			ClientID: srv.oauthCfg.ClientID,
@@ -402,7 +403,7 @@ func (srv *Server) handleClick(w http.ResponseWriter, r *http.Request) {
 		}
 		rt := token.RefreshToken
 		if rt == "" { rt = existingRefreshToken(srv.configDir, email) }
-		gt := &GDriveToken{
+		gt := &types.GDriveToken{
 			AccessToken:  token.AccessToken,
 			TokenType:    token.TokenType,
 			RefreshToken: rt,

@@ -75,7 +75,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 // fileServer handles /files/* endpoints using the pipeline.
 type fileServer struct {
 	p interface {
-		Upload(filePath string) (*types.FileMap, error)
+		Upload(filePath string, strategy string) (*types.FileMap, error)
 		Download(fileID, outputPath string) error
 		ListFiles() ([]*types.FileMap, error)
 		DeleteFile(fileID string) error
@@ -117,6 +117,8 @@ func (fs *fileServer) handleFile(w http.ResponseWriter, r *http.Request) {
 		fs.handleUpload(w, r)
 	case strings.HasSuffix(path, "/thumbnail") && r.Method == http.MethodGet:
 		fs.handleThumbnail(w, r, strings.TrimSuffix(path, "/thumbnail"))
+	case strings.HasSuffix(path, "/map") && r.Method == http.MethodGet:
+		fs.handleGetMap(w, r, strings.TrimSuffix(path, "/map"))
 	case path != "" && r.Method == http.MethodGet:
 		fs.handleDownload(w, r, path)
 	case path != "" && r.Method == http.MethodDelete:
@@ -126,6 +128,26 @@ func (fs *fileServer) handleFile(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (fs *fileServer) handleGetMap(w http.ResponseWriter, r *http.Request, fileID string) {
+	fm, err := fs.p.(*pipeline.Pipeline).ListFiles() // This is a bit inefficient, but Pipeline doesn't have Load() exposed in interface yet
+	if err != nil {
+		jsonErr(w, "list maps: "+err.Error(), 500)
+		return
+	}
+	var found *types.FileMap
+	for _, m := range fm {
+		if m.FileID == fileID {
+			found = m
+			break
+		}
+	}
+	if found == nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(found) //nolint:errcheck
+}
 // handleUpload accepts multipart/form-data with field "file", uploads via pipeline.
 func (fs *fileServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(32 << 20); err != nil { // 32MB memory buffer
@@ -156,7 +178,9 @@ func (fs *fileServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tmp.Close()
-	fm, err := fs.p.Upload(tmpPath)
+	strategy := r.FormValue("strategy")
+	if strategy == "" { strategy = types.StrategyChunking }
+	fm, err := fs.p.Upload(tmpPath, strategy)
 	if err != nil {
 		jsonErr(w, "upload: "+err.Error(), 500)
 		return
@@ -170,6 +194,7 @@ func (fs *fileServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 		"name":    header.Filename,
 		"size":    fm.Size,
 		"hash":    fm.Hash,
+		"strategy": fm.Strategy,
 		"chunks":  len(fm.Chunks),
 	})
 }

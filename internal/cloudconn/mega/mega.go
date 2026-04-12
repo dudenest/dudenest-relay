@@ -12,6 +12,7 @@ import (
 
 // Provider stores blocks on MEGA.nz.
 type Provider struct {
+	email        string
 	client   *gm.Mega
 	root     *gm.Node
 	basePath string
@@ -23,14 +24,14 @@ func New(email, password, basePath string) (*Provider, error) {
 	if err := m.Login(email, password); err != nil {
 		return nil, fmt.Errorf("mega login: %w", err)
 	}
-	p := &Provider{client: m, root: m.FS.GetRoot(), basePath: basePath}
+	p := &Provider{email: email, client: m, root: m.FS.GetRoot(), basePath: basePath}
 	if err := p.ensureDir(basePath); err != nil {
 		return nil, fmt.Errorf("mega mkdir base: %w", err)
 	}
 	return p, nil
 }
 
-func (p *Provider) Name() string { return "mega" }
+func (p *Provider) ID() string { return "mega:" + p.email }
 
 func (p *Provider) Upload(path string, data []byte) error {
 	dir := filepath.Dir(filepath.Join(p.basePath, path))

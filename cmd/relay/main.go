@@ -30,6 +30,7 @@ var (
 	gdriveTokenPath  string
 	gdriveSecretPath string
 	gdriveBasePath   string
+	uploadStrategy   string
 )
 
 func main() {
@@ -39,7 +40,7 @@ func main() {
 	}
 	root.PersistentFlags().StringVar(&masterKey, "key", "", "master key hex (32 bytes) or password")
 	root.PersistentFlags().StringVar(&storePath, "map-store", "/tmp/dudenest-maps", "path for FileMap storage")
-	root.PersistentFlags().StringVar(&provider, "provider", "local", "cloud provider: local, mega, gdrive")
+	root.PersistentFlags().StringVar(&provider, "provider", "auto", "cloud provider: auto, local, mega, gdrive")
 	// local provider flags
 	root.PersistentFlags().StringVar(&cloudPath, "cloud-path", "/tmp/dudenest-blocks", "local cloud provider path")
 	// MEGA flags
@@ -50,6 +51,7 @@ func main() {
 	root.PersistentFlags().StringVar(&gdriveTokenPath, "gdrive-token", "", "path to gdrive_<id>.json token file")
 	root.PersistentFlags().StringVar(&gdriveSecretPath, "gdrive-secret", "/root/.config/dudenest/gdrive_client_secret.json", "path to client_secret.json")
 	root.PersistentFlags().StringVar(&gdriveBasePath, "gdrive-path", "dudenest-relay", "Google Drive base folder name")
+	root.PersistentFlags().StringVar(&uploadStrategy, "strategy", types.StrategyChunking, "upload strategy: Chunking, Replica")
 
 	authCmd := &cobra.Command{Use: "auth", Short: "Authenticate cloud provider accounts"}
 	authCmd.AddCommand(authGDriveCmd())
@@ -70,20 +72,36 @@ func getKey() ([]byte, error) {
 	return key, nil
 }
 
-func getCloud() (types.CloudProvider, error) {
+func getClouds() ([]types.CloudProvider, error) {
+	home, _ := os.UserHomeDir()
+	configDir := filepath.Join(home, ".config/dudenest")
+
+	// If provider is "auto", load all saved tokens
+	if provider == "auto" || provider == "" {
+		return pipeline.LoadAllProviders(configDir, gdriveSecretPath, gdriveBasePath)
+	}
+
 	switch provider {
 	case "mega":
 		if megaEmail == "" || megaPassword == "" {
 			return nil, fmt.Errorf("--mega-email and --mega-password required for mega provider")
 		}
-		return megaconn.New(megaEmail, megaPassword, megaBasePath)
+		p, err := megaconn.New(megaEmail, megaPassword, megaBasePath)
+		if err != nil {
+			return nil, err
+		}
+		return []types.CloudProvider{p}, nil
 	case "gdrive":
 		if gdriveTokenPath == "" {
 			return nil, fmt.Errorf("--gdrive-token required for gdrive provider")
 		}
-		return gdriveconn.New(gdriveTokenPath, gdriveSecretPath, gdriveBasePath)
+		p, err := gdriveconn.New("gdrive:manual", gdriveTokenPath, gdriveSecretPath, gdriveBasePath)
+		if err != nil {
+			return nil, err
+		}
+		return []types.CloudProvider{p}, nil
 	default: // "local"
-		return local.New(cloudPath), nil
+		return []types.CloudProvider{local.New(cloudPath)}, nil
 	}
 }
 
@@ -92,17 +110,19 @@ func getPipeline() (*pipeline.Pipeline, error) {
 	if err != nil {
 		return nil, err
 	}
-	cloud, err := getCloud()
+	clouds, err := getClouds()
 	if err != nil {
 		return nil, fmt.Errorf("cloud init: %w", err)
 	}
-	return pipeline.New(key, cloud, storePath)
+	if len(clouds) == 0 {
+		return nil, fmt.Errorf("no cloud providers available")
+	}
+	return pipeline.New(key, clouds, storePath)
 }
-
 func uploadCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "upload <file>",
-		Short: "Chunk, encrypt, erasure-code and upload a file",
+		Short: "Chunk, encrypt, erasure-code or replicate and upload a file",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p, err := getPipeline()
@@ -110,16 +130,20 @@ func uploadCmd() *cobra.Command {
 				return err
 			}
 			start := time.Now()
-			fm, err := p.Upload(args[0])
+			fm, err := p.Upload(args[0], uploadStrategy)
 			if err != nil {
 				return fmt.Errorf("upload failed: %w", err)
 			}
 			elapsed := time.Since(start)
-			fmt.Printf("✅ Uploaded: %s\n", fm.Name)
+			fmt.Printf("✅ Uploaded: %s (strategy: %s)\n", fm.Name, fm.Strategy)
 			fmt.Printf("   File ID:  %s\n", fm.FileID)
 			fmt.Printf("   Size:     %d bytes (%.1f MB)\n", fm.Size, float64(fm.Size)/1024/1024)
 			fmt.Printf("   Chunks:   %d × %.0fMB\n", len(fm.Chunks), float64(fm.ChunkSize)/1024/1024)
-			fmt.Printf("   Shards:   %d per chunk (6 data + 3 parity)\n", 9)
+			if fm.Strategy == types.StrategyReplica {
+				fmt.Printf("   Replicas: 3 (1 main + 2 backups)\n")
+			} else {
+				fmt.Printf("   Shards:   %d per chunk (6 data + 3 parity)\n", 9)
+			}
 			fmt.Printf("   SHA-256:  %s\n", fm.Hash)
 			fmt.Printf("   Time:     %s (%.1f MB/s)\n", elapsed, float64(fm.Size)/elapsed.Seconds()/1024/1024)
 			return nil
@@ -161,7 +185,7 @@ func infoCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("dudenest-relay v0.1.0\n")
+			fmt.Printf("dudenest-relay v0.4.2\n")
 			fmt.Printf("Master key: %s...\n", hex.EncodeToString(key[:4]))
 			fmt.Printf("Provider:   %s\n", provider)
 			if provider == "local" {
@@ -169,8 +193,7 @@ func infoCmd() *cobra.Command {
 			}
 			fmt.Printf("Map store:  %s\n", storePath)
 			fmt.Printf("Chunk size: 8 MB\n")
-			fmt.Printf("Erasure:    6+3 Reed-Solomon (tolerates 3 failures)\n")
-			fmt.Printf("Crypto:     AES-256-GCM + HKDF per-block key derivation\n")
+			fmt.Printf("Strategies: Chunking (6+3 RS), Replica (1+2)\n")
 			return nil
 		},
 	}
@@ -186,9 +209,9 @@ func benchCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Benchmarking %s (provider: %s)...\n", args[0], provider)
+			fmt.Printf("Benchmarking %s (strategy: %s)...\n", args[0], uploadStrategy)
 			start := time.Now()
-			fm, err := p.Upload(args[0])
+			fm, err := p.Upload(args[0], uploadStrategy)
 			if err != nil {
 				return err
 			}
@@ -205,8 +228,8 @@ func benchCmd() *cobra.Command {
 			fmt.Printf("   File size:     %.1f MB\n", size)
 			fmt.Printf("   Upload:        %s (%.1f MB/s)\n", uploadTime, size/uploadTime.Seconds())
 			fmt.Printf("   Download:      %s (%.1f MB/s)\n", downloadTime, size/downloadTime.Seconds())
+			fmt.Printf("   Strategy:      %s\n", fm.Strategy)
 			fmt.Printf("   Chunks:        %d\n", len(fm.Chunks))
-			fmt.Printf("   Shards total:  %d (9 per chunk)\n", len(fm.Chunks)*9)
 			return nil
 		},
 	}

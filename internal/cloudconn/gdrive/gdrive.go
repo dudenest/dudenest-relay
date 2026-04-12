@@ -30,6 +30,7 @@ type tokenFile struct {
 // Provider stores blocks on Google Drive in a dedicated app folder tree.
 // Thread-safe: folderCache protected by mu (parallel shard uploads use same Provider).
 type Provider struct {
+	id           string
 	svc          *drive.Service
 	baseFolderID string
 	folderCache  map[string]string
@@ -38,7 +39,7 @@ type Provider struct {
 
 // New creates a Provider. tokenPath = gdrive_<id>.json, clientSecretPath = client_secret.json.
 // basePath is the folder name created under Drive root (e.g. "dudenest-relay").
-func New(tokenPath, clientSecretPath, basePath string) (*Provider, error) {
+func New(id, tokenPath, clientSecretPath, basePath string) (*Provider, error) {
 	tok, err := loadToken(tokenPath)
 	if err != nil {
 		return nil, fmt.Errorf("load token: %w", err)
@@ -57,7 +58,7 @@ func New(tokenPath, clientSecretPath, basePath string) (*Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("drive service: %w", err)
 	}
-	p := &Provider{svc: svc, folderCache: make(map[string]string)}
+	p := &Provider{id: id, svc: svc, folderCache: make(map[string]string)}
 	p.baseFolderID, err = p.ensureFolder(basePath, "root")
 	if err != nil {
 		return nil, fmt.Errorf("ensure base folder %q: %w", basePath, err)
@@ -65,7 +66,7 @@ func New(tokenPath, clientSecretPath, basePath string) (*Provider, error) {
 	return p, nil
 }
 
-func (p *Provider) Name() string { return "gdrive" }
+func (p *Provider) ID() string { return p.id }
 
 // Upload creates or overwrites a file at path under the base folder.
 func (p *Provider) Upload(path string, data []byte) error {

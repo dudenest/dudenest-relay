@@ -16,15 +16,15 @@ import (
 
 // Pipeline ties together all relay components.
 type Pipeline struct {
-	enc      *crypto.Encryptor
-	rs       *erasure.Encoder
-	bm       *blockmap.Manager
-	cloud    types.CloudProvider
-	chunkSz  int
+	enc     *crypto.Encryptor
+	rs      *erasure.Encoder
+	bm      *blockmap.Manager
+	clouds  []types.CloudProvider // multiple providers for Replica strategy
+	chunkSz int
 }
 
-// New creates a pipeline with a master key and cloud provider.
-func New(masterKey []byte, cloud types.CloudProvider, mapStorePath string) (*Pipeline, error) {
+// New creates a pipeline with a master key and cloud providers.
+func New(masterKey []byte, clouds []types.CloudProvider, mapStorePath string) (*Pipeline, error) {
 	enc, err := crypto.New(masterKey)
 	if err != nil {
 		return nil, fmt.Errorf("crypto init: %w", err)
@@ -37,29 +37,37 @@ func New(masterKey []byte, cloud types.CloudProvider, mapStorePath string) (*Pip
 		enc:     enc,
 		rs:      rs,
 		bm:      blockmap.New(mapStorePath),
-		cloud:   cloud,
+		clouds:  clouds,
 		chunkSz: types.ChunkSize,
 	}, nil
 }
 
-// Upload chunks, encrypts, erasure-codes and uploads a file. Returns FileMap.
-// Shards within each chunk are uploaded in parallel (goroutines).
-func (p *Pipeline) Upload(filePath string) (*types.FileMap, error) {
+// Upload chunks, encrypts and stores a file using selected strategy.
+func (p *Pipeline) Upload(filePath string, strategy string) (*types.FileMap, error) {
 	fm, err := blockmap.NewFileMap(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("new filemap: %w", err)
 	}
+	fm.Strategy = strategy
+	if strategy == types.StrategyReplica {
+		return p.uploadReplica(fm, filePath)
+	}
+	return p.uploadChunking(fm, filePath)
+}
+
+func (p *Pipeline) uploadChunking(fm *types.FileMap, filePath string) (*types.FileMap, error) {
 	metas, chunks, err := blockstore.ChunkFile(filePath, p.chunkSz)
 	if err != nil {
 		return nil, fmt.Errorf("chunk: %w", err)
 	}
+	cloud := p.clouds[0] // Default to first cloud for legacy chunking
 	for i, chunk := range chunks {
 		shards, err := p.rs.Split(chunk)
 		if err != nil {
 			return nil, fmt.Errorf("chunk %d split: %w", i, err)
 		}
 		meta := &metas[i]
-		blocks := make([]types.Block, len(shards)) // pre-allocated, index-safe for goroutines
+		blocks := make([]types.Block, len(shards))
 		errs := make([]error, len(shards))
 		var wg sync.WaitGroup
 		for j, shard := range shards {
@@ -73,23 +81,70 @@ func (p *Pipeline) Upload(filePath string) (*types.FileMap, error) {
 					return
 				}
 				cloudPath := fmt.Sprintf("blocks/%s/%d/%d", meta.Hash[:8], i, j)
-				if upErr := p.cloud.Upload(cloudPath, encrypted); upErr != nil {
+				if upErr := cloud.Upload(cloudPath, encrypted); upErr != nil {
 					errs[j] = fmt.Errorf("upload chunk %d shard %d: %w", i, j, upErr)
 					return
 				}
 				blocks[j] = types.Block{
-					ID:       blockID,
-					ShardIdx: j,
-					Size:     int64(len(encrypted)),
-					Location: fmt.Sprintf("%s:%s", p.cloud.Name(), cloudPath),
-					Created:  time.Now().UTC(),
+					ID: blockID, ShardIdx: j, Size: int64(len(encrypted)),
+					Location: fmt.Sprintf("%s:%s", cloud.Name(), cloudPath), Created: time.Now().UTC(),
 				}
 			}(j, shard)
 		}
 		wg.Wait()
 		for j, e := range errs {
 			if e != nil {
-				return nil, fmt.Errorf("chunk %d shard %d: %w", i, j, e)
+				return nil, e
+			}
+		}
+		meta.Shards = blocks
+		fm.Chunks = append(fm.Chunks, metas[i])
+	}
+	if err := p.bm.Save(fm); err != nil {
+		return nil, fmt.Errorf("save filemap: %w", err)
+	}
+	return fm, nil
+}
+
+func (p *Pipeline) uploadReplica(fm *types.FileMap, filePath string) (*types.FileMap, error) {
+	metas, chunks, err := blockstore.ChunkFile(filePath, p.chunkSz)
+	if err != nil {
+		return nil, fmt.Errorf("chunk: %w", err)
+	}
+	if len(p.clouds) < 3 {
+		return nil, fmt.Errorf("replica strategy requires at least 3 cloud providers, got %d", len(p.clouds))
+	}
+	for i, chunk := range chunks {
+		meta := &metas[i]
+		blocks := make([]types.Block, 3) // 1 main + 2 backups
+		errs := make([]error, 3)
+		var wg sync.WaitGroup
+		for j := 0; j < 3; j++ {
+			wg.Add(1)
+			go func(j int) {
+				defer wg.Done()
+				cloud := p.clouds[j]
+				blockID := fmt.Sprintf("%s.%d.r%d", fm.FileID, i, j)
+				encrypted, encErr := p.enc.Encrypt(blockID, chunk)
+				if encErr != nil {
+					errs[j] = encErr
+					return
+				}
+				cloudPath := fmt.Sprintf("replicas/%s/%d/r%d", meta.Hash[:8], i, j)
+				if upErr := cloud.Upload(cloudPath, encrypted); upErr != nil {
+					errs[j] = upErr
+					return
+				}
+				blocks[j] = types.Block{
+					ID: blockID, ShardIdx: j, Size: int64(len(encrypted)),
+					Location: fmt.Sprintf("%s:%s", cloud.Name(), cloudPath), Created: time.Now().UTC(),
+				}
+			}(j)
+		}
+		wg.Wait()
+		for _, e := range errs {
+			if e != nil {
+				return nil, e
 			}
 		}
 		meta.Shards = blocks
@@ -102,7 +157,6 @@ func (p *Pipeline) Upload(filePath string) (*types.FileMap, error) {
 }
 
 // Download retrieves, decrypts, and reassembles a file from its FileMap.
-// Shards within each chunk are downloaded in parallel (goroutines).
 func (p *Pipeline) Download(fileID, outputPath string) error {
 	fm, err := p.bm.Load(fileID)
 	if err != nil {
@@ -110,67 +164,79 @@ func (p *Pipeline) Download(fileID, outputPath string) error {
 	}
 	var allChunks [][]byte
 	for _, meta := range fm.Chunks {
-		shards := make([][]byte, types.TotalShards) // index-safe, each goroutine writes distinct idx
-		var mu sync.Mutex                           // protects nothing critical — shards[idx] distinct
-		var wg sync.WaitGroup
-		for _, block := range meta.Shards {
-			wg.Add(1)
-			go func(block types.Block) {
-				defer wg.Done()
-				cloudPath := parseCloudPath(block.Location)
-				data, dlErr := p.cloud.Download(cloudPath)
-				if dlErr != nil {
-					return // shard unavailable — RS reconstructs from remaining
-				}
-				plainShard, decErr := p.enc.Decrypt(block.ID, data)
-				if decErr != nil {
-					return // corrupted shard — RS handles
-				}
-				_ = mu // suppress unused warning; shards[idx] writes are non-overlapping
-				shards[block.ShardIdx] = plainShard
-			}(block)
+		var chunk []byte
+		if fm.Strategy == types.StrategyReplica {
+			chunk, err = p.downloadReplica(meta)
+		} else {
+			chunk, err = p.downloadChunking(meta)
 		}
-		wg.Wait()
-		chunk, err := p.rs.Join(shards, int(meta.Size))
 		if err != nil {
-			return fmt.Errorf("reconstruct chunk %d: %w", meta.Index, err)
+			return fmt.Errorf("chunk %d: %w", meta.Index, err)
 		}
 		allChunks = append(allChunks, chunk)
 	}
 	if err := blockstore.ReassembleFile(outputPath, allChunks); err != nil {
 		return fmt.Errorf("reassemble: %w", err)
 	}
-	if err := blockmap.Verify(outputPath, fm); err != nil {
-		return fmt.Errorf("verify: %w", err)
+	return blockmap.Verify(outputPath, fm)
+}
+
+func (p *Pipeline) downloadChunking(meta types.ChunkMeta) ([]byte, error) {
+	shards := make([][]byte, types.TotalShards)
+	var wg sync.WaitGroup
+	for _, block := range meta.Shards {
+		wg.Add(1)
+		go func(block types.Block) {
+			defer wg.Done()
+			cloud := p.getCloudByName(block.Location)
+			if cloud == nil {
+				return
+			}
+			data, dlErr := cloud.Download(parseCloudPath(block.Location))
+			if dlErr != nil {
+				return
+			}
+			plain, decErr := p.enc.Decrypt(block.ID, data)
+			if decErr == nil {
+				shards[block.ShardIdx] = plain
+			}
+		}(block)
+	}
+	wg.Wait()
+	return p.rs.Join(shards, int(meta.Size))
+}
+
+func (p *Pipeline) downloadReplica(meta types.ChunkMeta) ([]byte, error) {
+	var lastErr error
+	for _, block := range meta.Shards { // Shards are replicas (main, backup1, backup2)
+		cloud := p.getCloudByName(block.Location)
+		if cloud == nil {
+			continue
+		}
+		data, dlErr := cloud.Download(parseCloudPath(block.Location))
+		if dlErr != nil {
+			lastErr = dlErr
+			continue
+		}
+		plain, decErr := p.enc.Decrypt(block.ID, data)
+		if decErr != nil {
+			lastErr = decErr
+			continue
+		}
+		return plain, nil // Success — return first available replica
+	}
+	return nil, fmt.Errorf("all replicas unavailable: %v", lastErr)
+}
+
+func (p *Pipeline) getCloudByName(location string) types.CloudProvider {
+	name := strings.Split(location, ":")[0]
+	for _, c := range p.clouds {
+		if c.Name() == name {
+			return c
+		}
 	}
 	return nil
 }
-
-// ListFiles returns all uploaded FileMaps from local storage.
-func (p *Pipeline) ListFiles() ([]*types.FileMap, error) {
-	return p.bm.List()
-}
-
-// DeleteFile removes all cloud blocks for a file and its local FileMap.
-func (p *Pipeline) DeleteFile(fileID string) error {
-	fm, err := p.bm.Load(fileID)
-	if err != nil {
-		return fmt.Errorf("load filemap: %w", err)
-	}
-	var firstErr error
-	for _, meta := range fm.Chunks {
-		for _, block := range meta.Shards {
-			cloudPath := parseCloudPath(block.Location)
-			if err := p.cloud.Delete(cloudPath); err != nil && firstErr == nil {
-				firstErr = fmt.Errorf("delete shard %s: %w", block.ID, err)
-			}
-		}
-	}
-	mapPath := fmt.Sprintf("%s/%s.json", p.bm.StorePath(), fileID)
-	os.Remove(mapPath) //nolint:errcheck
-	return firstErr
-}
-
 func parseCloudPath(location string) string {
 	for i, c := range location {
 		if c == ':' {

@@ -18,7 +18,7 @@ func New(basePath string) *Provider {
 	return &Provider{basePath: basePath}
 }
 
-func (p *Provider) Name() string { return "local" }
+func (p *Provider) ID() string { return "local" }
 
 func (p *Provider) Upload(path string, data []byte) error {
 	full := filepath.Join(p.basePath, path)

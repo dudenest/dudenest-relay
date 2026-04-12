@@ -13,10 +13,12 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/drive/v3"
-)
 
-// GDriveClientSecret matches the structure of client_secret.json (Desktop App type).
-type GDriveClientSecret struct {
+	"github.com/dudenest/dudenest-relay/pkg/types"
+	)
+
+	// GDriveClientSecret matches the structure of client_secret.json (Desktop App type).
+	type GDriveClientSecret struct {
 	Installed struct {
 		ClientID     string   `json:"client_id"`
 		ClientSecret string   `json:"client_secret"`
@@ -24,21 +26,9 @@ type GDriveClientSecret struct {
 		TokenURI     string   `json:"token_uri"`
 		RedirectURIs []string `json:"redirect_uris"`
 	} `json:"installed"`
-}
+	}
 
-// GDriveToken is persisted to ~/.config/dudenest/providers/gdrive_<id>.json.
-type GDriveToken struct {
-	AccessToken  string    `json:"access_token"`
-	TokenType    string    `json:"token_type"`
-	RefreshToken string    `json:"refresh_token"`
-	Expiry       time.Time `json:"expiry"`
-	Email        string    `json:"email"`
-	ProviderID   string    `json:"provider_id"`
-	ClientID     string    `json:"client_id,omitempty"` // which OAuth client issued this token (web vs desktop)
-}
-
-// LoadClientSecret reads and parses client_secret.json.
-func LoadClientSecret(path string) (*GDriveClientSecret, error) {
+	// LoadClientSecret reads and parses client_secret.json.func LoadClientSecret(path string) (*GDriveClientSecret, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read client_secret: %w", err)
@@ -102,12 +92,12 @@ func GetEmailFromToken(cfg *oauth2.Config, token *oauth2.Token) (string, error) 
 }
 
 // LoadToken reads a GDriveToken from a file.
-func LoadToken(path string) (*GDriveToken, error) {
+func LoadToken(path string) (*types.GDriveToken, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	var t GDriveToken
+	var t types.GDriveToken
 	if err := json.Unmarshal(data, &t); err != nil {
 		return nil, fmt.Errorf("parse token: %w", err)
 	}
@@ -115,7 +105,7 @@ func LoadToken(path string) (*GDriveToken, error) {
 }
 
 // GetDriveQuota returns (totalBytes, usedBytes) for a GDrive account.
-func GetDriveQuota(cfg *oauth2.Config, t *GDriveToken) (totalBytes, usedBytes int64, err error) {
+func GetDriveQuota(cfg *oauth2.Config, t *types.GDriveToken) (totalBytes, usedBytes int64, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	oauthTok := &oauth2.Token{AccessToken: t.AccessToken, TokenType: t.TokenType, RefreshToken: t.RefreshToken, Expiry: t.Expiry}
@@ -131,7 +121,7 @@ func GetDriveQuota(cfg *oauth2.Config, t *GDriveToken) (totalBytes, usedBytes in
 }
 
 // SaveToken persists a GDriveToken to the providers directory.
-func SaveToken(configDir, providerID string, t *GDriveToken) error {
+func SaveToken(configDir, providerID string, t *types.GDriveToken) error {
 	dir := filepath.Join(configDir, "providers")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
@@ -145,7 +135,7 @@ func SaveToken(configDir, providerID string, t *GDriveToken) error {
 }
 
 // overwriteToken writes an updated token to an existing file path (for refresh persistence).
-func overwriteToken(path string, t *GDriveToken) error {
+func overwriteToken(path string, t *types.GDriveToken) error {
 	data, err := json.MarshalIndent(t, "", "  ")
 	if err != nil {
 		return err
@@ -192,7 +182,7 @@ func existingRefreshToken(configDir, email string) string {
 // GetDriveQuotaRefreshing returns (refreshed token or nil, totalBytes, usedBytes, error).
 // The oauth2 transport may silently refresh the access token; we detect this and return
 // the new token so the caller can persist it to disk.
-func GetDriveQuotaRefreshing(cfg *oauth2.Config, t *GDriveToken) (*oauth2.Token, int64, int64, error) {
+func GetDriveQuotaRefreshing(cfg *oauth2.Config, t *types.GDriveToken) (*oauth2.Token, int64, int64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	oauthTok := &oauth2.Token{AccessToken: t.AccessToken, TokenType: t.TokenType, RefreshToken: t.RefreshToken, Expiry: t.Expiry}
