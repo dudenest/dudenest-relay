@@ -3,7 +3,7 @@ package pipeline
 
 import (
 	"fmt"
-	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -87,12 +87,12 @@ func (p *Pipeline) uploadChunking(fm *types.FileMap, filePath string) (*types.Fi
 				}
 				blocks[j] = types.Block{
 					ID: blockID, ShardIdx: j, Size: int64(len(encrypted)),
-					Location: fmt.Sprintf("%s:%s", cloud.Name(), cloudPath), Created: time.Now().UTC(),
+					Location: fmt.Sprintf("%s:%s", cloud.ID(), cloudPath), Created: time.Now().UTC(),
 				}
 			}(j, shard)
 		}
 		wg.Wait()
-		for j, e := range errs {
+		for _, e := range errs {
 			if e != nil {
 				return nil, e
 			}
@@ -137,7 +137,7 @@ func (p *Pipeline) uploadReplica(fm *types.FileMap, filePath string) (*types.Fil
 				}
 				blocks[j] = types.Block{
 					ID: blockID, ShardIdx: j, Size: int64(len(encrypted)),
-					Location: fmt.Sprintf("%s:%s", cloud.Name(), cloudPath), Created: time.Now().UTC(),
+					Location: fmt.Sprintf("%s:%s", cloud.ID(), cloudPath), Created: time.Now().UTC(),
 				}
 			}(j)
 		}
@@ -208,7 +208,7 @@ func (p *Pipeline) downloadChunking(meta types.ChunkMeta) ([]byte, error) {
 
 func (p *Pipeline) downloadReplica(meta types.ChunkMeta) ([]byte, error) {
 	var lastErr error
-	for _, block := range meta.Shards { // Shards are replicas (main, backup1, backup2)
+	for _, block := range meta.Shards { // Replicas are stored in meta.Shards
 		cloud := p.getCloudByName(block.Location)
 		if cloud == nil {
 			continue
@@ -228,20 +228,59 @@ func (p *Pipeline) downloadReplica(meta types.ChunkMeta) ([]byte, error) {
 	return nil, fmt.Errorf("all replicas unavailable: %v", lastErr)
 }
 
+// ListFiles returns all uploaded FileMaps from local storage.
+func (p *Pipeline) ListFiles() ([]*types.FileMap, error) {
+	return p.bm.List()
+}
+
+// DeleteFile removes all cloud blocks for a file and its local FileMap.
+func (p *Pipeline) DeleteFile(fileID string) error {
+	fm, err := p.bm.Load(fileID)
+	if err != nil {
+		return fmt.Errorf("load filemap: %w", err)
+	}
+	var firstErr error
+	for _, meta := range fm.Chunks {
+		for _, block := range meta.Shards {
+			cloud := p.getCloudByName(block.Location)
+			if cloud == nil {
+				continue
+			}
+			if err := cloud.Delete(parseCloudPath(block.Location)); err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("delete block %s: %w", block.ID, err)
+			}
+		}
+	}
+	return firstErr
+}
+
 func (p *Pipeline) getCloudByName(location string) types.CloudProvider {
-	name := strings.Split(location, ":")[0]
+	parts := strings.Split(location, ":")
+	if len(parts) < 2 {
+		return nil
+	}
+	id := parts[0] + ":" + parts[1] // e.g. "gdrive:piowin00@gmail.com"
 	for _, c := range p.clouds {
-		if c.Name() == name {
+		if c.ID() == id {
+			return c
+		}
+	}
+	// Fallback for legacy "local" or "mega" without email in ID
+	for _, c := range p.clouds {
+		if c.ID() == parts[0] {
 			return c
 		}
 	}
 	return nil
 }
+
 func parseCloudPath(location string) string {
-	for i, c := range location {
-		if c == ':' {
-			return location[i+1:]
-		}
+	parts := strings.Split(location, ":")
+	if len(parts) > 2 {
+		return parts[2]
+	}
+	if len(parts) == 2 {
+		return parts[1]
 	}
 	return location
 }
