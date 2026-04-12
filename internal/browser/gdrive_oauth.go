@@ -15,10 +15,10 @@ import (
 	"google.golang.org/api/drive/v3"
 
 	"github.com/dudenest/dudenest-relay/pkg/types"
-	)
+)
 
-	// GDriveClientSecret matches the structure of client_secret.json (Desktop App type).
-	type GDriveClientSecret struct {
+// GDriveClientSecret matches the structure of client_secret.json (Desktop App type).
+type GDriveClientSecret struct {
 	Installed struct {
 		ClientID     string   `json:"client_id"`
 		ClientSecret string   `json:"client_secret"`
@@ -26,9 +26,10 @@ import (
 		TokenURI     string   `json:"token_uri"`
 		RedirectURIs []string `json:"redirect_uris"`
 	} `json:"installed"`
-	}
+}
 
-	// LoadClientSecret reads and parses client_secret.json.func LoadClientSecret(path string) (*GDriveClientSecret, error) {
+// LoadClientSecret reads and parses client_secret.json.
+func LoadClientSecret(path string) (*GDriveClientSecret, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read client_secret: %w", err)
@@ -52,15 +53,13 @@ func BuildOAuthConfig(cs *GDriveClientSecret) *oauth2.Config {
 }
 
 // BuildWebOAuthConfig creates an oauth2.Config for the Web Application OAuth client.
-// Used when Flutter web sends https://dudenest.com/auth as the callback URI.
-// GDRIVE_WEB_CLIENT_ID and GDRIVE_WEB_CLIENT_SECRET must be set in the environment.
 func BuildWebOAuthConfig(clientID, clientSecret string) *oauth2.Config {
 	return &oauth2.Config{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
 		Scopes:       []string{drive.DriveFileScope},
 		Endpoint:     google.Endpoint,
-		RedirectURL:  "https://dudenest.com/auth", // Flutter web callback URL
+		RedirectURL:  "https://dudenest.com/auth",
 	}
 }
 
@@ -80,7 +79,7 @@ func ExchangeCode(cfg *oauth2.Config, code string) (*oauth2.Token, error) {
 func GetEmailFromToken(cfg *oauth2.Config, token *oauth2.Token) (string, error) {
 	ctx := context.Background()
 	client := cfg.Client(ctx, token)
-	svc, err := drive.New(client) //nolint:staticcheck — drive.New deprecated but drive.NewService requires opts
+	svc, err := drive.New(client) //nolint:staticcheck
 	if err != nil {
 		return "", fmt.Errorf("drive client: %w", err)
 	}
@@ -134,7 +133,7 @@ func SaveToken(configDir, providerID string, t *types.GDriveToken) error {
 	return os.WriteFile(path, data, 0600)
 }
 
-// overwriteToken writes an updated token to an existing file path (for refresh persistence).
+// overwriteToken writes an updated token to an existing file path.
 func overwriteToken(path string, t *types.GDriveToken) error {
 	data, err := json.MarshalIndent(t, "", "  ")
 	if err != nil {
@@ -143,9 +142,7 @@ func overwriteToken(path string, t *types.GDriveToken) error {
 	return os.WriteFile(path, data, 0600)
 }
 
-// upsertProviderID returns an existing ProviderID for the email (to avoid duplicate files),
-// or generates a new one if the account is new.
-// Also returns the existing refresh_token so callers can preserve it if the new token lacks one.
+// upsertProviderID returns an existing ProviderID for the email.
 func upsertProviderID(configDir, email string) string {
 	dir := filepath.Join(configDir, "providers")
 	entries, _ := os.ReadDir(dir)
@@ -155,15 +152,13 @@ func upsertProviderID(configDir, email string) string {
 		}
 		t, err := LoadToken(filepath.Join(dir, e.Name()))
 		if err == nil && strings.EqualFold(t.Email, email) {
-			fmt.Printf("upsertProviderID: updating existing account %s (%s)\n", email, t.ProviderID)
 			return t.ProviderID
 		}
 	}
 	return "gdrive_" + fmt.Sprintf("%d", time.Now().UnixMilli())
 }
 
-// existingRefreshToken returns the stored refresh_token for an email, or "" if not found.
-// Used to preserve a valid refresh_token when re-auth returns an empty one (Google omits it on re-auth).
+// existingRefreshToken returns the stored refresh_token for an email.
 func existingRefreshToken(configDir, email string) string {
 	dir := filepath.Join(configDir, "providers")
 	entries, _ := os.ReadDir(dir)
@@ -180,15 +175,12 @@ func existingRefreshToken(configDir, email string) string {
 }
 
 // GetDriveQuotaRefreshing returns (refreshed token or nil, totalBytes, usedBytes, error).
-// The oauth2 transport may silently refresh the access token; we detect this and return
-// the new token so the caller can persist it to disk.
 func GetDriveQuotaRefreshing(cfg *oauth2.Config, t *types.GDriveToken) (*oauth2.Token, int64, int64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	oauthTok := &oauth2.Token{AccessToken: t.AccessToken, TokenType: t.TokenType, RefreshToken: t.RefreshToken, Expiry: t.Expiry}
-	// ReuseTokenSource allows us to detect if a refresh happened
 	ts := cfg.TokenSource(ctx, oauthTok)
-	currentTok, err := ts.Token() // triggers refresh if access token is expired
+	currentTok, err := ts.Token()
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("token refresh: %w", err)
 	}
@@ -201,7 +193,6 @@ func GetDriveQuotaRefreshing(cfg *oauth2.Config, t *types.GDriveToken) (*oauth2.
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	// Return refreshed token only if access token changed (nil = no refresh needed)
 	var refreshed *oauth2.Token
 	if currentTok.AccessToken != t.AccessToken {
 		refreshed = currentTok
