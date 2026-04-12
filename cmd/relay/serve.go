@@ -20,6 +20,7 @@ import (
 
 	"github.com/dudenest/dudenest-relay/internal/thumbnail"
 	"github.com/dudenest/dudenest-relay/internal/ws"
+	"github.com/dudenest/dudenest-relay/internal/pipeline"
 	"github.com/dudenest/dudenest-relay/pkg/types"
 )
 

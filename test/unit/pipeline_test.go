@@ -10,6 +10,7 @@ import (
 	"github.com/dudenest/dudenest-relay/internal/crypto"
 	"github.com/dudenest/dudenest-relay/internal/erasure"
 	"github.com/dudenest/dudenest-relay/internal/pipeline"
+	"github.com/dudenest/dudenest-relay/pkg/types"
 )
 
 func TestCrypto(t *testing.T) {
@@ -76,11 +77,11 @@ func TestPipeline(t *testing.T) {
 	}
 	key := crypto.DeriveKeyFromPassword("test-password", "test-salt")
 	cloud := local.New(filepath.Join(tmp, "cloud"))
-	p, err := pipeline.New(key, cloud, filepath.Join(tmp, "maps"))
+	p, err := pipeline.New(key, []types.CloudProvider{cloud}, filepath.Join(tmp, "maps"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	fm, err := p.Upload(testFile)
+	fm, err := p.Upload(testFile, types.StrategyChunking)
 	if err != nil {
 		t.Fatal("upload:", err)
 	}

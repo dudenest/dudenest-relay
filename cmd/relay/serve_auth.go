@@ -1,6 +1,8 @@
 // serve_auth.go — HTTP API server for browser-based cloud auth (Flutter integration).
 package main
 
+import "github.com/dudenest/dudenest-relay/pkg/types"
+
 import (
 	"fmt"
 	"os"
@@ -95,7 +97,7 @@ func authGDriveCmd() *cobra.Command {
 				return fmt.Errorf("get email: %w", err)
 			}
 			provID := email[:6]
-			gt := &browser.GDriveToken{
+			gt := &types.GDriveToken{
 				AccessToken:  token.AccessToken,
 				TokenType:    token.TokenType,
 				RefreshToken: token.RefreshToken,

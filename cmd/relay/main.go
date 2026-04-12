@@ -2,6 +2,8 @@
 // Commands: upload, download, info, bench
 package main
 
+import "path/filepath"
+
 import (
 	"encoding/hex"
 	"fmt"
