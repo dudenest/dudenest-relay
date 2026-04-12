@@ -2,10 +2,10 @@ name: Build Relay Binaries
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/storage-replica]
     tags: ['v*.*.*']
   pull_request:
-    branches: [main]
+    branches: [main, feat/storage-replica]
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
