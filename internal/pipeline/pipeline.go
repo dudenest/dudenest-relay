@@ -228,6 +228,11 @@ func (p *Pipeline) downloadReplica(meta types.ChunkMeta) ([]byte, error) {
 	return nil, fmt.Errorf("all replicas unavailable: %v", lastErr)
 }
 
+// GetFileMap returns a specific FileMap by ID from local storage.
+func (p *Pipeline) GetFileMap(fileID string) (*types.FileMap, error) {
+	return p.bm.Load(fileID)
+}
+
 // ListFiles returns all uploaded FileMaps from local storage.
 func (p *Pipeline) ListFiles() ([]*types.FileMap, error) {
 	return p.bm.List()

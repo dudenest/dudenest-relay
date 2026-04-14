@@ -79,6 +79,7 @@ type fileServer struct {
 		Upload(filePath string, strategy string) (*types.FileMap, error)
 		Download(fileID, outputPath string) error
 		ListFiles() ([]*types.FileMap, error)
+		GetFileMap(fileID string) (*types.FileMap, error)
 		DeleteFile(fileID string) error
 	}
 	thumbCache *thumbnail.Cache
@@ -130,24 +131,13 @@ func (fs *fileServer) handleFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (fs *fileServer) handleGetMap(w http.ResponseWriter, r *http.Request, fileID string) {
-	fm, err := fs.p.(*pipeline.Pipeline).ListFiles() // This is a bit inefficient, but Pipeline doesn't have Load() exposed in interface yet
+	fm, err := fs.p.GetFileMap(fileID)
 	if err != nil {
-		jsonErr(w, "list maps: "+err.Error(), 500)
-		return
-	}
-	var found *types.FileMap
-	for _, m := range fm {
-		if m.FileID == fileID {
-			found = m
-			break
-		}
-	}
-	if found == nil {
-		http.NotFound(w, r)
+		jsonErr(w, "get map: "+err.Error(), 404)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(found) //nolint:errcheck
+	json.NewEncoder(w).Encode(fm) //nolint:errcheck
 }
 // handleUpload accepts multipart/form-data with field "file", uploads via pipeline.
 func (fs *fileServer) handleUpload(w http.ResponseWriter, r *http.Request) {
