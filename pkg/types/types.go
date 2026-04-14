@@ -53,6 +53,7 @@ type GDriveToken struct {
 	Email        string    `json:"email"`
 	ProviderID   string    `json:"provider_id"`
 	ClientID     string    `json:"client_id,omitempty"` // which OAuth client issued this token
+	LastError    string    `json:"last_error,omitempty"` // persisted error state (e.g. invalid_grant)
 }
 
 // CloudProvider interface — implemented by gdrive, mega, onedrive, etc.
