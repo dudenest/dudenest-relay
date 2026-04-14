@@ -130,12 +130,16 @@ jobs:
 
   # ─────────────────────────────────────────────
   # Deploy amd64 binary to relay-poc (main only)
-  # Requires: SSH_RELAY_KEY secret (private key for root@10.51.1.101 + root@192.168.0.119)
+  # Required GitHub Secrets:
+  #   SSH_RELAY_KEY      — private key for jump host + relay-poc
+  #   SSH_KNOWN_HOSTS    — known_hosts content for jump host + relay-poc
+  #   RELAY_JUMP_HOST    — ZeroTier IP of jump host (e.g. pve101)
+  #   RELAY_HOST         — local IP/hostname of relay-poc (behind jump host)
   # ─────────────────────────────────────────────
   deploy:
     needs: build
     if: github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, netol-swarm]  # self-hosted runner on NETOL network — can reach 192.168.0.x directly
+    runs-on: [self-hosted, netol-swarm]  # self-hosted runner with ZeroTier access
     steps:
       - name: Download amd64 artifact
         uses: actions/download-artifact@v4
@@ -143,23 +147,16 @@ jobs:
           name: relay-linux-amd64
           path: dist/
 
-      - name: Deploy to relay-poc via ZeroTier (DooD)
+      - name: Deploy to relay-poc via jump host (DooD)
         run: |
-          # 1. Prepare SSH keys and known_hosts (entries must NOT have leading whitespace)
+          # 1. Prepare SSH keys and known_hosts from secrets (no IPs or keys in code)
           mkdir -p .ssh
           echo "${{ secrets.SSH_RELAY_KEY }}" > .ssh/id_relay
           chmod 600 .ssh/id_relay
-          printf '%s\n' \
-            '|1|Luzd+d77mOKkEHDdcql0tBOc1jc=|7uxep3GA8Lqu+NeYkA9ACnQcU4k= ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC6dCTZjmnASgsKloiB4QMHLjf6R9muZij/vnt848BVaXWoRUWMHF4Y6Bdk5z1foH3beKSi9enywBIMU8npSUUuCXUUQ4KsWGJJgcAXpAfaEwEzA4xT4e84pmfJUAtLKC1dKwV3InRfgnlX36K1zVwa9+404HKRKfx07HmnK8hzc81y+9CxNbrdzkmFbL91JJF2IJFjKhxLtZowgaBHUGIEJz81Vn8sb0pfnyATSLdULKOrLQya71c2gB+Etm55lYkbbLMKN8IafYuEVdMaASxF3l9yDIPl+Ol6lUCT/e0ZyazwbO7G+FaxGxOIgJ61OdGuy6UiA7cZiBATNu+GBf1YimZAP2s1VkSrJvzHq6UEUrqMrpFVjpYbooWRomquhrNiZmmd8A2bhZ1M5RAY7HHWwa69Vs6XbKT/GWbCDy+S7+cq6aqlkSC1wus3ehP7xuPonkhflrL2d+vKXgVideK7T4/YfEOtyr5WenDveDLBGip3dQDnIu/tT2VIONjv1bM=' \
-            '|1|2Nc87XfDPn1tUf6W8nMWr8nPByc=|1bBcnUEd4l1+WxsVXIZNm1w/AhE= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILKuexLNicIN69PcnFjKa6tKU4adkeGrI4y6X/nba0iQ' \
-            '|1|YQ+BBNM4KD982lDCMX8sLvoWRPk=|tEMWnSwMVg1r/cUNyzZZz47n+c0= ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBHZzkTmRr963zcHRlhMr3e5hSQska1lFKaCWVvotRudFXxiCcWqKw0CNV/zz3SdqOQ9H7BSKpj3TcTE31aSGQM4=' \
-            '|1|xJWQEBvSzT9l5DQSMiFJIUlYyG4=|u55nA63uRBwqaBxkgvJbGQXFXC0= ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCWHT6gV4ths5Uqg5OIBANvpnV5ZRciSIVm/xnYrEulqUrnikVJ8AGRnWPhGox2QP4kW3QFMpRvIjVoG3Ee5CkYQq22awkzYFjpblu4RI0cBdqnRs1ThZlH1A6qeeOaISGmqkEXEX08QA/DVs4M11Mw/5vLJ2owG0JvbGlxjBBR0Lk82hQSbZjsj0xgbvEU2SOOOlQ1IFJrl6GT1QtWpLgACcr5G62dIw8Puv90k8E6YRNFVbiHi6wr1T/oIzr/aRsYC6YL4e5qgPLDV+vg52h4vw1tFl48OMLTCvHfwPK9m4rpXhNqXfb6kPcHwBHSSzAtML8Kd8Go6Rez53pXHEjGLpcjdVwLKZ70QCaWO/vp0tDmhTTnKurRUv1tYQlRRzxphR9IEmwxDdc08Z64kibyZ7SmmtmzZOeYjeN56JjulOTXDW5RiWj2q+Mkfc+wBKKPX6ClV++IkuFCoGOM52rexgXH1GrWVmh+1F2brpg8wM2cznWe4LmtUwzgsnfE4M8=' \
-            '|1|2wsXmHv01eBgZ0GsJWV8i0ksVOk=|jE6fHvazPC7317lhkoMPVl47Zls= ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBDs+05np09qU8WOAR3W2MpQclnvSHsHPou1q2e+qYMCJUSSe7oNvgtHu6r+TL+x0Y5+VH9AoD0CcEOry56JIrMU=' \
-            '|1|PKzp72tsH63+IM1Wv22V6LXYW0U=|jmhPkwM1hAtOzBVnNSdsG5Um/jE= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFLQHcqxcZ0xw2egCzhLc9hcTfBDKtB4BPlFb/2JZX+o' \
-            > .ssh/known_hosts
+          printf '%s\n' "${{ secrets.SSH_KNOWN_HOSTS }}" > .ssh/known_hosts
           chmod 644 .ssh/known_hosts
 
-          # 2. Create deployer container with unique name
+          # 2. Create deployer container with unique name and host networking (ZeroTier access)
           DEPLOYER="deployer-${{ github.run_id }}-${{ github.run_attempt }}"
           docker rm -f $DEPLOYER 2>/dev/null || true
           docker create --name $DEPLOYER --network host alpine:latest sleep 300
@@ -168,8 +165,8 @@ jobs:
           docker cp dist $DEPLOYER:/dist
           docker cp .ssh $DEPLOYER:/root/.ssh
 
-          # 4. Write SSH config file on host, copy into container, then deploy
-          printf 'Host 10.51.1.101 192.168.0.119\n  IdentityFile /root/.ssh/id_relay\n  UserKnownHostsFile /root/.ssh/known_hosts\n  StrictHostKeyChecking yes\n' > .ssh/config
+          # 4. Write SSH config and deploy
+          printf 'Host *\n  IdentityFile /root/.ssh/id_relay\n  UserKnownHostsFile /root/.ssh/known_hosts\n  StrictHostKeyChecking yes\n' > .ssh/config
           chmod 600 .ssh/config
           docker cp .ssh/config $DEPLOYER:/root/.ssh/config
           docker start $DEPLOYER
@@ -177,8 +174,8 @@ jobs:
             apk add --no-cache openssh-client &&
             chmod 600 /root/.ssh/id_relay /root/.ssh/config &&
             chmod +x /dist/relay-linux-amd64 &&
-            scp -o ProxyJump=root@10.51.1.101 /dist/relay-linux-amd64 root@192.168.0.119:/tmp/relay-new &&
-            ssh -o ProxyJump=root@10.51.1.101 root@192.168.0.119 'mv /tmp/relay-new /usr/local/bin/relay && systemctl restart relay.service && systemctl is-active relay.service'
+            scp -o ProxyJump=root@${{ secrets.RELAY_JUMP_HOST }} /dist/relay-linux-amd64 root@${{ secrets.RELAY_HOST }}:/tmp/relay-new &&
+            ssh -o ProxyJump=root@${{ secrets.RELAY_JUMP_HOST }} root@${{ secrets.RELAY_HOST }} 'mv /tmp/relay-new /usr/local/bin/relay && systemctl restart relay.service && systemctl is-active relay.service'
           "
 
           # 5. Cleanup
