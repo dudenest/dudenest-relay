@@ -548,6 +548,7 @@ func (srv *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		} else {
+			pi.Available = false
 			pi.LastError = classifyTokenError(quotaErr)
 			fmt.Printf("handleProviders: %s (%s) unavailable: %v → %s\n", t.Email, t.ProviderID, quotaErr, pi.LastError)
 		}
