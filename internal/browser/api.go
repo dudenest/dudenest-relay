@@ -525,38 +525,42 @@ func (srv *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 			fmt.Printf("handleProviders: skip %s: %v\n", e.Name(), err)
 			continue
 		}
-		if seen[t.Email] { // skip duplicate (same email, multiple files)
-			fmt.Printf("handleProviders: skip duplicate %s (%s)\n", t.Email, e.Name())
-			continue
-		}
+		if seen[t.Email] { continue }
 		seen[t.Email] = true
 		pi := providerInfo{ID: t.ProviderID, Type: "gdrive", Email: t.Email}
-		cfg := srv.cfgForToken(t) // select web or desktop client based on which issued this token
+
+		// Skip if already marked as permanently failed (e.g. invalid_grant) to avoid spamming Google API
+		if t.LastError != "" && (strings.Contains(t.LastError, "invalid_grant") || strings.Contains(t.LastError, "unauthorized")) {
+			pi.Available = false
+			pi.LastError = "Permanently blocked: " + t.LastError
+			providers = append(providers, pi)
+			continue
+		}
+
+		cfg := srv.cfgForToken(t)
 		newTok, total, used, quotaErr := GetDriveQuotaRefreshing(cfg, t)
 		if quotaErr == nil {
 			pi.QuotaTotal = float64(total) / 1e9
 			pi.QuotaUsed = float64(used) / 1e9
 			pi.Available = true
-			if newTok != nil && newTok.AccessToken != t.AccessToken { // token was refreshed — save to disk
+			if newTok != nil && newTok.AccessToken != t.AccessToken {
 				t.AccessToken = newTok.AccessToken
 				t.Expiry = newTok.Expiry
 				if newTok.RefreshToken != "" { t.RefreshToken = newTok.RefreshToken }
-				if saveErr := overwriteToken(tokenPath, t); saveErr != nil {
-					fmt.Printf("handleProviders: save refreshed token %s: %v\n", t.Email, saveErr)
-				} else {
-					fmt.Printf("handleProviders: refreshed token saved for %s\n", t.Email)
-				}
+				t.LastError = "" // clear previous error
+				overwriteToken(tokenPath, t)
 			}
 		} else {
 			pi.Available = false
 			pi.LastError = classifyTokenError(quotaErr)
-			fmt.Printf("handleProviders: %s (%s) unavailable: %v → %s\n", t.Email, t.ProviderID, quotaErr, pi.LastError)
+			t.LastError = pi.LastError // persist error state
+			overwriteToken(tokenPath, t)
+			fmt.Printf("handleProviders: %s unavailable: %v\n", t.Email, pi.LastError)
 		}
 		providers = append(providers, pi)
 	}
 	jsonOK(w, providersResp{Providers: providers})
-}
-
+	}
 func jsonOK(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
