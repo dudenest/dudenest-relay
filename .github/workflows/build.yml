@@ -129,57 +129,26 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ─────────────────────────────────────────────
-  # Deploy amd64 binary to relay-poc (main only)
-  # Required GitHub Secrets:
-  #   SSH_RELAY_KEY      — private key for jump host + relay-poc
-  #   SSH_KNOWN_HOSTS    — known_hosts content for jump host + relay-poc
-  #   RELAY_JUMP_HOST    — ZeroTier IP of jump host (e.g. pve101)
-  #   RELAY_HOST         — local IP/hostname of relay-poc (behind jump host)
+  # Deploy to NETOL Docker Swarm (main only)
+  # Architecture: ns2 HAProxy → Swarm routing mesh :8086 → relay container
+  # Runner: self-hosted on Swarm (has Docker socket access)
+  # Required Docker secrets (pre-created on Swarm):
+  #   relay_key, relay_jwt_secret, relay_gdrive_token, relay_gdrive_client_secret
   # ─────────────────────────────────────────────
-  deploy:
-    needs: build
+  deploy-swarm:
+    needs: docker
     if: github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, netol-swarm]  # self-hosted runner with ZeroTier access
+    runs-on: [self-hosted, netol-swarm]
     steps:
-      - name: Download amd64 artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: relay-linux-amd64
-          path: dist/
+      - uses: actions/checkout@v4
 
-      - name: Deploy to relay-poc via jump host (DooD)
+      - name: Deploy relay stack to Docker Swarm
         run: |
-          # 1. Prepare SSH keys and known_hosts from secrets (no IPs or keys in code)
-          mkdir -p .ssh
-          echo "${{ secrets.SSH_RELAY_KEY }}" > .ssh/id_relay
-          chmod 600 .ssh/id_relay
-          printf '%s\n' "${{ secrets.SSH_KNOWN_HOSTS }}" > .ssh/known_hosts
-          chmod 644 .ssh/known_hosts
-
-          # 2. Create deployer container with unique name and host networking (ZeroTier access)
-          DEPLOYER="deployer-${{ github.run_id }}-${{ github.run_attempt }}"
-          docker rm -f $DEPLOYER 2>/dev/null || true
-          docker create --name $DEPLOYER --network host alpine:latest sleep 300
-
-          # 3. Copy artifacts and SSH keys into the container
-          docker cp dist $DEPLOYER:/dist
-          docker cp .ssh $DEPLOYER:/root/.ssh
-
-          # 4. Write SSH config and deploy
-          printf 'Host *\n  IdentityFile /root/.ssh/id_relay\n  UserKnownHostsFile /root/.ssh/known_hosts\n  StrictHostKeyChecking yes\n' > .ssh/config
-          chmod 600 .ssh/config
-          docker cp .ssh/config $DEPLOYER:/root/.ssh/config
-          docker start $DEPLOYER
-          docker exec $DEPLOYER sh -c "
-            apk add --no-cache openssh-client &&
-            chmod 600 /root/.ssh/id_relay /root/.ssh/config &&
-            chmod +x /dist/relay-linux-amd64 &&
-            scp -o ProxyJump=root@${{ secrets.RELAY_JUMP_HOST }} /dist/relay-linux-amd64 root@${{ secrets.RELAY_HOST }}:/tmp/relay-new &&
-            ssh -o ProxyJump=root@${{ secrets.RELAY_JUMP_HOST }} root@${{ secrets.RELAY_HOST }} 'mv /tmp/relay-new /usr/local/bin/relay && systemctl restart relay.service && systemctl is-active relay.service'
-          "
-
-          # 5. Cleanup
-          docker rm -f $DEPLOYER
+          docker stack deploy \
+            --with-registry-auth \
+            --resolve-image always \
+            -c deploy/relay-stack.yml \
+            dudenest-relay
 
   # ─────────────────────────────────────────────
   # GitHub Release with all binaries (tags only)

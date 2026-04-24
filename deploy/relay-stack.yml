@@ -1,0 +1,81 @@
+# Docker Swarm stack — dudenest-relay
+# Deploy: docker stack deploy -c deploy/relay-stack.yml dudenest-relay
+#
+# Required Docker secrets (create before deploy):
+#   docker secret create relay_key <(echo -n "HEX_KEY_64_CHARS")
+#   docker secret create relay_jwt_secret <(echo -n "JWT_SECRET_VALUE")
+#   docker secret create relay_gdrive_token ./gdrive_token.json
+#   docker secret create relay_gdrive_client_secret ./gdrive_client_secret.json
+#
+# Routing: ns2 HAProxy → 10.51.1.x:8086 (ZeroTier) → Swarm routing mesh → relay container
+# Author: Dariusz Porczyński
+
+version: "3.9"
+
+secrets:
+  relay_key:
+    external: true
+  relay_jwt_secret:
+    external: true
+  relay_gdrive_token:
+    external: true
+  relay_gdrive_client_secret:
+    external: true
+
+networks:
+  dudenest:
+    external: true  # shared overlay network (exists: dudenest stack)
+
+services:
+  relay:
+    image: ghcr.io/dudenest/dudenest-relay:latest
+    entrypoint: ["/entrypoint.sh"]
+    secrets:
+      - relay_key
+      - relay_jwt_secret
+      - relay_gdrive_token
+      - relay_gdrive_client_secret
+    environment:
+      GDRIVE_WEB_CLIENT_ID: ""   # optional: override in GitHub Secrets if needed
+      GDRIVE_WEB_CLIENT_SECRET: ""
+    volumes:
+      - relay_maps:/var/lib/dudenest/maps       # FileMap SQLite persistence
+      - relay_thumbs:/var/lib/dudenest/thumbs   # thumbnail cache persistence
+    ports:
+      - target: 8086
+        published: 8086
+        protocol: tcp
+        mode: ingress  # Swarm routing mesh — all nodes answer on :8086
+    networks:
+      - dudenest
+    deploy:
+      replicas: 1  # relay is stateful (maps volume) — single replica
+      restart_policy:
+        condition: on-failure
+        delay: 30s
+        max_attempts: 3    # standby mode handles credential errors, so crash = real error
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8086/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: gelf
+      options:
+        gelf-address: "udp://10.51.1.252:12201"
+        tag: "dudenest-relay"
+
+volumes:
+  relay_maps:
+  relay_thumbs:

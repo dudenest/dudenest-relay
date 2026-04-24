@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,7 +18,6 @@ import (
 
 	"github.com/dudenest/dudenest-relay/internal/auth"
 	"github.com/dudenest/dudenest-relay/internal/browser"
-
 	"github.com/dudenest/dudenest-relay/internal/thumbnail"
 	"github.com/dudenest/dudenest-relay/internal/ws"
 	"github.com/dudenest/dudenest-relay/pkg/types"
@@ -39,9 +39,36 @@ func serveCmd() *cobra.Command {
 	return cmd
 }
 
+// degradedServer runs the HTTP server when cloud credentials are invalid.
+// All file endpoints return 503. /health returns 200 with degraded status.
+// Background goroutine logs the failure every 5 minutes — no retries against cloud APIs.
+func degradedServer(listen, reason string) error {
+	log.Printf("⚠️  relay: entering standby mode — %s", reason)
+	log.Printf("⚠️  relay: file operations disabled; health endpoint active on %s", listen)
+	ticker := time.NewTicker(5 * time.Minute)
+	go func() { // periodic failure notification, no cloud retries
+		for range ticker.C {
+			log.Printf("⚠️  relay: STANDBY — cloud credentials invalid (%s) — awaiting re-auth", reason)
+		}
+	}()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { // health=200 so HAProxy does not mark node down
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "degraded", "reason": reason}) //nolint:errcheck
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		jsonErr(w, "relay in standby: "+reason, http.StatusServiceUnavailable)
+	})
+	log.Printf("⚠️  relay: standby server listening on %s", listen)
+	return http.ListenAndServe(listen, corsMiddleware(mux))
+}
+
 func runServe(cmd *cobra.Command, args []string) error {
 	p, err := getPipeline()
 	if err != nil {
+		if isCredentialError(err) { // OAuth expired/revoked → standby, no crash loop
+			return degradedServer(serveListen, fmt.Sprintf("pipeline init: %v", err))
+		}
 		return fmt.Errorf("pipeline init: %w", err)
 	}
 	cs, err := browser.LoadClientSecret(authClientSecret)
@@ -286,6 +313,18 @@ func (fs *fileServer) handleDelete(w http.ResponseWriter, r *http.Request, fileI
 	        next.ServeHTTP(w, r)
 	})
 	}
+// isCredentialError detects OAuth token errors that should not trigger a crash loop.
+// These errors are permanent until credentials are refreshed — retrying is wasteful.
+func isCredentialError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "invalid_grant") ||
+		strings.Contains(s, "Token has been expired or revoked") ||
+		strings.Contains(s, "oauth2: cannot fetch token")
+}
+
 func jsonErr(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
