@@ -146,6 +146,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Log in to GHCR (so --with-registry-auth distributes credentials to all Swarm nodes)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
       - name: Ensure Docker secrets exist (idempotent)
         env:
           RELAY_KEY: ${{ secrets.RELAY_KEY }}
