@@ -132,8 +132,12 @@ jobs:
   # Deploy to NETOL Docker Swarm (main only)
   # Architecture: ns2 HAProxy → Swarm routing mesh :8086 → relay container
   # Runner: self-hosted on Swarm (has Docker socket access)
-  # Required Docker secrets (pre-created on Swarm):
-  #   relay_key, relay_jwt_secret, relay_gdrive_token, relay_gdrive_client_secret
+  # Secrets: created automatically from GitHub Secrets — no manual docker secret create
+  # Required GitHub Secrets:
+  #   RELAY_KEY                      — master key hex (32 bytes)
+  #   RELAY_JWT_SECRET               — shared JWT secret with dudenest-backend
+  #   RELAY_GDRIVE_TOKEN_B64         — base64(gdrive_token.json)
+  #   RELAY_GDRIVE_CLIENT_SECRET_B64 — base64(gdrive_client_secret.json)
   # ─────────────────────────────────────────────
   deploy-swarm:
     needs: docker
@@ -142,13 +146,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Deploy relay stack to Docker Swarm
+      - name: Ensure Docker secrets exist (idempotent)
+        env:
+          RELAY_KEY: ${{ secrets.RELAY_KEY }}
+          RELAY_JWT_SECRET: ${{ secrets.RELAY_JWT_SECRET }}
+          RELAY_GDRIVE_TOKEN_B64: ${{ secrets.RELAY_GDRIVE_TOKEN_B64 }}
+          RELAY_GDRIVE_CLIENT_SECRET_B64: ${{ secrets.RELAY_GDRIVE_CLIENT_SECRET_B64 }}
+        run: |
+          ensure_secret() {  # create secret if not exists; skip if exists (rotate via rotate-secrets workflow)
+            local name=$1 value=$2
+            if docker secret inspect "$name" > /dev/null 2>&1; then
+              echo "ℹ️  secret exists: $name"
+            else
+              printf '%s' "$value" | docker secret create "$name" -
+              echo "✅ created secret: $name"
+            fi
+          }
+          ensure_secret relay_key            "$RELAY_KEY"
+          ensure_secret relay_jwt_secret     "$RELAY_JWT_SECRET"
+          printf '%s' "$RELAY_GDRIVE_TOKEN_B64"         | base64 -d | docker secret create relay_gdrive_token           - 2>/dev/null || echo "ℹ️  secret exists: relay_gdrive_token"
+          printf '%s' "$RELAY_GDRIVE_CLIENT_SECRET_B64" | base64 -d | docker secret create relay_gdrive_client_secret   - 2>/dev/null || echo "ℹ️  secret exists: relay_gdrive_client_secret"
+
+      - name: Deploy relay stack
         run: |
           docker stack deploy \
             --with-registry-auth \
             --resolve-image always \
             -c deploy/relay-stack.yml \
             dudenest-relay
+
+      - name: Verify deployment
+        run: |
+          sleep 20
+          docker service ls --filter name=dudenest-relay_relay
+          STATUS=$(docker service inspect dudenest-relay_relay -f '{{.UpdateStatus.State}}' 2>/dev/null || echo "new")
+          echo "Update status: $STATUS"
+          docker service ps dudenest-relay_relay --no-trunc | head -5
 
   # ─────────────────────────────────────────────
   # GitHub Release with all binaries (tags only)

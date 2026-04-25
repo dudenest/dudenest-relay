@@ -1,0 +1,46 @@
+name: Backup Relay Volumes
+
+# Runs every 6h — backs up relay_maps (SQLite FileMap) to ns2 NFS or local path
+# Restore: see docs/DISASTER-RECOVERY.md
+on:
+  schedule:
+    - cron: "0 */6 * * *"  # every 6 hours
+  workflow_dispatch:        # manual trigger
+
+jobs:
+  backup:
+    runs-on: [self-hosted, netol-swarm]
+    steps:
+      - name: Backup relay_maps volume to ns2
+        run: |
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          BACKUP_DIR="/var/backups/dudenest-relay"
+          BACKUP_FILE="relay_maps_${TIMESTAMP}.tar.gz"
+
+          # Find container running relay service
+          CONTAINER=$(docker ps --filter "name=dudenest-relay_relay" -q | head -1)
+          if [ -z "$CONTAINER" ]; then
+            echo "⚠️  No relay container running — skipping backup (relay may be in standby)"
+            exit 0
+          fi
+
+          # Export volume content via container
+          docker exec "$CONTAINER" tar czf - /var/lib/dudenest/maps 2>/dev/null \
+            | ssh -o StrictHostKeyChecking=no root@10.51.1.2 "
+                mkdir -p $BACKUP_DIR
+                cat > $BACKUP_DIR/$BACKUP_FILE
+                # Keep last 14 days
+                find $BACKUP_DIR -name 'relay_maps_*.tar.gz' -mtime +14 -delete
+                echo 'Backup saved: $BACKUP_DIR/$BACKUP_FILE'
+                ls -lh $BACKUP_DIR | tail -5
+              "
+          echo "✅ Backup complete: $BACKUP_FILE"
+
+      - name: Verify backup on ns2
+        run: |
+          LATEST=$(ssh -o StrictHostKeyChecking=no root@10.51.1.2 \
+            "ls -t /var/backups/dudenest-relay/relay_maps_*.tar.gz 2>/dev/null | head -1")
+          [ -z "$LATEST" ] && { echo "❌ No backup found on ns2"; exit 1; }
+          SIZE=$(ssh -o StrictHostKeyChecking=no root@10.51.1.2 "stat -c%s '$LATEST'")
+          echo "✅ Latest backup: $LATEST (${SIZE} bytes)"
+          [ "$SIZE" -lt 100 ] && { echo "❌ Backup too small — may be empty"; exit 1; }
