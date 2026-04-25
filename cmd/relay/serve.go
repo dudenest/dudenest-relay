@@ -39,39 +39,34 @@ func serveCmd() *cobra.Command {
 	return cmd
 }
 
-// degradedServer runs the HTTP server when cloud credentials are invalid.
-// All file endpoints return 503. /health returns 200 with degraded status.
-// Background goroutine logs the failure every 5 minutes — no retries against cloud APIs.
-func degradedServer(listen, reason string) error {
+// degradedServerWithAuth runs in standby: /files returns 503, but /auth/* and /ws stay active
+// so users can re-authorize cloud providers without restarting the relay.
+// /health returns 200 (degraded) so HAProxy keeps the node in rotation.
+func degradedServerWithAuth(listen, reason string, authSrv interface{ RegisterRoutes(*http.ServeMux) }, wsHub http.Handler) error {
 	log.Printf("⚠️  relay: entering standby mode — %s", reason)
-	log.Printf("⚠️  relay: file operations disabled; health endpoint active on %s", listen)
+	log.Printf("⚠️  relay: /files=503, /auth active — re-authorize via Flutter app")
 	ticker := time.NewTicker(5 * time.Minute)
-	go func() { // periodic failure notification, no cloud retries
+	go func() { // periodic reminder, no cloud retries
 		for range ticker.C {
-			log.Printf("⚠️  relay: STANDBY — cloud credentials invalid (%s) — awaiting re-auth", reason)
+			log.Printf("⚠️  relay: STANDBY (%s) — use /auth/url to re-authorize", reason)
 		}
 	}()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { // health=200 so HAProxy does not mark node down
+	authSrv.RegisterRoutes(mux) // /auth/* active even in standby — user can add/re-auth providers
+	mux.Handle("/ws", wsHub)
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "degraded", "reason": reason}) //nolint:errcheck
 	})
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		jsonErr(w, "relay in standby: "+reason, http.StatusServiceUnavailable)
-	})
-	log.Printf("⚠️  relay: standby server listening on %s", listen)
+	mux.HandleFunc("/files", func(w http.ResponseWriter, r *http.Request) { jsonErr(w, "relay in standby: "+reason, http.StatusServiceUnavailable) })
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) { jsonErr(w, "relay in standby: "+reason, http.StatusServiceUnavailable) })
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { jsonErr(w, "relay in standby: "+reason, http.StatusServiceUnavailable) })
+	log.Printf("⚠️  relay: standby server with auth listening on %s", listen)
 	return http.ListenAndServe(listen, corsMiddleware(mux))
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
-	p, err := getPipeline()
-	if err != nil {
-		if isCredentialError(err) { // OAuth expired/revoked → standby, no crash loop
-			return degradedServer(serveListen, fmt.Sprintf("pipeline init: %v", err))
-		}
-		return fmt.Errorf("pipeline init: %w", err)
-	}
-	cs, err := browser.LoadClientSecret(authClientSecret)
+	cs, err := browser.LoadClientSecret(authClientSecret) // load auth config before pipeline — needed for standby mode too
 	if err != nil {
 		return fmt.Errorf("load client_secret: %w", err)
 	}
@@ -81,8 +76,15 @@ func runServe(cmd *cobra.Command, args []string) error {
 		webCfg = browser.BuildWebOAuthConfig(id, secret)
 		fmt.Println("relay serve: web OAuth client loaded (GDRIVE_WEB_CLIENT_ID)")
 	}
-	wsHub := ws.NewHub() // WebSocket hub: Flutter connects here, relay sends auth_request messages
+	wsHub := ws.NewHub()
 	authSrv := browser.NewServer(authDisplay, serveListen, browser.BuildAuthURL(cfg), cfg, webCfg, authConfigDir, wsHub)
+	p, err := getPipeline()
+	if err != nil {
+		if isCredentialError(err) { // OAuth expired/revoked or no providers yet → standby with auth routes active
+			return degradedServerWithAuth(serveListen, fmt.Sprintf("pipeline init: %v", err), authSrv, wsHub)
+		}
+		return fmt.Errorf("pipeline init: %w", err)
+	}
 	tc, err := thumbnail.NewCache(authConfigDir)
 	if err != nil {
 		return fmt.Errorf("thumbnail cache: %w", err)
@@ -94,7 +96,6 @@ func runServe(cmd *cobra.Command, args []string) error {
 	mux.HandleFunc("/files", requireAuth(fs.handleList))
 	mux.HandleFunc("/files/", requireAuth(fs.handleFile))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }) //nolint:errcheck
-
 	fmt.Printf("relay serve listening on %s (provider: %s, ws: /ws)\n", serveListen, provider)
 	return http.ListenAndServe(serveListen, corsMiddleware(mux))
 }
