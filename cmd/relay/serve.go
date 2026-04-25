@@ -315,6 +315,7 @@ func (fs *fileServer) handleDelete(w http.ResponseWriter, r *http.Request, fileI
 	}
 // isCredentialError detects OAuth token errors that should not trigger a crash loop.
 // These errors are permanent until credentials are refreshed — retrying is wasteful.
+// "no cloud providers available" = fresh install, no users authenticated yet → standby.
 func isCredentialError(err error) bool {
 	if err == nil {
 		return false
@@ -322,7 +323,8 @@ func isCredentialError(err error) bool {
 	s := err.Error()
 	return strings.Contains(s, "invalid_grant") ||
 		strings.Contains(s, "Token has been expired or revoked") ||
-		strings.Contains(s, "oauth2: cannot fetch token")
+		strings.Contains(s, "oauth2: cannot fetch token") ||
+		strings.Contains(s, "no cloud providers available")
 }
 
 func jsonErr(w http.ResponseWriter, msg string, code int) {

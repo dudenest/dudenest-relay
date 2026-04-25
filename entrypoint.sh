@@ -1,6 +1,8 @@
 #!/bin/sh
 # entrypoint.sh — reads Docker secrets and starts relay serve
 # Secrets mounted at /run/secrets/ by Docker Swarm
+# relay_gdrive_client_secret = OAuth app registration (shared, not per-user)
+# User tokens are added at runtime via OAuth flow → stored in relay_maps volume
 set -e
 RELAY_KEY=$(cat /run/secrets/relay_key 2>/dev/null || echo "${RELAY_KEY:-}")
 JWT_SECRET=$(cat /run/secrets/relay_jwt_secret 2>/dev/null || echo "${JWT_SECRET:-}")
@@ -9,8 +11,7 @@ JWT_SECRET=$(cat /run/secrets/relay_jwt_secret 2>/dev/null || echo "${JWT_SECRET
 export JWT_SECRET
 exec /relay serve \
   --key "$RELAY_KEY" \
-  --gdrive-token /run/secrets/relay_gdrive_token \
-  --gdrive-secret /run/secrets/relay_gdrive_client_secret \
+  --client-secret /run/secrets/relay_gdrive_client_secret \
+  --config-dir /var/lib/dudenest/maps \
   --map-store /var/lib/dudenest/maps \
-  --config-dir /etc/dudenest \
   --listen 0.0.0.0:8086

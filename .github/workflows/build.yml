@@ -134,10 +134,10 @@ jobs:
   # Runner: self-hosted on Swarm (has Docker socket access)
   # Secrets: created automatically from GitHub Secrets — no manual docker secret create
   # Required GitHub Secrets:
-  #   RELAY_KEY                      — master key hex (32 bytes)
+  #   RELAY_KEY                      — master key hex (32 bytes), encrypts DB at rest
   #   RELAY_JWT_SECRET               — shared JWT secret with dudenest-backend
-  #   RELAY_GDRIVE_TOKEN_B64         — base64(gdrive_token.json)
-  #   RELAY_GDRIVE_CLIENT_SECRET_B64 — base64(gdrive_client_secret.json)
+  #   RELAY_GDRIVE_CLIENT_SECRET_B64 — base64(gdrive_client_secret.json), OAuth app registration
+  # NOT a secret: user GDrive tokens are stored at runtime in relay_maps volume (per user)
   # ─────────────────────────────────────────────
   deploy-swarm:
     needs: docker
@@ -150,7 +150,6 @@ jobs:
         env:
           RELAY_KEY: ${{ secrets.RELAY_KEY }}
           RELAY_JWT_SECRET: ${{ secrets.RELAY_JWT_SECRET }}
-          RELAY_GDRIVE_TOKEN_B64: ${{ secrets.RELAY_GDRIVE_TOKEN_B64 }}
           RELAY_GDRIVE_CLIENT_SECRET_B64: ${{ secrets.RELAY_GDRIVE_CLIENT_SECRET_B64 }}
         run: |
           ensure_secret() {  # create secret if not exists; skip if exists (rotate via rotate-secrets workflow)
@@ -164,8 +163,7 @@ jobs:
           }
           ensure_secret relay_key            "$RELAY_KEY"
           ensure_secret relay_jwt_secret     "$RELAY_JWT_SECRET"
-          printf '%s' "$RELAY_GDRIVE_TOKEN_B64"         | base64 -d | docker secret create relay_gdrive_token           - 2>/dev/null || echo "ℹ️  secret exists: relay_gdrive_token"
-          printf '%s' "$RELAY_GDRIVE_CLIENT_SECRET_B64" | base64 -d | docker secret create relay_gdrive_client_secret   - 2>/dev/null || echo "ℹ️  secret exists: relay_gdrive_client_secret"
+          printf '%s' "$RELAY_GDRIVE_CLIENT_SECRET_B64" | base64 -d | docker secret create relay_gdrive_client_secret - 2>/dev/null || echo "ℹ️  secret exists: relay_gdrive_client_secret"
 
       - name: Deploy relay stack
         run: |

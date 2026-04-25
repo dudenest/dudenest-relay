@@ -4,8 +4,8 @@
 # Required Docker secrets (create before deploy):
 #   docker secret create relay_key <(echo -n "HEX_KEY_64_CHARS")
 #   docker secret create relay_jwt_secret <(echo -n "JWT_SECRET_VALUE")
-#   docker secret create relay_gdrive_token ./gdrive_token.json
 #   docker secret create relay_gdrive_client_secret ./gdrive_client_secret.json
+# NOTE: relay_gdrive_token is NOT an infra secret — user tokens are added at runtime via OAuth flow
 #
 # Routing: ns2 HAProxy → 10.51.1.x:8086 (ZeroTier) → Swarm routing mesh → relay container
 # Author: Dariusz Porczyński
@@ -14,13 +14,11 @@ version: "3.9"
 
 secrets:
   relay_key:
-    external: true
+    external: true  # installation master key (encrypts DB at rest)
   relay_jwt_secret:
-    external: true
-  relay_gdrive_token:
-    external: true
+    external: true  # shared JWT secret with dudenest-backend
   relay_gdrive_client_secret:
-    external: true
+    external: true  # Google OAuth app registration (shared by all users)
 
 networks:
   dudenest:
@@ -33,7 +31,6 @@ services:
     secrets:
       - relay_key
       - relay_jwt_secret
-      - relay_gdrive_token
       - relay_gdrive_client_secret
     environment:
       GDRIVE_WEB_CLIENT_ID: ""   # optional: override in GitHub Secrets if needed
