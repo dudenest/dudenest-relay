@@ -75,9 +75,12 @@ func getKey() ([]byte, error) {
 }
 
 func getClouds() ([]types.CloudProvider, error) {
-	home, _ := os.UserHomeDir()
-	configDir := filepath.Join(home, ".config/dudenest")
-
+	// Use --config-dir if set (serve command), otherwise fallback to default
+	configDir := authConfigDir
+	if configDir == "" {
+		home, _ := os.UserHomeDir()
+		configDir = filepath.Join(home, ".config/dudenest")
+	}
 	// If provider is "auto", load all saved tokens
 	if provider == "auto" || provider == "" {
 		return pipeline.LoadAllProviders(configDir, gdriveSecretPath, gdriveBasePath)
