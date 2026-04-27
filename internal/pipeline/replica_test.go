@@ -36,50 +36,67 @@ func (m *MockCloud) Delete(path string) error { delete(m.storage, path); return 
 func (m *MockCloud) Available() bool          { return m.available }
 
 func TestReplicaStrategy(t *testing.T) {
-	// 1. Setup 3 mock clouds
+	// Setup: 3 clouds, but only 2 replicas are created (limit = 2)
 	c1 := NewMockCloud("cloud1")
 	c2 := NewMockCloud("cloud2")
 	c3 := NewMockCloud("cloud3")
 	clouds := []types.CloudProvider{c1, c2, c3}
 
-	// 2. Setup pipeline
 	key := make([]byte, 32)
-	p, _ := New(key, clouds, "/tmp/dudenest-test-maps")
-	defer os.RemoveAll("/tmp/dudenest-test-maps")
+	p, _ := New(key, clouds, t.TempDir())
 
-	// 3. Create dummy file
 	content := []byte("secret dudenest data for replica test")
-	tmpFile := "/tmp/test-replica.txt"
-	os.WriteFile(tmpFile, content, 0600)
-	defer os.Remove(tmpFile)
+	tmpFile := t.TempDir() + "/test-replica.txt"
+	os.WriteFile(tmpFile, content, 0600) //nolint:errcheck
 
-	// 4. Upload using Replica strategy
 	fm, err := p.Upload(tmpFile, types.StrategyReplica)
 	if err != nil {
 		t.Fatalf("Upload failed: %v", err)
 	}
 
-	// 5. Verify it's on all 3 clouds
-	if len(c1.storage) == 0 || len(c2.storage) == 0 || len(c3.storage) == 0 {
-		t.Errorf("Data not replicated across all clouds")
+	// max 2 replicas: c1 and c2 should have data, c3 should not
+	if len(c1.storage) == 0 || len(c2.storage) == 0 {
+		t.Errorf("Data not replicated to first 2 clouds")
+	}
+	if len(c3.storage) != 0 {
+		t.Errorf("Expected c3 to be empty (only 2 replicas)")
 	}
 
-	// 6. Simulate failure of Cloud 1 and Cloud 2
+	// Simulate failure of primary (c1) — should failover to c2
 	c1.available = false
-	c2.available = false
-
-	// 7. Download and verify it still works (should failover to Cloud 3)
-	outPath := "/tmp/test-replica-out.txt"
+	outPath := t.TempDir() + "/test-replica-out.txt"
 	err = p.Download(fm.FileID, outPath)
 	if err != nil {
-		t.Fatalf("Download failed after failover: %v", err)
+		t.Fatalf("Download failed after c1 failover: %v", err)
 	}
-	defer os.Remove(outPath)
-
 	outContent, _ := os.ReadFile(outPath)
 	if !bytes.Equal(content, outContent) {
 		t.Errorf("Content mismatch: expected %s, got %s", content, outContent)
 	}
-	
-	fmt.Println("✅ Replica failover test passed")
+	fmt.Println("✅ Replica failover test passed (2 replicas, c1 fail → c2 ok)")
+}
+
+func TestReplicaSingleProvider(t *testing.T) {
+	// Edge case: only 1 provider available — should still work
+	c1 := NewMockCloud("cloud1")
+	key := make([]byte, 32)
+	p, _ := New(key, []types.CloudProvider{c1}, t.TempDir())
+
+	content := []byte("single provider test")
+	tmpFile := t.TempDir() + "/single.txt"
+	os.WriteFile(tmpFile, content, 0600) //nolint:errcheck
+
+	fm, err := p.Upload(tmpFile, types.StrategyReplica)
+	if err != nil {
+		t.Fatalf("Upload with 1 provider failed: %v", err)
+	}
+	outPath := t.TempDir() + "/single-out.txt"
+	if err := p.Download(fm.FileID, outPath); err != nil {
+		t.Fatalf("Download with 1 provider failed: %v", err)
+	}
+	got, _ := os.ReadFile(outPath)
+	if !bytes.Equal(content, got) {
+		t.Errorf("Content mismatch")
+	}
+	fmt.Println("✅ Single provider replica test passed")
 }
