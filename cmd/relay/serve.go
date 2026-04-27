@@ -197,7 +197,7 @@ func (fs *fileServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	tmp.Close()
 	strategy := r.FormValue("strategy")
-	if strategy == "" { strategy = types.StrategyChunking }
+	if strategy == "" { strategy = types.StrategyReplica } // default: replica (full file, no encryption)
 	fm, err := fs.p.Upload(tmpPath, strategy)
 	if err != nil {
 		jsonErr(w, "upload: "+err.Error(), 500)
@@ -217,7 +217,7 @@ func (fs *fileServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleDownload reassembles a file and streams it back.
+// handleDownload assembles a file and streams it back with Range support.
 func (fs *fileServer) handleDownload(w http.ResponseWriter, r *http.Request, fileID string) {
 	tmp, err := os.CreateTemp("", "relay-download-*")
 	if err != nil {
@@ -230,14 +230,20 @@ func (fs *fileServer) handleDownload(w http.ResponseWriter, r *http.Request, fil
 		jsonErr(w, "download: "+err.Error(), 500)
 		return
 	}
-	data, err := os.ReadFile(tmp.Name())
+	f, err := os.Open(tmp.Name())
 	if err != nil {
-		jsonErr(w, "read tmp: "+err.Error(), 500)
+		jsonErr(w, "open: "+err.Error(), 500)
 		return
 	}
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", "attachment")
-	w.Write(data) //nolint:errcheck
+	defer f.Close()
+	fm, _ := fs.p.GetFileMap(fileID)
+	name := fileID
+	var modTime time.Time
+	if fm != nil {
+		name = fm.Name
+		modTime = fm.Modified
+	}
+	http.ServeContent(w, r, name, modTime, f) // handles Range, Content-Type, ETag
 }
 
 // handleThumbnail serves a cached 200×200 JPEG thumbnail; lazy-generates on first request.

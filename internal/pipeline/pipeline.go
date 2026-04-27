@@ -3,6 +3,7 @@ package pipeline
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -42,7 +43,9 @@ func New(masterKey []byte, clouds []types.CloudProvider, mapStorePath string) (*
 	}, nil
 }
 
-// Upload chunks, encrypts and stores a file using selected strategy.
+// Upload stores a file using the selected strategy.
+// StrategyReplica: stores full file (unencrypted) on 1-2 providers in parallel.
+// StrategyChunking (legacy): Reed-Solomon 6+3 shards, encrypted.
 func (p *Pipeline) Upload(filePath string, strategy string) (*types.FileMap, error) {
 	fm, err := blockmap.NewFileMap(filePath)
 	if err != nil {
@@ -106,57 +109,61 @@ func (p *Pipeline) uploadChunking(fm *types.FileMap, filePath string) (*types.Fi
 	return fm, nil
 }
 
+// uploadReplica stores the full file (unencrypted) on up to 2 available providers.
+// No chunking, no erasure coding — files are stored as-is for direct streaming.
 func (p *Pipeline) uploadReplica(fm *types.FileMap, filePath string) (*types.FileMap, error) {
-	metas, chunks, err := blockstore.ChunkFile(filePath, p.chunkSz)
+	if len(p.clouds) == 0 {
+		return nil, fmt.Errorf("no cloud providers available")
+	}
+	data, err := os.ReadFile(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("chunk: %w", err)
+		return nil, fmt.Errorf("read file: %w", err)
 	}
-	if len(p.clouds) < 3 {
-		return nil, fmt.Errorf("replica strategy requires at least 3 cloud providers, got %d", len(p.clouds))
+	limit := 2 // max 2 replicas
+	if len(p.clouds) < limit {
+		limit = len(p.clouds)
 	}
-	for i, chunk := range chunks {
-		meta := &metas[i]
-		blocks := make([]types.Block, 3) // 1 main + 2 backups
-		errs := make([]error, 3)
-		var wg sync.WaitGroup
-		for j := 0; j < 3; j++ {
-			wg.Add(1)
-			go func(j int) {
-				defer wg.Done()
-				cloud := p.clouds[j]
-				blockID := fmt.Sprintf("%s.%d.r%d", fm.FileID, i, j)
-				encrypted, encErr := p.enc.Encrypt(blockID, chunk)
-				if encErr != nil {
-					errs[j] = encErr
-					return
-				}
-				cloudPath := fmt.Sprintf("replicas/%s/%d/r%d", meta.Hash[:8], i, j)
-				if upErr := cloud.Upload(cloudPath, encrypted); upErr != nil {
-					errs[j] = upErr
-					return
-				}
-				blocks[j] = types.Block{
-					ID: blockID, ShardIdx: j, Size: int64(len(encrypted)),
-					Location: fmt.Sprintf("%s:%s", cloud.ID(), cloudPath), Created: time.Now().UTC(),
-				}
-			}(j)
-		}
-		wg.Wait()
-		for _, e := range errs {
-			if e != nil {
-				return nil, e
+	chunk := types.ChunkMeta{Index: 0, Offset: 0, Size: int64(len(data)), Hash: fm.Hash}
+	blocks := make([]types.Block, limit)
+	errs := make([]error, limit)
+	var wg sync.WaitGroup
+	for j := 0; j < limit; j++ {
+		wg.Add(1)
+		go func(j int) {
+			defer wg.Done()
+			cloud := p.clouds[j]
+			cloudPath := fmt.Sprintf("files/%s/%s", fm.Hash[:8], fm.Name) // full file path
+			if upErr := cloud.Upload(cloudPath, data); upErr != nil {
+				errs[j] = upErr
+				return
 			}
-		}
-		meta.Shards = blocks
-		fm.Chunks = append(fm.Chunks, metas[i])
+			blocks[j] = types.Block{
+				ID: fmt.Sprintf("%s.r%d", fm.FileID, j), ShardIdx: j, Size: int64(len(data)),
+				Location: fmt.Sprintf("%s:%s", cloud.ID(), cloudPath), Created: time.Now().UTC(),
+			}
+		}(j)
 	}
+	wg.Wait()
+	var goodBlocks []types.Block
+	for _, b := range blocks {
+		if b.ID != "" {
+			goodBlocks = append(goodBlocks, b)
+		}
+	}
+	if len(goodBlocks) == 0 {
+		return nil, fmt.Errorf("all replicas failed: %v", errs[0])
+	}
+	chunk.Shards = goodBlocks
+	fm.Chunks = []types.ChunkMeta{chunk}
 	if err := p.bm.Save(fm); err != nil {
 		return nil, fmt.Errorf("save filemap: %w", err)
 	}
 	return fm, nil
 }
 
-// Download retrieves, decrypts, and reassembles a file from its FileMap.
+// Download retrieves and reassembles a file from its FileMap.
+// Replica strategy: returns raw bytes (unencrypted).
+// Chunking strategy (legacy): decrypts and Reed-Solomon reconstructs.
 func (p *Pipeline) Download(fileID, outputPath string) error {
 	fm, err := p.bm.Load(fileID)
 	if err != nil {
@@ -166,9 +173,9 @@ func (p *Pipeline) Download(fileID, outputPath string) error {
 	for _, meta := range fm.Chunks {
 		var chunk []byte
 		if fm.Strategy == types.StrategyReplica {
-			chunk, err = p.downloadReplica(meta)
+			chunk, err = p.downloadReplica(meta) // unencrypted
 		} else {
-			chunk, err = p.downloadChunking(meta)
+			chunk, err = p.downloadChunking(meta) // legacy encrypted
 		}
 		if err != nil {
 			return fmt.Errorf("chunk %d: %w", meta.Index, err)
@@ -206,9 +213,10 @@ func (p *Pipeline) downloadChunking(meta types.ChunkMeta) ([]byte, error) {
 	return p.rs.Join(shards, int(meta.Size))
 }
 
+// downloadReplica downloads the first available unencrypted replica.
 func (p *Pipeline) downloadReplica(meta types.ChunkMeta) ([]byte, error) {
 	var lastErr error
-	for _, block := range meta.Shards { // Replicas are stored in meta.Shards
+	for _, block := range meta.Shards {
 		cloud := p.getCloudByName(block.Location)
 		if cloud == nil {
 			continue
@@ -218,25 +226,16 @@ func (p *Pipeline) downloadReplica(meta types.ChunkMeta) ([]byte, error) {
 			lastErr = dlErr
 			continue
 		}
-		plain, decErr := p.enc.Decrypt(block.ID, data)
-		if decErr != nil {
-			lastErr = decErr
-			continue
-		}
-		return plain, nil // Success — return first available replica
+		return data, nil // raw bytes, no decryption
 	}
 	return nil, fmt.Errorf("all replicas unavailable: %v", lastErr)
 }
 
 // GetFileMap returns a specific FileMap by ID from local storage.
-func (p *Pipeline) GetFileMap(fileID string) (*types.FileMap, error) {
-	return p.bm.Load(fileID)
-}
+func (p *Pipeline) GetFileMap(fileID string) (*types.FileMap, error) { return p.bm.Load(fileID) }
 
 // ListFiles returns all uploaded FileMaps from local storage.
-func (p *Pipeline) ListFiles() ([]*types.FileMap, error) {
-	return p.bm.List()
-}
+func (p *Pipeline) ListFiles() ([]*types.FileMap, error) { return p.bm.List() }
 
 // DeleteFile removes all cloud blocks for a file and its local FileMap.
 func (p *Pipeline) DeleteFile(fileID string) error {
@@ -259,29 +258,39 @@ func (p *Pipeline) DeleteFile(fileID string) error {
 	return firstErr
 }
 
+// getCloudByName resolves a block location to its cloud provider.
+// Handles two location formats:
+//   - new: "gdrive:email@domain.com:path/to/file"  (3 parts)
+//   - legacy: "gdrive:blocks/hash/chunk/shard"      (2 parts, no email)
 func (p *Pipeline) getCloudByName(location string) types.CloudProvider {
-	parts := strings.Split(location, ":")
+	parts := strings.SplitN(location, ":", 3)
 	if len(parts) < 2 {
 		return nil
 	}
-	id := parts[0] + ":" + parts[1] // e.g. "gdrive:piowin00@gmail.com"
-	for _, c := range p.clouds {
-		if c.ID() == id {
-			return c
+	if len(parts) == 3 { // new format: scheme:email:path
+		id := parts[0] + ":" + parts[1]
+		for _, c := range p.clouds {
+			if c.ID() == id {
+				return c
+			}
 		}
 	}
-	// Fallback for legacy "local" or "mega" without email in ID
+	// legacy format or fallback: find first provider matching scheme prefix
+	scheme := parts[0]
 	for _, c := range p.clouds {
-		if c.ID() == parts[0] {
+		if c.ID() == scheme || strings.HasPrefix(c.ID(), scheme+":") {
 			return c
 		}
 	}
 	return nil
 }
 
+// parseCloudPath extracts the cloud-side path from a location string.
+// "gdrive:email:blocks/x/0/1" → "blocks/x/0/1"
+// "gdrive:blocks/x/0/1"       → "blocks/x/0/1"  (legacy)
 func parseCloudPath(location string) string {
-	parts := strings.Split(location, ":")
-	if len(parts) > 2 {
+	parts := strings.SplitN(location, ":", 3)
+	if len(parts) == 3 {
 		return parts[2]
 	}
 	if len(parts) == 2 {
