@@ -17,6 +17,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/dudenest/dudenest-relay/internal/auth"
+	"github.com/dudenest/dudenest-relay/internal/backup"
 	"github.com/dudenest/dudenest-relay/internal/browser"
 	"github.com/dudenest/dudenest-relay/internal/thumbnail"
 	"github.com/dudenest/dudenest-relay/internal/ws"
@@ -89,10 +90,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("thumbnail cache: %w", err)
 	}
+	key, _ := getKey() // key already validated in getPipeline(), safe to ignore error here
+	bc := backup.New(key, authConfigDir) // nil if BACKUP_URL/RELAY_ID/RELAY_SECRET not set
 	mux := http.NewServeMux()
 	authSrv.RegisterRoutes(mux)
 	mux.Handle("/ws", wsHub) // WebSocket: Flutter connects for relay→Flutter auth requests
-	fs := &fileServer{p: p, thumbCache: tc}
+	fs := &fileServer{p: p, thumbCache: tc, backupClient: bc}
 	mux.HandleFunc("/files", requireAuth(fs.handleList))
 	mux.HandleFunc("/files/", requireAuth(fs.handleFile))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }) //nolint:errcheck
@@ -109,7 +112,8 @@ type fileServer struct {
 		GetFileMap(fileID string) (*types.FileMap, error)
 		DeleteFile(fileID string) error
 	}
-	thumbCache *thumbnail.Cache
+	thumbCache   *thumbnail.Cache
+	backupClient *backup.Client // nil = backup disabled
 }
 
 // handleList handles GET /files — returns list of uploaded FileMaps.
@@ -206,14 +210,17 @@ func (fs *fileServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if fs.thumbCache != nil { // generate thumbnail while local file still exists
 		thumbnail.Generate(tmpPath, fs.thumbCache.Path(fm.FileID)) //nolint:errcheck
 	}
+	if maps, err2 := fs.p.ListFiles(); err2 == nil { // trigger backup after successful upload
+		fs.backupClient.Trigger(maps)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-		"file_id": fm.FileID,
-		"name":    header.Filename,
-		"size":    fm.Size,
-		"hash":    fm.Hash,
+		"file_id":  fm.FileID,
+		"name":     header.Filename,
+		"size":     fm.Size,
+		"hash":     fm.Hash,
 		"strategy": fm.Strategy,
-		"chunks":  len(fm.Chunks),
+		"chunks":   len(fm.Chunks),
 	})
 }
 
@@ -286,9 +293,12 @@ func (fs *fileServer) handleDelete(w http.ResponseWriter, r *http.Request, fileI
 		jsonErr(w, "delete: "+err.Error(), 500)
 		return
 	}
+	if maps, err := fs.p.ListFiles(); err == nil { // trigger backup after successful delete
+		fs.backupClient.Trigger(maps)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "file_id": fileID}) //nolint:errcheck
-	}
+}
 
 	// requireAuth validates JWT Bearer token from dudenest-backend.
 	func requireAuth(next http.HandlerFunc) http.HandlerFunc {
