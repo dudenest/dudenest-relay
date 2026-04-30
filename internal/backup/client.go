@@ -120,6 +120,58 @@ func (c *Client) send(maps []*types.FileMap) error {
 	return nil
 }
 
+// restoreResponse matches the GET /relay/restore response from dudenest-backup.
+type restoreResponse struct {
+	RelayID       string  `json:"relay_id"`
+	MapsJSON      string  `json:"maps_json"`
+	ProvidersEnc  []byte  `json:"providers_enc"`
+	ProviderIDs   []string `json:"provider_ids"`
+	BackupVersion int64   `json:"backup_version"`
+	CreatedAt     string  `json:"created_at"`
+}
+
+// Restore fetches the latest backup from dudenest-backup and writes maps + provider tokens to configDir.
+// Safe to call on nil. Returns (restored=true, nil) if backup was found and applied.
+func (c *Client) Restore() (bool, error) {
+	if c == nil { return false, nil }
+	req, err := http.NewRequest(http.MethodGet, c.url+"/relay/restore", nil)
+	if err != nil { return false, fmt.Errorf("restore: new request: %w", err) }
+	req.Header.Set("X-Relay-ID", c.relayID)
+	req.Header.Set("X-Relay-Secret", c.secret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil { return false, fmt.Errorf("restore: http get: %w", err) }
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound { return false, nil } // no backup yet — normal
+	if resp.StatusCode != http.StatusOK { return false, fmt.Errorf("restore: backup returned %d", resp.StatusCode) }
+	var r restoreResponse
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil { return false, fmt.Errorf("restore: decode: %w", err) }
+	if r.MapsJSON == "" { return false, nil }
+	// Write maps.json to configDir (pipeline reads from this location)
+	mapsPath := filepath.Join(c.configDir, "maps.json")
+	if err := os.WriteFile(mapsPath, []byte(r.MapsJSON), 0o600); err != nil {
+		return false, fmt.Errorf("restore: write maps: %w", err)
+	}
+	// Decrypt and restore provider tokens if present
+	if len(r.ProvidersEnc) > 0 && c.enc != nil {
+		provJSON, err := c.enc.Decrypt("relay-providers-v1", r.ProvidersEnc)
+		if err != nil { log.Printf("restore: decrypt providers failed: %v (skipping token restore)", err) } else {
+			var tokens map[string]json.RawMessage
+			if err := json.Unmarshal(provJSON, &tokens); err == nil {
+				provDir := filepath.Join(c.configDir, "providers")
+				if err := os.MkdirAll(provDir, 0o700); err == nil {
+					for name, data := range tokens {
+						if err := os.WriteFile(filepath.Join(provDir, name), data, 0o600); err != nil {
+							log.Printf("restore: write token %s: %v", name, err)
+						}
+					}
+				}
+			}
+		}
+	}
+	log.Printf("restore: ✅ restored backup v%d (%s) — %d providers", r.BackupVersion, r.CreatedAt, len(r.ProviderIDs))
+	return true, nil
+}
+
 // readProviderTokens reads all gdrive_*.json token files from configDir/providers.
 // Returns (tokensJSON, providerIDs, error). tokensJSON is nil if no tokens found.
 func (c *Client) readProviderTokens() ([]byte, []string, error) {

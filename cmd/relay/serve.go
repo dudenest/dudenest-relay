@@ -19,6 +19,7 @@ import (
 	"github.com/dudenest/dudenest-relay/internal/auth"
 	"github.com/dudenest/dudenest-relay/internal/backup"
 	"github.com/dudenest/dudenest-relay/internal/browser"
+	"github.com/dudenest/dudenest-relay/internal/register"
 	"github.com/dudenest/dudenest-relay/internal/thumbnail"
 	"github.com/dudenest/dudenest-relay/internal/ws"
 	"github.com/dudenest/dudenest-relay/pkg/types"
@@ -91,7 +92,20 @@ func runServe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("thumbnail cache: %w", err)
 	}
 	key, _ := getKey() // key already validated in getPipeline(), safe to ignore error here
+	if creds, err2 := register.EnsureRegistered(authConfigDir); err2 != nil { // auto-register with backup on first start
+		log.Printf("⚠️  register: %v (backup disabled)", err2)
+	} else if creds != nil {
+		os.Setenv("RELAY_ID", creds.RelayID)         //nolint:errcheck
+		os.Setenv("RELAY_SECRET", creds.RelaySecret) //nolint:errcheck
+	}
 	bc := backup.New(key, authConfigDir) // nil if BACKUP_URL/RELAY_ID/RELAY_SECRET not set
+	if maps, err2 := p.ListFiles(); err2 == nil && len(maps) == 0 { // startup recovery: restore if no local files
+		if restored, err3 := bc.Restore(); err3 != nil {
+			log.Printf("⚠️  startup restore: %v", err3)
+		} else if restored {
+			log.Printf("✅ startup restore: file maps + provider tokens restored from backup")
+		}
+	}
 	mux := http.NewServeMux()
 	authSrv.RegisterRoutes(mux)
 	mux.Handle("/ws", wsHub) // WebSocket: Flutter connects for relay→Flutter auth requests
