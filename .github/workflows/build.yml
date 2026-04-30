@@ -164,16 +164,20 @@ jobs:
               echo "✅ created secret: $name"
             fi
           }
-          ensure_secret relay_key            "$RELAY_KEY"
-          ensure_secret relay_jwt_secret     "$RELAY_JWT_SECRET"
+          ensure_secret relay_key "$RELAY_KEY"  # relay_jwt_secret removed — JWT_SECRET is env var via envsubst
           printf '%s' "$RELAY_GDRIVE_CLIENT_SECRET_B64" | base64 -d | docker secret create relay_gdrive_client_secret - 2>/dev/null || echo "ℹ️  secret exists: relay_gdrive_client_secret"
 
       - name: Deploy relay stack
+        env:
+          JWT_SECRET: ${{ secrets.RELAY_JWT_SECRET }}
+          GDRIVE_WEB_CLIENT_ID: ${{ secrets.GDRIVE_WEB_CLIENT_ID }}
+          GDRIVE_WEB_CLIENT_SECRET: ${{ secrets.GDRIVE_WEB_CLIENT_SECRET }}
         run: |
+          envsubst < deploy/relay-stack.yml > /tmp/relay-stack-resolved.yml
           docker stack deploy \
             --with-registry-auth \
             --resolve-image always \
-            -c deploy/relay-stack.yml \
+            --compose-file /tmp/relay-stack-resolved.yml \
             dudenest-relay
 
       - name: Verify deployment
