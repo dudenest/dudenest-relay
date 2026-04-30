@@ -47,6 +47,9 @@ services:
       - dudenest
     deploy:
       replicas: 1  # relay is stateful (maps volume) — single replica
+      placement:
+        constraints:
+          - node.role == manager  # exclude sydney/canada workers (broken overlay network)
       restart_policy:
         condition: on-failure
         delay: 30s
