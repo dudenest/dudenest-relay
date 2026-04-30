@@ -33,6 +33,7 @@ services:
       - relay_jwt_secret
       - relay_gdrive_client_secret
     environment:
+      JWT_SECRET: ${JWT_SECRET}  # shared with dudenest-backend (passed via envsubst at deploy)
       GDRIVE_WEB_CLIENT_ID: ""   # optional: override in GitHub Secrets if needed
       GDRIVE_WEB_CLIENT_SECRET: ""
     volumes:

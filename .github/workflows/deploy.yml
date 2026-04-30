@@ -1,0 +1,34 @@
+name: Deploy Relay Stack
+
+# Trigger: manual or called by build.yml after image push
+on:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  deploy:
+    name: Deploy to Swarm
+    runs-on: [self-hosted, netol-swarm]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Deploy relay stack
+        env:
+          JWT_SECRET: ${{ secrets.RELAY_JWT_SECRET }}
+          GDRIVE_WEB_CLIENT_ID: ${{ secrets.GDRIVE_WEB_CLIENT_ID }}
+          GDRIVE_WEB_CLIENT_SECRET: ${{ secrets.GDRIVE_WEB_CLIENT_SECRET }}
+        run: |
+          envsubst < deploy/relay-stack.yml > /tmp/relay-stack-resolved.yml
+          docker stack deploy \
+            --with-registry-auth \
+            --compose-file /tmp/relay-stack-resolved.yml \
+            dudenest-relay
+
+      - name: Wait and verify
+        run: |
+          sleep 20
+          docker service ls | grep dudenest-relay
+          docker service ps dudenest-relay_relay --no-trunc | head -5
