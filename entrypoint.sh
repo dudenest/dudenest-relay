@@ -5,9 +5,10 @@
 # User tokens are added at runtime via OAuth flow → stored in relay_maps volume
 set -e
 RELAY_KEY=$(cat /run/secrets/relay_key 2>/dev/null || echo "${RELAY_KEY:-}")
-JWT_SECRET=$(cat /run/secrets/relay_jwt_secret 2>/dev/null || echo "${JWT_SECRET:-}")
+# JWT_SECRET: env var (passed via envsubst in deploy.yml) — Docker secret relay_jwt_secret removed
+JWT_SECRET="${JWT_SECRET:-$(cat /run/secrets/relay_jwt_secret 2>/dev/null)}"
 [ -z "$RELAY_KEY" ] && { echo "ERROR: relay_key secret missing"; exit 1; }
-[ -z "$JWT_SECRET" ] && { echo "ERROR: relay_jwt_secret secret missing"; exit 1; }
+[ -z "$JWT_SECRET" ] && { echo "ERROR: JWT_SECRET env var not set"; exit 1; }
 export JWT_SECRET
 exec /relay serve \
   --key "$RELAY_KEY" \
