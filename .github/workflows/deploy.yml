@@ -15,10 +15,26 @@ jobs:
       - name: Login to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
+      - name: Diagnose current state
+        run: |
+          echo "=== services ===" && docker service ls | grep -E "dudenest-relay|REPLICAS" || true
+          echo "=== relay tasks ===" && docker service ps dudenest-relay_relay --no-trunc 2>/dev/null || true
+          echo "=== stacks ===" && docker stack ls || true
+
+      - name: Full stack remove (clean slate)
+        run: |
+          docker stack rm dudenest-relay 2>/dev/null || true
+          echo "Waiting for all tasks to stop..."
+          for i in $(seq 1 20); do
+            COUNT=$(docker service ls --filter name=dudenest-relay_relay -q 2>/dev/null | wc -l)
+            [ "$COUNT" -eq 0 ] && echo "Service gone" && break
+            sleep 3
+          done
+          sleep 5
+
       - name: Cleanup orphan JWT Docker secrets
         run: |
           for s in relay_jwt_secret relay_jwt_secret_new; do
-            docker service update --secret-rm "$s" dudenest-relay_relay 2>/dev/null || true
             docker secret rm "$s" 2>/dev/null || true
           done
 
