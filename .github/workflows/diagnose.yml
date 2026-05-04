@@ -1,0 +1,16 @@
+name: Diagnose Swarm
+on:
+  workflow_dispatch:
+jobs:
+  diag:
+    runs-on: [self-hosted, netol-swarm]
+    steps:
+      - name: All services
+        run: |
+          echo "=== STACKS ===" && docker stack ls
+          echo "=== ALL SERVICES ===" && docker service ls
+          echo "=== BACKEND ===" && docker service ps dudenest-backend_server --no-trunc 2>/dev/null || echo "NOT FOUND"
+          echo "=== RELAY ===" && docker service ps dudenest-relay_relay --no-trunc 2>/dev/null || echo "NOT FOUND"
+          echo "=== BACKUP ===" && docker service ps dudenest-backup_backup --no-trunc 2>/dev/null || echo "NOT FOUND"
+          echo "=== NETWORK ===" && docker network ls | grep dudenest || true
+          echo "=== BACKEND LOGS (last 20) ===" && docker service logs dudenest-backend_server --tail 20 2>/dev/null || echo "no logs"
