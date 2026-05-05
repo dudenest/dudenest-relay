@@ -6,6 +6,8 @@ jobs:
     runs-on: [self-hosted, netol-swarm]
     steps:
       - name: All services
+        env:
+          RELAY_JWT_SECRET: ${{ secrets.RELAY_JWT_SECRET }}
         run: |
           echo "=== STACKS ===" && docker stack ls
           echo "=== ALL SERVICES ===" && docker service ls
@@ -39,3 +41,25 @@ jobs:
           echo "=== RELAY SSH EXEC ===" && ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@10.51.1.221 "docker ps --filter name=dudenest-relay_relay --format '{{.ID}} {{.Status}} {{.Names}}'" 2>/dev/null || echo "ssh to node001 failed"
           echo "=== RELAY ENV via SSH ===" && ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@10.51.1.221 "docker exec \$(docker ps -q -f name=dudenest-relay_relay | head -1) env 2>/dev/null | grep -E 'JWT_SECRET|RELAY|BACKUP'" 2>/dev/null | sed 's/JWT_SECRET=\(.\{0,12\}\).*/JWT_SECRET=\1.../' || echo "ssh exec failed"
           echo "=== BACKUP STATUS ===" && docker service ls --filter name=dudenest-backup && docker service ps dudenest-backup_backup --no-trunc 2>/dev/null | head -5
+          echo "=== JWT LIVE TEST (via ZeroTier direct to node001) ===" && python3 - <<'PYEOF'
+import hmac, hashlib, base64, json, time, os, urllib.request, ssl
+secret = os.environ.get("RELAY_JWT_SECRET","")
+if not secret:
+    print("ERROR: RELAY_JWT_SECRET not set")
+    exit(1)
+header = base64.urlsafe_b64encode(json.dumps({"alg":"HS256","typ":"JWT"}).encode()).rstrip(b"=").decode()
+payload = base64.urlsafe_b64encode(json.dumps({"sub":"test-diag","user_id":"test","exp":int(time.time())+300}).encode()).rstrip(b"=").decode()
+msg = f"{header}.{payload}"
+sig = base64.urlsafe_b64encode(hmac.new(secret.encode(), msg.encode(), hashlib.sha256).digest()).rstrip(b"=").decode()  # noqa
+token = f"{msg}.{sig}"
+print(f"JWT first 30 chars: {token[:30]}...")
+urls = ["http://10.51.1.221:8086/health","http://10.51.1.221:8086/providers"]
+for url in urls:
+    try:
+        req = urllib.request.Request(url, headers={"Authorization":f"Bearer {token}"})
+        ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+        resp = urllib.request.urlopen(req, timeout=5)
+        print(f"GET {url} → {resp.status}: {resp.read()[:200].decode('utf-8','ignore')}")
+    except Exception as e:
+        print(f"GET {url} → ERROR: {e}")
+PYEOF
