@@ -17,11 +17,19 @@ jobs:
           echo "=== RELAY JWT_SECRET check ===" && docker service inspect dudenest-relay_relay --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' | grep JWT_SECRET | sed 's/JWT_SECRET=\(.\{0,8\}\).*/JWT_SECRET=\1...REDACTED/'
           echo "=== BACKEND JWT_SECRET check ===" && docker service inspect dudenest-backend_server --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' | grep JWT_SECRET | sed 's/JWT_SECRET=\(.\{0,8\}\).*/JWT_SECRET=\1...REDACTED/'
           echo "=== RELAY LOGS (last 50) ===" && docker service logs dudenest-relay_relay --tail 50 --timestamps 2>/dev/null || echo "no logs"
-          echo "=== RELAY CONTAINER EXEC ===" && RELAY_CONTAINER=$(docker ps --filter name=dudenest-relay_relay --format '{{.ID}}' | head -1) && echo "Container: $RELAY_CONTAINER" && if [ -n "$RELAY_CONTAINER" ]; then
+          echo "=== WHICH NODE IS RUNNER ===" && docker info --format '{{.Name}}'
+          echo "=== RELAY TASK NODE ===" && docker service ps dudenest-relay_relay --filter "desired-state=running" --format '{{.Node}} {{.CurrentState}} {{.ID}}'
+          echo "=== RELAY LOGS via service logs ===" && docker service logs dudenest-relay_relay --tail 50 --timestamps 2>&1 | tail -30 || echo "no service logs"
+          echo "=== RELAY CONTAINER LOCAL ===" && RELAY_CONTAINER=$(docker ps --filter name=dudenest-relay_relay --format '{{.ID}}' | head -1) && echo "local container id: $RELAY_CONTAINER"
+          if [ -n "$RELAY_CONTAINER" ]; then
             echo "--- env JWT_SECRET ---" && docker exec $RELAY_CONTAINER env | grep JWT_SECRET | sed 's/JWT_SECRET=\(.\{0,12\}\).*/JWT_SECRET=\1.../'
-            echo "--- relay_creds.json ---" && docker exec $RELAY_CONTAINER ls -la /var/lib/dudenest/maps/ 2>/dev/null || echo "maps dir empty or missing"
-            echo "--- relay_creds content ---" && docker exec $RELAY_CONTAINER cat /var/lib/dudenest/maps/relay_creds.json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print('relay_id:', d.get('relay_id','?')); print('has_secret:', bool(d.get('relay_secret')))" 2>/dev/null || echo "no relay_creds.json"
-            echo "--- maps.json users ---" && docker exec $RELAY_CONTAINER ls -la /var/lib/dudenest/maps/*.json 2>/dev/null || echo "no json files"
-            echo "--- /health endpoint ---" && docker exec $RELAY_CONTAINER wget -qO- http://localhost:8086/health 2>/dev/null || echo "health failed"
+            echo "--- maps dir ---" && docker exec $RELAY_CONTAINER ls -la /var/lib/dudenest/maps/ 2>/dev/null || echo "maps dir missing"
+            echo "--- relay_creds.json ---" && docker exec $RELAY_CONTAINER cat /var/lib/dudenest/maps/relay_creds.json 2>/dev/null | sed 's/"relay_secret":"[^"]*"/"relay_secret":"REDACTED"/' || echo "no relay_creds.json"
+            echo "--- maps files ---" && docker exec $RELAY_CONTAINER ls -la /var/lib/dudenest/maps/*.json 2>/dev/null || echo "no json files in maps"
+            echo "--- health ---" && docker exec $RELAY_CONTAINER wget -qO- http://localhost:8086/health 2>/dev/null || echo "health failed"
+          else
+            echo "Relay is on a different node - trying via Swarm routing mesh"
+            echo "--- health via mesh :8086 ---" && wget -qO- http://localhost:8086/health 2>/dev/null || echo "health via mesh failed"
+            echo "--- files 401 test ---" && wget -qO- --header "Authorization: Bearer invalid" http://localhost:8086/files 2>&1 | head -5 || true
           fi
-          echo "=== BACKEND LOGS (last 30, auth errors) ===" && docker service logs dudenest-backend_server --tail 100 --timestamps 2>/dev/null | grep -i "401\|unauth\|jwt\|relay\|register" | tail -20 || echo "no logs"
+          echo "=== BACKEND LOGS auth errors ===" && docker service logs dudenest-backend_server --tail 100 --timestamps 2>&1 | grep -i "401\|unauth\|jwt\|relay\|register\|error" | tail -20 || echo "no backend logs"
