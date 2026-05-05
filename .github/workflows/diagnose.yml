@@ -33,3 +33,9 @@ jobs:
             echo "--- files 401 test ---" && wget -qO- --header "Authorization: Bearer invalid" http://localhost:8086/files 2>&1 | head -5 || true
           fi
           echo "=== BACKEND LOGS auth errors ===" && docker service logs dudenest-backend_server --tail 100 --timestamps 2>&1 | grep -i "401\|unauth\|jwt\|relay\|register\|error" | tail -20 || echo "no backend logs"
+          echo "=== OVERLAY NETWORK IPAM ===" && docker network inspect dudenest --format '{{json .IPAM}}' 2>/dev/null || echo "no dudenest network"
+          echo "=== OVERLAY NETWORK CONTAINERS ===" && docker network inspect dudenest --format '{{range .Containers}}{{.Name}} {{.IPv4Address}} {{println}}{{end}}' 2>/dev/null || echo "no containers on dudenest"
+          echo "=== ALL RELAY PS (node1) ===" && docker node ps node001.netol.io --no-trunc 2>/dev/null | grep -E "relay|backend|backup" || echo "cannot access node001 tasks"
+          echo "=== RELAY SSH EXEC ===" && ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@10.51.1.221 "docker ps --filter name=dudenest-relay_relay --format '{{.ID}} {{.Status}} {{.Names}}'" 2>/dev/null || echo "ssh to node001 failed"
+          echo "=== RELAY ENV via SSH ===" && ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@10.51.1.221 "docker exec \$(docker ps -q -f name=dudenest-relay_relay | head -1) env 2>/dev/null | grep -E 'JWT_SECRET|RELAY|BACKUP'" 2>/dev/null | sed 's/JWT_SECRET=\(.\{0,12\}\).*/JWT_SECRET=\1.../' || echo "ssh exec failed"
+          echo "=== BACKUP STATUS ===" && docker service ls --filter name=dudenest-backup && docker service ps dudenest-backup_backup --no-trunc 2>/dev/null | head -5
