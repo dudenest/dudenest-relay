@@ -14,3 +14,6 @@ jobs:
           echo "=== BACKUP ===" && docker service ps dudenest-backup_backup --no-trunc 2>/dev/null || echo "NOT FOUND"
           echo "=== NETWORK ===" && docker network ls | grep dudenest || true
           echo "=== BACKEND LOGS (last 20) ===" && docker service logs dudenest-backend_server --tail 20 2>/dev/null || echo "no logs"
+          echo "=== RELAY JWT_SECRET check ===" && docker service inspect dudenest-relay_relay --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' | grep JWT_SECRET | sed 's/JWT_SECRET=\(.\{0,8\}\).*/JWT_SECRET=\1...REDACTED/'
+          echo "=== BACKEND JWT_SECRET check ===" && docker service inspect dudenest-backend_server --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' | grep JWT_SECRET | sed 's/JWT_SECRET=\(.\{0,8\}\).*/JWT_SECRET=\1...REDACTED/'
+          echo "=== RELAY LOGS (last 30) ===" && docker service logs dudenest-relay_relay --tail 30 2>/dev/null || echo "no logs"
