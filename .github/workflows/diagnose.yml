@@ -16,4 +16,12 @@ jobs:
           echo "=== BACKEND LOGS (last 20) ===" && docker service logs dudenest-backend_server --tail 20 2>/dev/null || echo "no logs"
           echo "=== RELAY JWT_SECRET check ===" && docker service inspect dudenest-relay_relay --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' | grep JWT_SECRET | sed 's/JWT_SECRET=\(.\{0,8\}\).*/JWT_SECRET=\1...REDACTED/'
           echo "=== BACKEND JWT_SECRET check ===" && docker service inspect dudenest-backend_server --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' | grep JWT_SECRET | sed 's/JWT_SECRET=\(.\{0,8\}\).*/JWT_SECRET=\1...REDACTED/'
-          echo "=== RELAY LOGS (last 30) ===" && docker service logs dudenest-relay_relay --tail 30 2>/dev/null || echo "no logs"
+          echo "=== RELAY LOGS (last 50) ===" && docker service logs dudenest-relay_relay --tail 50 --timestamps 2>/dev/null || echo "no logs"
+          echo "=== RELAY CONTAINER EXEC ===" && RELAY_CONTAINER=$(docker ps --filter name=dudenest-relay_relay --format '{{.ID}}' | head -1) && echo "Container: $RELAY_CONTAINER" && if [ -n "$RELAY_CONTAINER" ]; then
+            echo "--- env JWT_SECRET ---" && docker exec $RELAY_CONTAINER env | grep JWT_SECRET | sed 's/JWT_SECRET=\(.\{0,12\}\).*/JWT_SECRET=\1.../'
+            echo "--- relay_creds.json ---" && docker exec $RELAY_CONTAINER ls -la /var/lib/dudenest/maps/ 2>/dev/null || echo "maps dir empty or missing"
+            echo "--- relay_creds content ---" && docker exec $RELAY_CONTAINER cat /var/lib/dudenest/maps/relay_creds.json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print('relay_id:', d.get('relay_id','?')); print('has_secret:', bool(d.get('relay_secret')))" 2>/dev/null || echo "no relay_creds.json"
+            echo "--- maps.json users ---" && docker exec $RELAY_CONTAINER ls -la /var/lib/dudenest/maps/*.json 2>/dev/null || echo "no json files"
+            echo "--- /health endpoint ---" && docker exec $RELAY_CONTAINER wget -qO- http://localhost:8086/health 2>/dev/null || echo "health failed"
+          fi
+          echo "=== BACKEND LOGS (last 30, auth errors) ===" && docker service logs dudenest-backend_server --tail 100 --timestamps 2>/dev/null | grep -i "401\|unauth\|jwt\|relay\|register" | tail -20 || echo "no logs"
