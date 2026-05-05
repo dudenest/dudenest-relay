@@ -6,8 +6,6 @@ jobs:
     runs-on: [self-hosted, netol-swarm]
     steps:
       - name: All services
-        env:
-          RELAY_JWT_SECRET: ${{ secrets.RELAY_JWT_SECRET }}
         run: |
           echo "=== STACKS ===" && docker stack ls
           echo "=== ALL SERVICES ===" && docker service ls
@@ -37,29 +35,46 @@ jobs:
           echo "=== BACKEND LOGS auth errors ===" && docker service logs dudenest-backend_server --tail 100 --timestamps 2>&1 | grep -i "401\|unauth\|jwt\|relay\|register\|error" | tail -20 || echo "no backend logs"
           echo "=== OVERLAY NETWORK IPAM ===" && docker network inspect dudenest --format '{{json .IPAM}}' 2>/dev/null || echo "no dudenest network"
           echo "=== OVERLAY NETWORK CONTAINERS ===" && docker network inspect dudenest --format '{{range .Containers}}{{.Name}} {{.IPv4Address}} {{println}}{{end}}' 2>/dev/null || echo "no containers on dudenest"
-          echo "=== ALL RELAY PS (node1) ===" && docker node ps node001.netol.io --no-trunc 2>/dev/null | grep -E "relay|backend|backup" || echo "cannot access node001 tasks"
-          echo "=== RELAY SSH EXEC ===" && ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@10.51.1.221 "docker ps --filter name=dudenest-relay_relay --format '{{.ID}} {{.Status}} {{.Names}}'" 2>/dev/null || echo "ssh to node001 failed"
-          echo "=== RELAY ENV via SSH ===" && ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@10.51.1.221 "docker exec \$(docker ps -q -f name=dudenest-relay_relay | head -1) env 2>/dev/null | grep -E 'JWT_SECRET|RELAY|BACKUP'" 2>/dev/null | sed 's/JWT_SECRET=\(.\{0,12\}\).*/JWT_SECRET=\1.../' || echo "ssh exec failed"
           echo "=== BACKUP STATUS ===" && docker service ls --filter name=dudenest-backup && docker service ps dudenest-backup_backup --no-trunc 2>/dev/null | head -5
-          echo "=== JWT LIVE TEST (via ZeroTier direct to node001) ===" && python3 - <<'PYEOF'
-import hmac, hashlib, base64, json, time, os, urllib.request, ssl
-secret = os.environ.get("RELAY_JWT_SECRET","")
-if not secret:
-    print("ERROR: RELAY_JWT_SECRET not set")
-    exit(1)
-header = base64.urlsafe_b64encode(json.dumps({"alg":"HS256","typ":"JWT"}).encode()).rstrip(b"=").decode()
-payload = base64.urlsafe_b64encode(json.dumps({"sub":"test-diag","user_id":"test","exp":int(time.time())+300}).encode()).rstrip(b"=").decode()
-msg = f"{header}.{payload}"
-sig = base64.urlsafe_b64encode(hmac.new(secret.encode(), msg.encode(), hashlib.sha256).digest()).rstrip(b"=").decode()  # noqa
-token = f"{msg}.{sig}"
-print(f"JWT first 30 chars: {token[:30]}...")
-urls = ["http://10.51.1.221:8086/health","http://10.51.1.221:8086/providers"]
-for url in urls:
-    try:
-        req = urllib.request.Request(url, headers={"Authorization":f"Bearer {token}"})
-        ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
-        resp = urllib.request.urlopen(req, timeout=5)
-        print(f"GET {url} → {resp.status}: {resp.read()[:200].decode('utf-8','ignore')}")
-    except Exception as e:
-        print(f"GET {url} → ERROR: {e}")
-PYEOF
+
+      - name: JWT live test (RELAY_JWT_SECRET vs relay endpoint)
+        env:
+          RELAY_JWT_SECRET: ${{ secrets.RELAY_JWT_SECRET }}
+        run: |
+          python3 -c "
+          import hmac as _hmac, hashlib, base64, json, time, os, urllib.request
+          secret = os.environ.get('RELAY_JWT_SECRET', '')
+          if not secret:
+              print('ERROR: RELAY_JWT_SECRET not set')
+              exit(1)
+          h = base64.urlsafe_b64encode(json.dumps({'alg':'HS256','typ':'JWT'}).encode()).rstrip(b'=').decode()
+          p = base64.urlsafe_b64encode(json.dumps({'sub':'test-diag','user_id':'test','exp':int(time.time())+300}).encode()).rstrip(b'=').decode()
+          msg = h + '.' + p
+          mac = _hmac.new(secret.encode(), msg.encode(), hashlib.sha256)
+          sig = base64.urlsafe_b64encode(mac.digest()).rstrip(b'=').decode()
+          token = msg + '.' + sig
+          print('JWT first 30 chars: ' + token[:30] + '...')
+          for url in ['http://10.51.1.221:8086/health', 'http://10.51.1.221:8086/providers']:
+              try:
+                  req = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + token})
+                  resp = urllib.request.urlopen(req, timeout=5)
+                  print('GET ' + url + ' -> ' + str(resp.status) + ': ' + resp.read()[:200].decode('utf-8', 'ignore'))
+              except Exception as e:
+                  print('GET ' + url + ' -> ERROR: ' + str(e))
+          "
+
+      - name: JWT compare secrets prefix (RELAY vs DUDENEST)
+        env:
+          RELAY_JWT_SECRET: ${{ secrets.RELAY_JWT_SECRET }}
+          DUDENEST_JWT_SECRET: ${{ secrets.DUDENEST_JWT_SECRET }}
+        run: |
+          python3 -c "
+          import os
+          relay = os.environ.get('RELAY_JWT_SECRET', '')
+          dudenest = os.environ.get('DUDENEST_JWT_SECRET', '')
+          print('RELAY_JWT_SECRET   first 12 chars: ' + relay[:12] + '...')
+          print('DUDENEST_JWT_SECRET first 12 chars: ' + dudenest[:12] + '...')
+          print('MATCH (first 16): ' + str(relay[:16] == dudenest[:16]))
+          print('FULL MATCH: ' + str(relay == dudenest))
+          print('relay len=' + str(len(relay)) + ' dudenest len=' + str(len(dudenest)))
+          "
