@@ -37,30 +37,73 @@ jobs:
           echo "=== OVERLAY NETWORK CONTAINERS ===" && docker network inspect dudenest --format '{{range .Containers}}{{.Name}} {{.IPv4Address}} {{println}}{{end}}' 2>/dev/null || echo "no containers on dudenest"
           echo "=== BACKUP STATUS ===" && docker service ls --filter name=dudenest-backup && docker service ps dudenest-backup_backup --no-trunc 2>/dev/null | head -5
 
-      - name: JWT live test (RELAY_JWT_SECRET vs relay endpoint)
+      - name: Diagnose relay-poc (10.51.1.119)
+        env:
+          SSH_RELAY_KEY_B64: ${{ secrets.SSH_RELAY_KEY }}
+        run: |
+          mkdir -p /tmp/diag-ssh
+          printf '%s\n' "$SSH_RELAY_KEY_B64" > /tmp/diag-ssh/id_relay
+          chmod 600 /tmp/diag-ssh/id_relay
+          printf '%s\n' \
+            '|1|UuvIaaNQuir5tDQ8W+KQW1pdeFA=|AbnuhorydCSV+fIqEELFQrwnDEk= ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCpX+9BKh/cvHUvlckdZAMLgrP1q0UvBZfGqP1H7wiOVasHEftPz5k7A40ywQDoN63rhA/DmcPDc19DUTcRBbPY0Oh/5Gu1Q3tD66dCmgNxusg5fKP5tdsai4enZ1sxiFY/XbkSb1M67wshYV46JI2HXqHiXCyp9GpA8EbF/bRSU3P78AfOsU2fT4iQWCT4cYRkqIiPw7CJrRgOyb4/luqYMB/keO2/5Y6BQKTDHt1aL2Fp69hnuAzUgVzPCVDo40mhsYhdp9We0R4uDiyl5/BCGjSNu84G4g2yM3hMQ8Rm63edE5dQcM+n8PxjYm3WM+VjJaPgArdh6Pr+KZ+SZO0TV14oQNOLzHUB6dox5/QvpqND2d2uYsFuVt80ScKonG1CQwGH+mfHcO65j3t5Lk2vCPECCCCmcoI1VITZVt2H3bKb/prEa0IH2EPpRLcplPycXzXQQ/HN+ar826EdXI9qAIdZ3cUvHHy+3bT8Sg25koi9Y54WRxpSvtmrocH3f6E=' \
+            '|1|V9gcNyA5Zi6WhVJujqTIkE1C16M=|/zHsBw2Nti0ZD+ROap3SWSkOJuM= ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEYudfc8afzLb6qXA+tk4LDHB5aTfxFDiuCDOYBzj9x51e13i+34+vWj4UbUd/8vNLezNrJ/B9Ojl+9B2xhG9F0=' \
+            '|1|jP6cS821wSvnH01mYQuKa1+HqjE=|uS2B2nlW73jCh14qFoCqOwPePfI= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILOMuMu0FwC7XN/zMLMQXAjyOyP1ovyTFwa/gM0kBgt8' \
+            > /tmp/diag-ssh/known_hosts
+          chmod 644 /tmp/diag-ssh/known_hosts
+          echo "=== relay-poc: systemd service status ===" && \
+            ssh -i /tmp/diag-ssh/id_relay -o UserKnownHostsFile=/tmp/diag-ssh/known_hosts -o StrictHostKeyChecking=yes root@10.51.1.119 \
+              'systemctl is-active relay.service && systemctl status relay.service --no-pager -l | tail -20' 2>&1 || echo "ssh failed"
+          echo "=== relay-poc: relay binary version ===" && \
+            ssh -i /tmp/diag-ssh/id_relay -o UserKnownHostsFile=/tmp/diag-ssh/known_hosts -o StrictHostKeyChecking=yes root@10.51.1.119 \
+              'ls -lh /usr/local/bin/relay && /usr/local/bin/relay version 2>/dev/null || echo "no version flag"' 2>&1 || echo "ssh failed"
+          echo "=== relay-poc: config dir ===" && \
+            ssh -i /tmp/diag-ssh/id_relay -o UserKnownHostsFile=/tmp/diag-ssh/known_hosts -o StrictHostKeyChecking=yes root@10.51.1.119 \
+              'ls -la /root/.config/dudenest/ 2>/dev/null || echo "no config dir"' 2>&1 || echo "ssh failed"
+          echo "=== relay-poc: relay_creds.json ===" && \
+            ssh -i /tmp/diag-ssh/id_relay -o UserKnownHostsFile=/tmp/diag-ssh/known_hosts -o StrictHostKeyChecking=yes root@10.51.1.119 \
+              'cat /root/.config/dudenest/relay_creds.json 2>/dev/null | sed "s/\"relay_secret\":\"[^\"]*\"/\"relay_secret\":\"REDACTED\"/" || echo "no relay_creds.json"' 2>&1 || echo "ssh failed"
+          echo "=== relay-poc: relay.env keys present ===" && \
+            ssh -i /tmp/diag-ssh/id_relay -o UserKnownHostsFile=/tmp/diag-ssh/known_hosts -o StrictHostKeyChecking=yes root@10.51.1.119 \
+              'cat /root/.config/dudenest/relay.env 2>/dev/null | sed "s/=.*/=REDACTED/" || echo "no relay.env"' 2>&1 || echo "ssh failed"
+          echo "=== relay-poc: last 30 journal lines ===" && \
+            ssh -i /tmp/diag-ssh/id_relay -o UserKnownHostsFile=/tmp/diag-ssh/known_hosts -o StrictHostKeyChecking=yes root@10.51.1.119 \
+              'journalctl -u relay.service -n 30 --no-pager 2>/dev/null || tail -30 /var/log/relay.log 2>/dev/null || echo "no logs"' 2>&1 || echo "ssh failed"
+          rm -rf /tmp/diag-ssh
+
+      - name: JWT live test (relay-poc + Swarm)
         env:
           RELAY_JWT_SECRET: ${{ secrets.RELAY_JWT_SECRET }}
         run: |
           python3 -c "
-          import hmac as _hmac, hashlib, base64, json, time, os, urllib.request
+          import hmac as _hmac, hashlib, base64, json, time, os, urllib.request, urllib.error
           secret = os.environ.get('RELAY_JWT_SECRET', '')
           if not secret:
               print('ERROR: RELAY_JWT_SECRET not set')
               exit(1)
           h = base64.urlsafe_b64encode(json.dumps({'alg':'HS256','typ':'JWT'}).encode()).rstrip(b'=').decode()
-          p = base64.urlsafe_b64encode(json.dumps({'sub':'test-diag','user_id':'test','exp':int(time.time())+300}).encode()).rstrip(b'=').decode()
+          p = base64.urlsafe_b64encode(json.dumps({'sub':'test-diag-user','exp':int(time.time())+300}).encode()).rstrip(b'=').decode()
           msg = h + '.' + p
           mac = _hmac.new(secret.encode(), msg.encode(), hashlib.sha256)
           sig = base64.urlsafe_b64encode(mac.digest()).rstrip(b'=').decode()
           token = msg + '.' + sig
-          print('JWT first 30 chars: ' + token[:30] + '...')
-          for url in ['http://10.51.1.221:8086/health', 'http://10.51.1.221:8086/providers']:
-              try:
-                  req = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + token})
-                  resp = urllib.request.urlopen(req, timeout=5)
-                  print('GET ' + url + ' -> ' + str(resp.status) + ': ' + resp.read()[:200].decode('utf-8', 'ignore'))
-              except Exception as e:
-                  print('GET ' + url + ' -> ERROR: ' + str(e))
+          print('JWT (first 40): ' + token[:40] + '...')
+          targets = [
+              ('relay-poc', 'http://10.51.1.119:8086'),
+              ('swarm', 'http://10.51.1.221:8086'),
+          ]
+          for name, base in targets:
+              for path in ['/health', '/files', '/providers']:
+                  url = base + path
+                  try:
+                      req = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + token})
+                      resp = urllib.request.urlopen(req, timeout=5)
+                      body = resp.read()[:300].decode('utf-8', 'ignore')
+                      print(f'[{name}] GET {path} -> {resp.status}: {body}')
+                  except urllib.error.HTTPError as e:
+                      body = e.read()[:200].decode('utf-8', 'ignore')
+                      print(f'[{name}] GET {path} -> HTTP {e.code}: {body}')
+                  except Exception as e:
+                      print(f'[{name}] GET {path} -> ERROR: {e}')
           "
 
       - name: JWT compare secrets prefix (RELAY vs DUDENEST)
