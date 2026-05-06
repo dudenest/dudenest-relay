@@ -50,7 +50,8 @@ func serveCmd() *cobra.Command {
 // degradedServerWithAuth runs in standby: /files returns 503, but /auth/* and /ws stay active
 // so users can re-authorize cloud providers without restarting the relay.
 // /health returns 200 (degraded) so HAProxy keeps the node in rotation.
-func degradedServerWithAuth(listen, reason string, authSrv interface{ RegisterRoutes(*http.ServeMux) }, wsHub http.Handler) error {
+// tryReg is called on /files requests even in standby so JWT-based registration fires regardless of cloud auth state.
+func degradedServerWithAuth(listen, reason string, authSrv interface{ RegisterRoutes(*http.ServeMux) }, wsHub http.Handler, tryReg func(string)) error {
 	log.Printf("⚠️  relay: entering standby mode — %s", reason)
 	log.Printf("⚠️  relay: /files=503, /auth active — re-authorize via Flutter app")
 	ticker := time.NewTicker(5 * time.Minute)
@@ -59,6 +60,10 @@ func degradedServerWithAuth(listen, reason string, authSrv interface{ RegisterRo
 			log.Printf("⚠️  relay: STANDBY (%s) — use /auth/url to re-authorize", reason)
 		}
 	}()
+	standbyFile := func(w http.ResponseWriter, r *http.Request) { // validate JWT + trigger registration even in standby
+		if tryReg != nil { tryReg(r.Header.Get("Authorization")) }
+		jsonErr(w, "relay in standby: "+reason, http.StatusServiceUnavailable)
+	}
 	mux := http.NewServeMux()
 	authSrv.RegisterRoutes(mux) // /auth/* active even in standby — user can add/re-auth providers
 	mux.Handle("/ws", wsHub)
@@ -66,8 +71,8 @@ func degradedServerWithAuth(listen, reason string, authSrv interface{ RegisterRo
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "degraded", "reason": reason}) //nolint:errcheck
 	})
-	mux.HandleFunc("/files", func(w http.ResponseWriter, r *http.Request) { jsonErr(w, "relay in standby: "+reason, http.StatusServiceUnavailable) })
-	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) { jsonErr(w, "relay in standby: "+reason, http.StatusServiceUnavailable) })
+	mux.HandleFunc("/files", standbyFile)
+	mux.HandleFunc("/files/", standbyFile)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { jsonErr(w, "relay in standby: "+reason, http.StatusServiceUnavailable) })
 	log.Printf("⚠️  relay: standby server with auth listening on %s", listen)
 	return http.ListenAndServe(listen, corsMiddleware(mux))
@@ -93,10 +98,27 @@ func runServe(cmd *cobra.Command, args []string) error {
 	wsHub := ws.NewHub()
 	bm := blockmap.New(storePath) // blockmap for file_count in /auth/providers
 	authSrv := browser.NewServer(cfg.Server.Display, cfg.Server.Listen, browser.BuildAuthURL(cfg2), cfg2, webCfg, authConfigDir, wsHub, bm, cfg.OAuth.CallbackPort, cfg.NoVNC.BackendAddr, cfg.SessionTimeout())
+	// tryReg: JWT-based registration trigger, created before getPipeline() so it fires even in standby.
+	// Validates Bearer token, extracts user_id from claims, registers relay with backup (saves relay_creds.json).
+	// Does not need pipeline/fileServer — only configDir + backupURL.
+	var standbyRegOnce sync.Once
+	tryReg := func(authHeader string) {
+		if !strings.HasPrefix(authHeader, "Bearer ") { return }
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		claims, err := auth.ValidateJWT(token)
+		if err != nil || claims == nil || claims.Sub == "" { return }
+		go standbyRegOnce.Do(func() {
+			if _, err2 := register.RegisterOnceWithUserID(authConfigDir, claims.Sub, cfg.Backup.URL); err2 != nil {
+				log.Printf("⚠️  standby register: %v", err2)
+			} else {
+				log.Printf("✅ standby register: relay registered with backup (user=%s)", claims.Sub)
+			}
+		})
+	}
 	p, err := getPipeline()
 	if err != nil {
 		if isCredentialError(err) { // OAuth expired/revoked or no providers yet → standby with auth routes active
-			return degradedServerWithAuth(cfg.Server.Listen, fmt.Sprintf("pipeline init: %v", err), authSrv, wsHub)
+			return degradedServerWithAuth(cfg.Server.Listen, fmt.Sprintf("pipeline init: %v", err), authSrv, wsHub, tryReg)
 		}
 		return fmt.Errorf("pipeline init: %w", err)
 	}
