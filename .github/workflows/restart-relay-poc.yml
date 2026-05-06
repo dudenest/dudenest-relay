@@ -20,5 +20,5 @@ jobs:
               -o UserKnownHostsFile=/tmp/restart-ssh/known_hosts \
               -o StrictHostKeyChecking=yes \
               root@10.51.1.119 \
-              'systemctl restart relay.service && sleep 2 && systemctl is-active relay.service && journalctl -u relay.service -n 10 --no-pager'
+              'rm -f /root/.config/dudenest/relay_creds.json && echo "relay_creds.json removed" && systemctl restart relay.service && sleep 2 && systemctl is-active relay.service && journalctl -u relay.service -n 15 --no-pager'
           rm -rf /tmp/restart-ssh
