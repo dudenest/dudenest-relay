@@ -204,6 +204,11 @@ jobs:
           path: dist/
 
       - name: Deploy to relay-poc via ZeroTier (DooD)
+        env:
+          RELAY_JWT_SECRET: ${{ secrets.RELAY_JWT_SECRET }}
+          RELAY_KEY: ${{ secrets.RELAY_KEY }}
+          GDRIVE_WEB_CLIENT_ID: ${{ secrets.GDRIVE_WEB_CLIENT_ID }}
+          GDRIVE_WEB_CLIENT_SECRET: ${{ secrets.GDRIVE_WEB_CLIENT_SECRET }}
         run: |
           mkdir -p .ssh
           printf '%s\n' "${{ secrets.SSH_RELAY_KEY }}" > .ssh/id_relay
@@ -214,16 +219,21 @@ jobs:
             '|1|jP6cS821wSvnH01mYQuKa1+HqjE=|uS2B2nlW73jCh14qFoCqOwPePfI= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILOMuMu0FwC7XN/zMLMQXAjyOyP1ovyTFwa/gM0kBgt8' \
             > .ssh/known_hosts
           chmod 644 .ssh/known_hosts
+          # Generate relay.env with current secrets from GitHub (overwrites existing on VM)
+          printf 'RELAY_KEY=%s\nGDRIVE_WEB_CLIENT_ID=%s\nGDRIVE_WEB_CLIENT_SECRET=%s\nJWT_SECRET=%s\n' \
+            "${RELAY_KEY}" "${GDRIVE_WEB_CLIENT_ID}" "${GDRIVE_WEB_CLIENT_SECRET}" "${RELAY_JWT_SECRET}" > relay.env
           DEPLOYER="deployer-${{ github.run_id }}-${{ github.run_attempt }}"
           docker rm -f $DEPLOYER 2>/dev/null || true
           docker create --name $DEPLOYER --network host alpine:latest sleep 300
           docker cp dist $DEPLOYER:/dist
           docker cp .ssh $DEPLOYER:/root/.ssh
+          docker cp relay.env $DEPLOYER:/relay.env
           docker start $DEPLOYER
           docker exec $DEPLOYER sh -c "
             apk add --no-cache openssh-client && \
             chmod 600 /root/.ssh/id_relay && \
             chmod +x /dist/relay-linux-amd64 && \
+            scp -i /root/.ssh/id_relay -o UserKnownHostsFile=/root/.ssh/known_hosts -o StrictHostKeyChecking=yes /relay.env root@10.51.1.119:/root/.config/dudenest/relay.env && \
             scp -i /root/.ssh/id_relay -o UserKnownHostsFile=/root/.ssh/known_hosts -o StrictHostKeyChecking=yes /dist/relay-linux-amd64 root@10.51.1.119:/tmp/relay-new && \
             ssh -i /root/.ssh/id_relay -o UserKnownHostsFile=/root/.ssh/known_hosts -o StrictHostKeyChecking=yes root@10.51.1.119 'mv /tmp/relay-new /usr/local/bin/relay && systemctl restart relay.service && systemctl is-active relay.service'
           "
