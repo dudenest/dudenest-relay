@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -112,8 +113,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	authSrv.RegisterRoutes(mux)
 	mux.Handle("/ws", wsHub) // WebSocket: Flutter connects for relay→Flutter auth requests
 	fs := &fileServer{p: p, thumbCache: tc, backupClient: bc}
-	mux.HandleFunc("/files", requireAuth(fs.handleList))
-	mux.HandleFunc("/files/", requireAuth(fs.handleFile))
+	lr := &lazyRegistrar{configDir: authConfigDir, masterKey: key, fs: fs}
+	mux.HandleFunc("/files", requireAuthWithReg(lr, fs.handleList))
+	mux.HandleFunc("/files/", requireAuthWithReg(lr, fs.handleFile))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }) //nolint:errcheck
 	fmt.Printf("relay serve listening on %s (provider: %s, ws: /ws)\n", serveListen, provider)
 	return http.ListenAndServe(serveListen, corsMiddleware(mux))
@@ -129,7 +131,48 @@ type fileServer struct {
 		DeleteFile(fileID string) error
 	}
 	thumbCache   *thumbnail.Cache
-	backupClient *backup.Client // nil = backup disabled
+	backupMu     sync.RWMutex
+	backupClient *backup.Client // nil = backup disabled; may be set lazily after JWT registration
+}
+
+func (fs *fileServer) backup() *backup.Client {
+	fs.backupMu.RLock()
+	defer fs.backupMu.RUnlock()
+	return fs.backupClient
+}
+func (fs *fileServer) setBackup(bc *backup.Client) {
+	fs.backupMu.Lock()
+	fs.backupClient = bc
+	fs.backupMu.Unlock()
+}
+
+// lazyRegistrar triggers relay registration on first valid JWT request.
+// Eliminates the need for RELAY_USER_ID env var — user ID is extracted from JWT claims.
+type lazyRegistrar struct {
+	once      sync.Once
+	configDir string
+	masterKey []byte
+	fs        *fileServer
+}
+
+func (lr *lazyRegistrar) tryRegister(userID string) {
+	lr.once.Do(func() {
+		creds, err := register.RegisterOnceWithUserID(lr.configDir, userID)
+		if err != nil {
+			log.Printf("⚠️  lazy register: %v (backup disabled)", err)
+			return
+		}
+		if creds == nil {
+			return
+		}
+		os.Setenv("RELAY_ID", creds.RelayID)         //nolint:errcheck
+		os.Setenv("RELAY_SECRET", creds.RelaySecret) //nolint:errcheck
+		bc := backup.New(lr.masterKey, lr.configDir)
+		if bc != nil {
+			lr.fs.setBackup(bc)
+			log.Printf("✅ lazy register: backup enabled (relay_id=%s)", creds.RelayID)
+		}
+	})
 }
 
 // handleList handles GET /files — returns list of uploaded FileMaps.
@@ -227,7 +270,7 @@ func (fs *fileServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 		thumbnail.Generate(tmpPath, fs.thumbCache.Path(fm.FileID)) //nolint:errcheck
 	}
 	if maps, err2 := fs.p.ListFiles(); err2 == nil { // trigger backup after successful upload
-		fs.backupClient.Trigger(maps)
+		fs.backup().Trigger(maps)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -310,29 +353,33 @@ func (fs *fileServer) handleDelete(w http.ResponseWriter, r *http.Request, fileI
 		return
 	}
 	if maps, err := fs.p.ListFiles(); err == nil { // trigger backup after successful delete
-		fs.backupClient.Trigger(maps)
+		fs.backup().Trigger(maps)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "file_id": fileID}) //nolint:errcheck
 }
 
-	// requireAuth validates JWT Bearer token from dudenest-backend.
-	func requireAuth(next http.HandlerFunc) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			authHeader := r.Header.Get("Authorization")
-			if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
-				jsonErr(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			token := strings.TrimPrefix(authHeader, "Bearer ")
-			_, err := auth.ValidateJWT(token)
-			if err != nil {
-				jsonErr(w, "invalid token: "+err.Error(), http.StatusUnauthorized)
-				return
-			}
-			next.ServeHTTP(w, r)
+// requireAuthWithReg validates JWT Bearer token and triggers lazy relay registration on first valid request.
+// lr may be nil (disables lazy registration, e.g. if backup already configured at startup).
+func requireAuthWithReg(lr *lazyRegistrar, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+			jsonErr(w, "unauthorized", http.StatusUnauthorized)
+			return
 		}
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		claims, err := auth.ValidateJWT(token)
+		if err != nil {
+			jsonErr(w, "invalid token: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+		if lr != nil && claims != nil && claims.Sub != "" {
+			go lr.tryRegister(claims.Sub) // non-blocking; sync.Once ensures runs exactly once
+		}
+		next.ServeHTTP(w, r)
 	}
+}
 	// corsMiddleware adds CORS headers for Flutter web clients.
 	func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
