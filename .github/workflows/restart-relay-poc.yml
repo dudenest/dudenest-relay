@@ -1,0 +1,24 @@
+name: Restart relay-poc
+on:
+  workflow_dispatch:
+jobs:
+  restart:
+    runs-on: [self-hosted, netol-swarm]
+    steps:
+      - name: Restart relay.service on relay-poc via SSH
+        run: |
+          mkdir -p /tmp/restart-ssh
+          printf '%s\n' "${{ secrets.SSH_RELAY_KEY }}" > /tmp/restart-ssh/id_relay
+          chmod 600 /tmp/restart-ssh/id_relay
+          printf '%s\n' \
+            '|1|UuvIaaNQuir5tDQ8W+KQW1pdeFA=|AbnuhorydCSV+fIqEELFQrwnDEk= ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCpX+9BKh/cvHUvlckdZAMLgrP1q0UvBZfGqP1H7wiOVasHEftPz5k7A40ywQDoN63rhA/DmcPDc19DUTcRBbPY0Oh/5Gu1Q3tD66dCmgNxusg5fKP5tdsai4enZ1sxiFY/XbkSb1M67wshYV46JI2HXqHiXCyp9GpA8EbF/bRSU3P78AfOsU2fT4iQWCT4cYRkqIiPw7CJrRgOyb4/luqYMB/keO2/5Y6BQKTDHt1aL2Fp69hnuAzUgVzPCVDo40mhsYhdp9We0R4uDiyl5/BCGjSNu84G4g2yM3hMQ8Rm63edE5dQcM+n8PxjYm3WM+VjJaPgArdh6Pr+KZ+SZO0TV14oQNOLzHUB6dox5/QvpqND2d2uYsFuVt80ScKonG1CQwGH+mfHcO65j3t5Lk2vCPECCCCmcoI1VITZVt2H3bKb/prEa0IH2EPpRLcplPycXzXQQ/HN+ar826EdXI9qAIdZ3cUvHHy+3bT8Sg25koi9Y54WRxpSvtmrocH3f6E=' \
+            '|1|V9gcNyA5Zi6WhVJujqTIkE1C16M=|/zHsBw2Nti0ZD+ROap3SWSkOJuM= ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEYudfc8afzLb6qXA+tk4LDHB5aTfxFDiuCDOYBzj9x51e13i+34+vWj4UbUd/8vNLezNrJ/B9Ojl+9B2xhG9F0=' \
+            '|1|jP6cS821wSvnH01mYQuKa1+HqjE=|uS2B2nlW73jCh14qFoCqOwPePfI= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILOMuMu0FwC7XN/zMLMQXAjyOyP1ovyTFwa/gM0kBgt8' \
+            > /tmp/restart-ssh/known_hosts
+          chmod 644 /tmp/restart-ssh/known_hosts
+          ssh -i /tmp/restart-ssh/id_relay \
+              -o UserKnownHostsFile=/tmp/restart-ssh/known_hosts \
+              -o StrictHostKeyChecking=yes \
+              root@10.51.1.119 \
+              'systemctl restart relay.service && sleep 2 && systemctl is-active relay.service && journalctl -u relay.service -n 10 --no-pager'
+          rm -rf /tmp/restart-ssh
