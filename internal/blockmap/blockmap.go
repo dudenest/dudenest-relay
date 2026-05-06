@@ -100,6 +100,26 @@ func (m *Manager) List() ([]*types.FileMap, error) {
 	return maps, nil
 }
 
+// CountFilesForProvider counts FileMaps that have at least one block stored on the given provider.
+// providerPrefix must be the full provider ID, e.g. "gdrive:piowin00@gmail.com".
+func (m *Manager) CountFilesForProvider(providerPrefix string) int64 {
+	maps, _ := m.List()
+	var count int64
+	prefix := providerPrefix + ":"
+	for _, fm := range maps {
+		for _, chunk := range fm.Chunks {
+			for _, shard := range chunk.Shards {
+				if strings.HasPrefix(shard.Location, prefix) {
+					count++
+					goto nextFile
+				}
+			}
+		}
+	nextFile:
+	}
+	return count
+}
+
 // Verify checks that a reconstructed file matches the FileMap hash.
 func Verify(path string, fm *types.FileMap) error {
 	hash, err := hashFile(path)

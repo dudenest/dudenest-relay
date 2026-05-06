@@ -33,7 +33,7 @@ func serveAuthCmd() *cobra.Command {
 			}
 			cfg := browser.BuildOAuthConfig(cs)
 			oauthURL := browser.BuildAuthURL(cfg)
-			srv := browser.NewServer(authDisplay, authListenAddr, oauthURL, cfg, nil, authConfigDir, nil) // nil webCfg+hub = no web OAuth/WebSocket
+			srv := browser.NewServer(authDisplay, authListenAddr, oauthURL, cfg, nil, authConfigDir, nil, nil) // nil webCfg+hub+bm = no web OAuth/WebSocket/file_count
 			fmt.Printf("OAuth2 URL: %s\n", oauthURL)
 			return srv.Run()
 		},

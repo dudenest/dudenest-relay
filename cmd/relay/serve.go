@@ -18,6 +18,7 @@ import (
 
 	"github.com/dudenest/dudenest-relay/internal/auth"
 	"github.com/dudenest/dudenest-relay/internal/backup"
+	"github.com/dudenest/dudenest-relay/internal/blockmap"
 	"github.com/dudenest/dudenest-relay/internal/browser"
 	"github.com/dudenest/dudenest-relay/internal/register"
 	"github.com/dudenest/dudenest-relay/internal/thumbnail"
@@ -79,7 +80,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 		fmt.Println("relay serve: web OAuth client loaded (GDRIVE_WEB_CLIENT_ID)")
 	}
 	wsHub := ws.NewHub()
-	authSrv := browser.NewServer(authDisplay, serveListen, browser.BuildAuthURL(cfg), cfg, webCfg, authConfigDir, wsHub)
+	bm := blockmap.New(storePath) // blockmap for file_count in /auth/providers
+	authSrv := browser.NewServer(authDisplay, serveListen, browser.BuildAuthURL(cfg), cfg, webCfg, authConfigDir, wsHub, bm)
 	p, err := getPipeline()
 	if err != nil {
 		if isCredentialError(err) { // OAuth expired/revoked or no providers yet → standby with auth routes active

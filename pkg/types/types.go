@@ -46,14 +46,15 @@ type FileMap struct {
 }
 // GDriveToken is persisted to ~/.config/dudenest/providers/gdrive_<id>.json.
 type GDriveToken struct {
-	AccessToken  string    `json:"access_token"`
-	TokenType    string    `json:"token_type"`
-	RefreshToken string    `json:"refresh_token"`
-	Expiry       time.Time `json:"expiry"`
-	Email        string    `json:"email"`
-	ProviderID   string    `json:"provider_id"`
-	ClientID     string    `json:"client_id,omitempty"` // which OAuth client issued this token
-	LastError    string    `json:"last_error,omitempty"` // persisted error state (e.g. invalid_grant)
+	AccessToken   string    `json:"access_token"`
+	TokenType     string    `json:"token_type"`
+	RefreshToken  string    `json:"refresh_token"`
+	Expiry        time.Time `json:"expiry"`
+	Email         string    `json:"email"`
+	ProviderID    string    `json:"provider_id"`
+	ClientID      string    `json:"client_id,omitempty"`      // which OAuth client issued this token
+	LastError     string    `json:"last_error,omitempty"`     // persisted error state (e.g. invalid_grant)
+	LastFileCount int64     `json:"last_file_count,omitempty"` // last known file count on this provider (cached for offline display)
 }
 
 // CloudProvider interface — implemented by gdrive, mega, onedrive, etc.

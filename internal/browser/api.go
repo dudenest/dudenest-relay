@@ -23,6 +23,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/dudenest/dudenest-relay/internal/auth"
+	"github.com/dudenest/dudenest-relay/internal/blockmap"
 	"github.com/dudenest/dudenest-relay/pkg/types"
 	"github.com/dudenest/dudenest-relay/internal/ws"
 	)
@@ -30,19 +31,21 @@ import (
 type Server struct {
 	mgr           *Manager
 	listenAddr    string
-	oauthURL      string         // Google OAuth2 authorization URL (built from client_id)
-	oauthCfg      *oauth2.Config // desktop/mobile client (redirect: http://localhost or custom scheme)
-	webOAuthCfg   *oauth2.Config // web client (redirect: https://dudenest.com/auth); nil = unsupported
-	configDir     string         // where to save tokens (~/.config/dudenest)
-	wsHub         *ws.Hub        // optional — broadcasts auth_request to Flutter (nil = disabled)
-	cbMu          sync.Mutex     // protects cbCancel — only one callback server at a time
-	cbCancel      context.CancelFunc // cancel function for the active callback server
+	oauthURL      string              // Google OAuth2 authorization URL (built from client_id)
+	oauthCfg      *oauth2.Config      // desktop/mobile client (redirect: http://localhost or custom scheme)
+	webOAuthCfg   *oauth2.Config      // web client (redirect: https://dudenest.com/auth); nil = unsupported
+	configDir     string              // where to save tokens (~/.config/dudenest)
+	wsHub         *ws.Hub             // optional — broadcasts auth_request to Flutter (nil = disabled)
+	bm            *blockmap.Manager   // optional — used for file_count in /auth/providers (nil = count disabled)
+	cbMu          sync.Mutex          // protects cbCancel — only one callback server at a time
+	cbCancel      context.CancelFunc  // cancel function for the active callback server
 }
 
 // NewServer creates an API server. display e.g. ":99", listenAddr e.g. "0.0.0.0:8086".
 // webOAuthCfg may be nil (web OAuth disabled). wsHub may be nil (WebSocket disabled).
-func NewServer(display, listenAddr, oauthURL string, oauthCfg, webOAuthCfg *oauth2.Config, configDir string, wsHub *ws.Hub) *Server {
-	return &Server{mgr: NewManager(display), listenAddr: listenAddr, oauthURL: oauthURL, oauthCfg: oauthCfg, webOAuthCfg: webOAuthCfg, configDir: configDir, wsHub: wsHub}
+// bm may be nil (file_count in /auth/providers disabled).
+func NewServer(display, listenAddr, oauthURL string, oauthCfg, webOAuthCfg *oauth2.Config, configDir string, wsHub *ws.Hub, bm *blockmap.Manager) *Server {
+	return &Server{mgr: NewManager(display), listenAddr: listenAddr, oauthURL: oauthURL, oauthCfg: oauthCfg, webOAuthCfg: webOAuthCfg, configDir: configDir, wsHub: wsHub, bm: bm}
 }
 
 // selectOAuthCfg returns the appropriate OAuth config based on the callback URI.
@@ -501,6 +504,7 @@ type providerInfo struct {
 	Email      string  `json:"email"`
 	QuotaTotal float64 `json:"quota_total_gb"`
 	QuotaUsed  float64 `json:"quota_used_gb"`
+	FileCount  int64   `json:"file_count"`           // files stored on this provider (last known for offline)
 	Available  bool    `json:"available"`
 	LastError  string  `json:"last_error,omitempty"` // reason when available=false
 }
@@ -529,6 +533,13 @@ func (srv *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 		seen[t.Email] = true
 		pi := providerInfo{ID: t.ProviderID, Type: "gdrive", Email: t.Email}
 
+		// Count files from local blockmap (works for both online and offline providers)
+		if srv.bm != nil {
+			pi.FileCount = srv.bm.CountFilesForProvider("gdrive:" + t.Email)
+		} else {
+			pi.FileCount = t.LastFileCount // fallback: last persisted count
+		}
+
 		// Skip if already marked as permanently failed (e.g. invalid_grant) to avoid spamming Google API
 		if t.LastError != "" && (strings.Contains(t.LastError, "invalid_grant") || strings.Contains(t.LastError, "unauthorized")) {
 			pi.Available = false
@@ -543,13 +554,16 @@ func (srv *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 			pi.QuotaTotal = float64(total) / 1e9
 			pi.QuotaUsed = float64(used) / 1e9
 			pi.Available = true
+			if pi.FileCount != t.LastFileCount { // persist updated count into token for offline fallback
+				t.LastFileCount = pi.FileCount
+			}
 			if newTok != nil && newTok.AccessToken != t.AccessToken {
 				t.AccessToken = newTok.AccessToken
 				t.Expiry = newTok.Expiry
 				if newTok.RefreshToken != "" { t.RefreshToken = newTok.RefreshToken }
 				t.LastError = "" // clear previous error
-				overwriteToken(tokenPath, t)
 			}
+			overwriteToken(tokenPath, t)
 		} else {
 			pi.Available = false
 			pi.LastError = classifyTokenError(quotaErr)
