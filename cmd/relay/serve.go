@@ -21,13 +21,17 @@ import (
 	"github.com/dudenest/dudenest-relay/internal/backup"
 	"github.com/dudenest/dudenest-relay/internal/blockmap"
 	"github.com/dudenest/dudenest-relay/internal/browser"
+	"github.com/dudenest/dudenest-relay/internal/config"
 	"github.com/dudenest/dudenest-relay/internal/register"
 	"github.com/dudenest/dudenest-relay/internal/thumbnail"
 	"github.com/dudenest/dudenest-relay/internal/ws"
 	"github.com/dudenest/dudenest-relay/pkg/types"
 )
 
-var serveListen string
+var (
+	serveListen      string
+	relayConfigPath  string
+)
 
 func serveCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -36,10 +40,10 @@ func serveCmd() *cobra.Command {
 		RunE:  runServe,
 	}
 	home, _ := os.UserHomeDir()
-	cmd.Flags().StringVar(&serveListen, "listen", "0.0.0.0:8086", "HTTP listen address")
+	cmd.Flags().StringVar(&serveListen, "listen", "", "HTTP listen address (overrides config; default: 0.0.0.0:8086)")
 	cmd.Flags().StringVar(&authClientSecret, "client-secret", filepath.Join(home, ".config/dudenest/gdrive_client_secret.json"), "Path to Google OAuth2 client_secret.json")
 	cmd.Flags().StringVar(&authConfigDir, "config-dir", filepath.Join(home, ".config/dudenest"), "Path to dudenest config directory")
-	cmd.Flags().StringVar(&authDisplay, "display", ":99", "X display for Chromium (TigerVNC)")
+	cmd.Flags().StringVar(&authDisplay, "display", "", "X display for Chromium (TigerVNC); overrides config")
 	return cmd
 }
 
@@ -70,23 +74,29 @@ func degradedServerWithAuth(listen, reason string, authSrv interface{ RegisterRo
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
+	cfg, err := config.Load(relayConfigPath) // load config first — CLI flags override below
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	if serveListen != "" { cfg.Server.Listen = serveListen }         // --listen overrides config
+	if authDisplay != "" { cfg.Server.Display = authDisplay }        // --display overrides config
 	cs, err := browser.LoadClientSecret(authClientSecret) // load auth config before pipeline — needed for standby mode too
 	if err != nil {
 		return fmt.Errorf("load client_secret: %w", err)
 	}
-	cfg := browser.BuildOAuthConfig(cs)
-	var webCfg *oauth2.Config // web client for https://dudenest.com/auth callbacks (Flutter web)
+	cfg2 := browser.BuildOAuthConfig(cs, browser.CallbackURL(cfg.OAuth.CallbackPort))
+	var webCfg *oauth2.Config // web client for cfg.OAuth.WebRedirectURL callbacks (Flutter web)
 	if id, secret := os.Getenv("GDRIVE_WEB_CLIENT_ID"), os.Getenv("GDRIVE_WEB_CLIENT_SECRET"); id != "" && secret != "" {
-		webCfg = browser.BuildWebOAuthConfig(id, secret)
+		webCfg = browser.BuildWebOAuthConfig(id, secret, cfg.OAuth.WebRedirectURL)
 		fmt.Println("relay serve: web OAuth client loaded (GDRIVE_WEB_CLIENT_ID)")
 	}
 	wsHub := ws.NewHub()
 	bm := blockmap.New(storePath) // blockmap for file_count in /auth/providers
-	authSrv := browser.NewServer(authDisplay, serveListen, browser.BuildAuthURL(cfg), cfg, webCfg, authConfigDir, wsHub, bm)
+	authSrv := browser.NewServer(cfg.Server.Display, cfg.Server.Listen, browser.BuildAuthURL(cfg2), cfg2, webCfg, authConfigDir, wsHub, bm, cfg.OAuth.CallbackPort, cfg.NoVNC.BackendAddr, cfg.SessionTimeout())
 	p, err := getPipeline()
 	if err != nil {
 		if isCredentialError(err) { // OAuth expired/revoked or no providers yet → standby with auth routes active
-			return degradedServerWithAuth(serveListen, fmt.Sprintf("pipeline init: %v", err), authSrv, wsHub)
+			return degradedServerWithAuth(cfg.Server.Listen, fmt.Sprintf("pipeline init: %v", err), authSrv, wsHub)
 		}
 		return fmt.Errorf("pipeline init: %w", err)
 	}
@@ -95,13 +105,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("thumbnail cache: %w", err)
 	}
 	key, _ := getKey() // key already validated in getPipeline(), safe to ignore error here
-	if creds, err2 := register.EnsureRegistered(authConfigDir); err2 != nil { // auto-register with backup on first start
+	if creds, err2 := register.EnsureRegistered(authConfigDir, cfg.Backup.URL); err2 != nil { // auto-register with backup on first start
 		log.Printf("⚠️  register: %v (backup disabled)", err2)
 	} else if creds != nil {
 		os.Setenv("RELAY_ID", creds.RelayID)         //nolint:errcheck
 		os.Setenv("RELAY_SECRET", creds.RelaySecret) //nolint:errcheck
 	}
-	bc := backup.New(key, authConfigDir) // nil if BACKUP_URL/RELAY_ID/RELAY_SECRET not set
+	bc := backup.New(key, authConfigDir, cfg.Backup.URL, cfg.Debounce()) // nil if URL/RELAY_ID/RELAY_SECRET not set
 	if maps, err2 := p.ListFiles(); err2 == nil && len(maps) == 0 { // startup recovery: restore if no local files
 		if restored, err3 := bc.Restore(); err3 != nil {
 			log.Printf("⚠️  startup restore: %v", err3)
@@ -112,13 +122,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 	mux := http.NewServeMux()
 	authSrv.RegisterRoutes(mux)
 	mux.Handle("/ws", wsHub) // WebSocket: Flutter connects for relay→Flutter auth requests
-	fs := &fileServer{p: p, thumbCache: tc, backupClient: bc}
-	lr := &lazyRegistrar{configDir: authConfigDir, masterKey: key, fs: fs}
+	fs := &fileServer{p: p, thumbCache: tc, backupClient: bc, maxUploadBytes: cfg.MaxUploadBytes()}
+	lr := &lazyRegistrar{configDir: authConfigDir, masterKey: key, fs: fs, backupURL: cfg.Backup.URL, debounce: cfg.Debounce()}
 	mux.HandleFunc("/files", requireAuthWithReg(lr, fs.handleList))
 	mux.HandleFunc("/files/", requireAuthWithReg(lr, fs.handleFile))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }) //nolint:errcheck
-	fmt.Printf("relay serve listening on %s (provider: %s, ws: /ws)\n", serveListen, provider)
-	return http.ListenAndServe(serveListen, corsMiddleware(mux))
+	fmt.Printf("relay serve listening on %s (provider: %s, ws: /ws)\n", cfg.Server.Listen, provider)
+	return http.ListenAndServe(cfg.Server.Listen, corsMiddleware(mux))
 }
 
 // fileServer handles /files/* endpoints using the pipeline.
@@ -130,9 +140,10 @@ type fileServer struct {
 		GetFileMap(fileID string) (*types.FileMap, error)
 		DeleteFile(fileID string) error
 	}
-	thumbCache   *thumbnail.Cache
-	backupMu     sync.RWMutex
-	backupClient *backup.Client // nil = backup disabled; may be set lazily after JWT registration
+	thumbCache     *thumbnail.Cache
+	backupMu       sync.RWMutex
+	backupClient   *backup.Client // nil = backup disabled; may be set lazily after JWT registration
+	maxUploadBytes int64          // max multipart upload size (from config)
 }
 
 func (fs *fileServer) backup() *backup.Client {
@@ -153,11 +164,13 @@ type lazyRegistrar struct {
 	configDir string
 	masterKey []byte
 	fs        *fileServer
+	backupURL string        // from config — used for registration and backup client init
+	debounce  time.Duration // from config — used for backup client init
 }
 
 func (lr *lazyRegistrar) tryRegister(userID string) {
 	lr.once.Do(func() {
-		creds, err := register.RegisterOnceWithUserID(lr.configDir, userID)
+		creds, err := register.RegisterOnceWithUserID(lr.configDir, userID, lr.backupURL)
 		if err != nil {
 			log.Printf("⚠️  lazy register: %v (backup disabled)", err)
 			return
@@ -167,7 +180,7 @@ func (lr *lazyRegistrar) tryRegister(userID string) {
 		}
 		os.Setenv("RELAY_ID", creds.RelayID)         //nolint:errcheck
 		os.Setenv("RELAY_SECRET", creds.RelaySecret) //nolint:errcheck
-		bc := backup.New(lr.masterKey, lr.configDir)
+		bc := backup.New(lr.masterKey, lr.configDir, lr.backupURL, lr.debounce)
 		if bc != nil {
 			lr.fs.setBackup(bc)
 			log.Printf("✅ lazy register: backup enabled (relay_id=%s)", creds.RelayID)
@@ -231,7 +244,7 @@ func (fs *fileServer) handleGetMap(w http.ResponseWriter, r *http.Request, fileI
 }
 // handleUpload accepts multipart/form-data with field "file", uploads via pipeline.
 func (fs *fileServer) handleUpload(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(32 << 20); err != nil { // 32MB memory buffer
+	if err := r.ParseMultipartForm(fs.maxUploadBytes); err != nil {
 		jsonErr(w, "parse form: "+err.Error(), 400)
 		return
 	}
@@ -380,19 +393,19 @@ func requireAuthWithReg(lr *lazyRegistrar, next http.HandlerFunc) http.HandlerFu
 		next.ServeHTTP(w, r)
 	}
 }
-	// corsMiddleware adds CORS headers for Flutter web clients.
-	func corsMiddleware(next http.Handler) http.Handler {
+// corsMiddleware adds CORS headers for Flutter web clients.
+func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-	        w.Header().Set("Access-Control-Allow-Origin", "*")
-	        w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-	        w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-	        if r.Method == http.MethodOptions {
-	                w.WriteHeader(http.StatusNoContent)
-	                return
-	        }
-	        next.ServeHTTP(w, r)
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
-	}
+}
 // isCredentialError detects OAuth token errors that should not trigger a crash loop.
 // These errors are permanent until credentials are refreshed — retrying is wasteful.
 // "no cloud providers available" = fresh install, no users authenticated yet → standby.

@@ -1,0 +1,23 @@
+{
+  "server": {
+    "listen": "0.0.0.0:8086",
+    "display": ":99"
+  },
+  "oauth": {
+    "callback_port": 8085,
+    "web_redirect_url": "https://dudenest.com/auth"
+  },
+  "browser": {
+    "session_timeout_hours": 4
+  },
+  "backup": {
+    "url": "https://backup.dudenest.com",
+    "debounce_seconds": 3
+  },
+  "novnc": {
+    "backend_addr": "127.0.0.1:6080"
+  },
+  "upload": {
+    "max_size_mb": 32
+  }
+}

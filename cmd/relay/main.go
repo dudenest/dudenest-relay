@@ -41,6 +41,7 @@ func main() {
 		Short: "dudenest-relay — encrypted block storage with erasure coding",
 	}
 	root.PersistentFlags().StringVar(&masterKey, "key", "", "master key hex (32 bytes) or password")
+	root.PersistentFlags().StringVar(&relayConfigPath, "config", "", "path to relay.json config file (default: ~/.config/dudenest/relay.json)")
 	root.PersistentFlags().StringVar(&storePath, "map-store", "/tmp/dudenest-maps", "path for FileMap storage")
 	root.PersistentFlags().StringVar(&provider, "provider", "auto", "cloud provider: auto, local, mega, gdrive")
 	// local provider flags

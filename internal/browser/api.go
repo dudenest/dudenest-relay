@@ -37,6 +37,8 @@ type Server struct {
 	configDir     string              // where to save tokens (~/.config/dudenest)
 	wsHub         *ws.Hub             // optional — broadcasts auth_request to Flutter (nil = disabled)
 	bm            *blockmap.Manager   // optional — used for file_count in /auth/providers (nil = count disabled)
+	callbackPort  int                 // local port for OAuth2 redirect (default: 8085)
+	noVNCBackend  string              // noVNC/websockify backend address (default: "127.0.0.1:6080")
 	cbMu          sync.Mutex          // protects cbCancel — only one callback server at a time
 	cbCancel      context.CancelFunc  // cancel function for the active callback server
 }
@@ -44,8 +46,10 @@ type Server struct {
 // NewServer creates an API server. display e.g. ":99", listenAddr e.g. "0.0.0.0:8086".
 // webOAuthCfg may be nil (web OAuth disabled). wsHub may be nil (WebSocket disabled).
 // bm may be nil (file_count in /auth/providers disabled).
-func NewServer(display, listenAddr, oauthURL string, oauthCfg, webOAuthCfg *oauth2.Config, configDir string, wsHub *ws.Hub, bm *blockmap.Manager) *Server {
-	return &Server{mgr: NewManager(display), listenAddr: listenAddr, oauthURL: oauthURL, oauthCfg: oauthCfg, webOAuthCfg: webOAuthCfg, configDir: configDir, wsHub: wsHub, bm: bm}
+// callbackPort: local OAuth2 callback port (e.g. 8085). noVNCBackend: noVNC address (e.g. "127.0.0.1:6080").
+// sessionTimeout: browser session auto-expiry (e.g. 4*time.Hour).
+func NewServer(display, listenAddr, oauthURL string, oauthCfg, webOAuthCfg *oauth2.Config, configDir string, wsHub *ws.Hub, bm *blockmap.Manager, callbackPort int, noVNCBackend string, sessionTimeout time.Duration) *Server {
+	return &Server{mgr: NewManager(display, sessionTimeout), listenAddr: listenAddr, oauthURL: oauthURL, oauthCfg: oauthCfg, webOAuthCfg: webOAuthCfg, configDir: configDir, wsHub: wsHub, bm: bm, callbackPort: callbackPort, noVNCBackend: noVNCBackend}
 }
 
 // selectOAuthCfg returns the appropriate OAuth config based on the callback URI.
@@ -237,7 +241,7 @@ func (srv *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	srv.cancelPrevCallback() // free port :8085 if previous session's callback server is still running
 	cbCtx, cbCancel := context.WithTimeout(context.Background(), 10*time.Minute) // user has 10min to complete login
 	srv.cbMu.Lock(); srv.cbCancel = cbCancel; srv.cbMu.Unlock() // register cancel for future cleanup
-	waitForCode, cbErr := StartCallbackServer(cbCtx, 10*time.Minute)
+	waitForCode, cbErr := StartCallbackServer(cbCtx, 10*time.Minute, srv.callbackPort)
 	if cbErr != nil {
 		cbCancel()
 		srv.mgr.Close(sid)
@@ -351,7 +355,7 @@ func (srv *Server) handleClick(w http.ResponseWriter, r *http.Request) {
 		codeCh := make(chan codeRes, 1)
 		cbCtx, cancelCallback := context.WithCancel(r.Context())
 		defer cancelCallback() // frees :8085 immediately when handler returns
-		waitForCode, cbErr := StartCallbackServer(cbCtx, 40*time.Second)
+		waitForCode, cbErr := StartCallbackServer(cbCtx, 40*time.Second, srv.callbackPort)
 		if cbErr != nil {
 			jsonError(w, "callback server bind: "+cbErr.Error(), 500)
 			return
@@ -434,7 +438,7 @@ func (srv *Server) handleClick(w http.ResponseWriter, r *http.Request) {
 // Static files (HTML/JS) proxied via HTTP; WebSocket (VNC stream) tunneled via TCP hijacking.
 // Auth: session query param required for WebSocket (VNC stream); static files are open.
 func (srv *Server) handleVNCProxy(w http.ResponseWriter, r *http.Request) {
-	const backendAddr = "127.0.0.1:6080"
+	backendAddr := srv.noVNCBackend
 	path := strings.TrimPrefix(r.URL.Path, "/vnc")
 	if path == "" || path == "/" { path = "/dudenest.html" }
 	if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") { // WebSocket: VNC stream — require valid session

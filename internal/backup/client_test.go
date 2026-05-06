@@ -19,11 +19,11 @@ func testMasterKey() []byte {
 	return key
 }
 
-// TestNewNoEnv: returns nil when env vars absent.
+// TestNewNoEnv: returns nil when credentials absent.
 func TestNewNoEnv(t *testing.T) {
-	os.Unsetenv("BACKUP_URL"); os.Unsetenv("RELAY_ID"); os.Unsetenv("RELAY_SECRET")
-	c := New(testMasterKey(), t.TempDir())
-	if c != nil { t.Fatal("expected nil client when env not set") }
+	os.Unsetenv("RELAY_ID"); os.Unsetenv("RELAY_SECRET")
+	c := New(testMasterKey(), t.TempDir(), "https://backup.example.com", 3*time.Second)
+	if c != nil { t.Fatal("expected nil client when RELAY_ID/RELAY_SECRET not set") }
 }
 
 // TestTriggerNilSafe: Trigger on nil must not panic.
@@ -32,12 +32,11 @@ func TestTriggerNilSafe(t *testing.T) {
 	c.Trigger(nil) // must not panic
 }
 
-// TestNewWithEnv: New returns non-nil when all env vars set.
+// TestNewWithEnv: New returns non-nil when all credentials set.
 func TestNewWithEnv(t *testing.T) {
-	t.Setenv("BACKUP_URL", "http://localhost:9999")
 	t.Setenv("RELAY_ID", "test-relay")
 	t.Setenv("RELAY_SECRET", "test-secret")
-	c := New(testMasterKey(), t.TempDir())
+	c := New(testMasterKey(), t.TempDir(), "http://localhost:9999", 3*time.Second)
 	if c == nil { t.Fatal("expected non-nil client") }
 }
 
@@ -51,10 +50,9 @@ func TestTriggerTimerReset(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
-	t.Setenv("BACKUP_URL", srv.URL)
 	t.Setenv("RELAY_ID", "r-debounce")
 	t.Setenv("RELAY_SECRET", "s-debounce")
-	c := New(testMasterKey(), t.TempDir())
+	c := New(testMasterKey(), t.TempDir(), srv.URL, 3*time.Second)
 	if c == nil { t.Fatal("client nil") }
 	// Manually fire with short 50ms debounce to verify timer reset logic.
 	shortDebounce := 50 * time.Millisecond
@@ -85,10 +83,9 @@ func TestSendEncryptsAndPosts(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
-	t.Setenv("BACKUP_URL", srv.URL)
 	t.Setenv("RELAY_ID", "relay-abc")
 	t.Setenv("RELAY_SECRET", "secret-xyz")
-	c := New(testMasterKey(), t.TempDir())
+	c := New(testMasterKey(), t.TempDir(), srv.URL, 3*time.Second)
 	if c == nil { t.Fatal("client nil") }
 	fm := &types.FileMap{FileID: "f1", Name: "test.txt", Size: 42}
 	if err := c.send([]*types.FileMap{fm}); err != nil {

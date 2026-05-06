@@ -42,24 +42,26 @@ func LoadClientSecret(path string) (*GDriveClientSecret, error) {
 }
 
 // BuildOAuthConfig creates an oauth2.Config from client_secret.json.
-func BuildOAuthConfig(cs *GDriveClientSecret) *oauth2.Config {
+// redirectURL is the full callback URI (e.g. from config.CallbackURL(port)).
+func BuildOAuthConfig(cs *GDriveClientSecret, redirectURL string) *oauth2.Config {
 	return &oauth2.Config{
 		ClientID:     cs.Installed.ClientID,
 		ClientSecret: cs.Installed.ClientSecret,
 		Scopes:       []string{drive.DriveFileScope},
 		Endpoint:     google.Endpoint,
-		RedirectURL:  CallbackURL(),
+		RedirectURL:  redirectURL,
 	}
 }
 
 // BuildWebOAuthConfig creates an oauth2.Config for the Web Application OAuth client.
-func BuildWebOAuthConfig(clientID, clientSecret string) *oauth2.Config {
+// redirectURL is the full callback URI (e.g. from config.OAuth.WebRedirectURL).
+func BuildWebOAuthConfig(clientID, clientSecret, redirectURL string) *oauth2.Config {
 	return &oauth2.Config{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
 		Scopes:       []string{drive.DriveFileScope},
 		Endpoint:     google.Endpoint,
-		RedirectURL:  "https://dudenest.com/auth",
+		RedirectURL:  redirectURL,
 	}
 }
 

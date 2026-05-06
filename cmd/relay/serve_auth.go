@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dudenest/dudenest-relay/internal/browser"
+	"github.com/dudenest/dudenest-relay/internal/config"
 )
 
 var (
@@ -27,19 +28,24 @@ func serveAuthCmd() *cobra.Command {
 		Use:   "serve-auth",
 		Short: "Start browser auth HTTP API server (for Flutter UI integration)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(relayConfigPath)
+			if err != nil {
+				return fmt.Errorf("load config: %w", err)
+			}
+			if authDisplay != "" { cfg.Server.Display = authDisplay }
 			cs, err := browser.LoadClientSecret(authClientSecret)
 			if err != nil {
 				return fmt.Errorf("load client_secret: %w", err)
 			}
-			cfg := browser.BuildOAuthConfig(cs)
-			oauthURL := browser.BuildAuthURL(cfg)
-			srv := browser.NewServer(authDisplay, authListenAddr, oauthURL, cfg, nil, authConfigDir, nil, nil) // nil webCfg+hub+bm = no web OAuth/WebSocket/file_count
+			oauthCfg := browser.BuildOAuthConfig(cs, browser.CallbackURL(cfg.OAuth.CallbackPort))
+			oauthURL := browser.BuildAuthURL(oauthCfg)
+			srv := browser.NewServer(cfg.Server.Display, authListenAddr, oauthURL, oauthCfg, nil, authConfigDir, nil, nil, cfg.OAuth.CallbackPort, cfg.NoVNC.BackendAddr, cfg.SessionTimeout())
 			fmt.Printf("OAuth2 URL: %s\n", oauthURL)
 			return srv.Run()
 		},
 	}
 	home, _ := os.UserHomeDir()
-	cmd.Flags().StringVar(&authDisplay, "display", ":99", "X display for Chromium (Xvfb)")
+	cmd.Flags().StringVar(&authDisplay, "display", "", "X display for Chromium (Xvfb); overrides config")
 	cmd.Flags().StringVar(&authListenAddr, "listen", "0.0.0.0:8086", "HTTP API listen address")
 	cmd.Flags().StringVar(&authClientSecret, "client-secret", filepath.Join(home, ".config/dudenest/gdrive_client_secret.json"), "Path to Google OAuth2 client_secret.json")
 	cmd.Flags().StringVar(&authConfigDir, "config-dir", filepath.Join(home, ".config/dudenest"), "Path to dudenest config directory")
@@ -52,17 +58,22 @@ func authGDriveCmd() *cobra.Command {
 		Use:   "auth gdrive",
 		Short: "Authenticate Google Drive account via controlled browser (CLI test mode)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(relayConfigPath)
+			if err != nil {
+				return fmt.Errorf("load config: %w", err)
+			}
+			if authDisplay != "" { cfg.Server.Display = authDisplay }
 			cs, err := browser.LoadClientSecret(authClientSecret)
 			if err != nil {
 				return fmt.Errorf("load client_secret: %w", err)
 			}
-			cfg := browser.BuildOAuthConfig(cs)
-			oauthURL := browser.BuildAuthURL(cfg)
-			fmt.Printf("Starting Chromium on display %s...\n", authDisplay)
+			oauthCfg := browser.BuildOAuthConfig(cs, browser.CallbackURL(cfg.OAuth.CallbackPort))
+			oauthURL := browser.BuildAuthURL(oauthCfg)
+			fmt.Printf("Starting Chromium on display %s...\n", cfg.Server.Display)
 			// Start callback server in background
 			codeCh := make(chan string, 1)
 			go func() {
-				code, err := browser.WaitForCallback(120 * time.Second)
+				code, err := browser.WaitForCallback(120*time.Second, cfg.OAuth.CallbackPort)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "callback error: %v\n", err)
 					codeCh <- ""
@@ -71,7 +82,7 @@ func authGDriveCmd() *cobra.Command {
 				codeCh <- code
 			}()
 			// Create session and run login flow
-			mgr := browser.NewManager(authDisplay)
+			mgr := browser.NewManager(cfg.Server.Display, cfg.SessionTimeout())
 			sid, err := mgr.Create()
 			if err != nil {
 				return fmt.Errorf("browser start: %w", err)
@@ -88,11 +99,11 @@ func authGDriveCmd() *cobra.Command {
 				return fmt.Errorf("no authorization code received")
 			}
 			fmt.Printf("Received code: %s...\n", code[:10])
-			token, err := browser.ExchangeCode(cfg, code)
+			token, err := browser.ExchangeCode(oauthCfg, code)
 			if err != nil {
 				return fmt.Errorf("token exchange: %w", err)
 			}
-			email, err := browser.GetEmailFromToken(cfg, token)
+			email, err := browser.GetEmailFromToken(oauthCfg, token)
 			if err != nil {
 				return fmt.Errorf("get email: %w", err)
 			}
@@ -114,7 +125,7 @@ func authGDriveCmd() *cobra.Command {
 		},
 	}
 	home, _ := os.UserHomeDir()
-	cmd.Flags().StringVar(&authDisplay, "display", ":99", "X display for Chromium (Xvfb)")
+	cmd.Flags().StringVar(&authDisplay, "display", "", "X display for Chromium (Xvfb); overrides config")
 	cmd.Flags().StringVar(&authClientSecret, "client-secret", filepath.Join(home, ".config/dudenest/gdrive_client_secret.json"), "Path to Google OAuth2 client_secret.json")
 	cmd.Flags().StringVar(&authConfigDir, "config-dir", filepath.Join(home, ".config/dudenest"), "Path to dudenest config directory")
 	return cmd

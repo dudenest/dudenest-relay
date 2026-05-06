@@ -19,19 +19,16 @@ type Credentials struct {
 	RelaySecret string `json:"relay_secret"`
 }
 
-const (
-	credsFile        = "relay_creds.json"
-	defaultBackupURL = "https://backup.dudenest.com" // used when BACKUP_URL env not set
-)
+const credsFile = "relay_creds.json"
 
 // EnsureRegistered loads existing relay_creds.json (from prior JWT registration or prior start),
-// then falls back to BACKUP_URL + RELAY_USER_ID env-var registration.
-// Returns nil credentials (no error) if no existing creds and env vars not set.
-func EnsureRegistered(configDir string) (*Credentials, error) {
+// then falls back to backupURL + RELAY_USER_ID env-var registration.
+// backupURL is the base URL of dudenest-backup (from config, e.g. "https://backup.dudenest.com").
+// Returns nil credentials (no error) if no existing creds and RELAY_USER_ID env var not set.
+func EnsureRegistered(configDir, backupURL string) (*Credentials, error) {
 	if creds, err := loadExisting(configDir); err == nil && creds != nil {
 		return creds, nil // already registered (e.g. from lazy JWT registration)
 	}
-	backupURL := os.Getenv("BACKUP_URL")
 	userID := os.Getenv("RELAY_USER_ID")
 	if backupURL == "" || userID == "" {
 		return nil, nil // backup registration disabled — not an error
@@ -40,14 +37,10 @@ func EnsureRegistered(configDir string) (*Credentials, error) {
 }
 
 // RegisterOnceWithUserID registers relay using userID from JWT claims.
-// Uses BACKUP_URL env var or defaultBackupURL. Idempotent: returns saved creds if already registered.
-func RegisterOnceWithUserID(configDir, userID string) (*Credentials, error) {
+// backupURL is the base URL of dudenest-backup (from config). Idempotent: returns saved creds if already registered.
+func RegisterOnceWithUserID(configDir, userID, backupURL string) (*Credentials, error) {
 	if creds, err := loadExisting(configDir); err == nil && creds != nil {
 		return creds, nil
-	}
-	backupURL := os.Getenv("BACKUP_URL")
-	if backupURL == "" {
-		backupURL = defaultBackupURL
 	}
 	return registerCore(configDir, backupURL, userID)
 }

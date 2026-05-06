@@ -26,18 +26,21 @@ type Client struct {
 	secret    string
 	enc       *crypto.Encryptor
 	configDir string
+	debounce  time.Duration // client-side debounce before sending snapshot
 	mu        sync.Mutex
 	timer     *time.Timer
 }
 
-// New creates a backup client from env vars (BACKUP_URL, RELAY_ID, RELAY_SECRET).
-// Returns nil if any var is missing — backup silently disabled.
-func New(masterKey []byte, configDir string) *Client {
-	url := os.Getenv("BACKUP_URL")
+// New creates a backup client.
+// backupURL: base URL of dudenest-backup (e.g. "https://backup.dudenest.com").
+// debounce: client-side delay before sending snapshot (e.g. 3*time.Second).
+// RELAY_ID and RELAY_SECRET are still read from env — set by relay registration.
+// Returns nil if backupURL or credentials are missing — backup silently disabled.
+func New(masterKey []byte, configDir, backupURL string, debounce time.Duration) *Client {
 	relayID := os.Getenv("RELAY_ID")
 	secret := os.Getenv("RELAY_SECRET")
-	if url == "" || relayID == "" || secret == "" {
-		log.Println("backup: BACKUP_URL/RELAY_ID/RELAY_SECRET not set — backup disabled")
+	if backupURL == "" || relayID == "" || secret == "" {
+		log.Println("backup: backupURL/RELAY_ID/RELAY_SECRET not set — backup disabled")
 		return nil
 	}
 	enc, err := crypto.New(masterKey)
@@ -45,8 +48,8 @@ func New(masterKey []byte, configDir string) *Client {
 		log.Printf("backup: crypto init: %v — backup disabled", err)
 		return nil
 	}
-	log.Printf("backup: client ready → %s (relay_id=%s)", url, relayID)
-	return &Client{url: url, relayID: relayID, secret: secret, enc: enc, configDir: configDir}
+	log.Printf("backup: client ready → %s (relay_id=%s)", backupURL, relayID)
+	return &Client{url: backupURL, relayID: relayID, secret: secret, enc: enc, configDir: configDir, debounce: debounce}
 }
 
 // Trigger schedules a backup with 3s client-side debounce.
@@ -61,7 +64,7 @@ func (c *Client) Trigger(maps []*types.FileMap) {
 	if c.timer != nil {
 		c.timer.Stop()
 	}
-	c.timer = time.AfterFunc(3*time.Second, func() {
+	c.timer = time.AfterFunc(c.debounce, func() {
 		if err := c.send(mapsCopy); err != nil {
 			log.Printf("backup: send failed: %v", err)
 		}

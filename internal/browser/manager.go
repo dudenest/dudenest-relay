@@ -9,18 +9,18 @@ import (
 	"github.com/google/uuid"
 )
 
-const sessionTimeout = 4 * time.Hour // Sessions auto-expire; Chromium stays visible on :99 for inspection
-
 // Manager manages browser sessions, one per auth flow.
 type Manager struct {
 	display  string
+	timeout  time.Duration // session auto-expiry (configurable)
 	sessions map[string]*Session
 	mu       sync.Mutex
 }
 
 // NewManager creates a session manager for the given X display (e.g. ":99").
-func NewManager(display string) *Manager {
-	m := &Manager{display: display, sessions: make(map[string]*Session)}
+// timeout controls session auto-expiry (e.g. 4*time.Hour).
+func NewManager(display string, timeout time.Duration) *Manager {
+	m := &Manager{display: display, timeout: timeout, sessions: make(map[string]*Session)}
 	go m.cleanupLoop()
 	return m
 }
@@ -59,12 +59,12 @@ func (m *Manager) Close(id string) {
 	}
 }
 
-// cleanupLoop removes sessions older than sessionTimeout every minute.
+// cleanupLoop removes sessions older than m.timeout every minute.
 func (m *Manager) cleanupLoop() {
 	for range time.Tick(time.Minute) {
 		m.mu.Lock()
 		for id, s := range m.sessions {
-			if s.Age() > sessionTimeout {
+			if s.Age() > m.timeout {
 				s.Close()
 				delete(m.sessions, id)
 			}
