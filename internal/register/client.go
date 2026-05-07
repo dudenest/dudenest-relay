@@ -22,6 +22,7 @@ import (
 type Credentials struct {
 	RelayID     string `json:"relay_id"`
 	RelaySecret string `json:"relay_secret"`
+	UserID      string `json:"user_id,omitempty"` // owner's JWT sub — set at registration; used for Layer 2 owner check
 }
 
 const credsFile = "relay_creds.json"
@@ -91,6 +92,7 @@ func registerCore(configDir, backupURL, userID, relayPublicURL string) (*Credent
 	if creds.RelayID == "" || creds.RelaySecret == "" {
 		return nil, fmt.Errorf("register: empty credentials in response")
 	}
+	creds.UserID = userID // persist owner's user_id for Layer 2 owner check on subsequent startups
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		return nil, fmt.Errorf("register: mkdir configDir: %w", err)
 	}
@@ -98,7 +100,7 @@ func registerCore(configDir, backupURL, userID, relayPublicURL string) (*Credent
 	if err := os.WriteFile(filepath.Join(configDir, credsFile), data, 0o600); err != nil {
 		return nil, fmt.Errorf("register: save creds: %w", err)
 	}
-	log.Printf("register: ✅ registered with backup (relay_id=%s relay_url=%s)", creds.RelayID, relayPublicURL)
+	log.Printf("register: ✅ registered with backup (relay_id=%s user_id=%s relay_url=%s)", creds.RelayID, userID, relayPublicURL)
 	return &creds, nil
 }
 

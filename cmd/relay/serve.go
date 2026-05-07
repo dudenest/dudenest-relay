@@ -23,6 +23,7 @@ import (
 	"github.com/dudenest/dudenest-relay/internal/browser"
 	"github.com/dudenest/dudenest-relay/internal/config"
 	"github.com/dudenest/dudenest-relay/internal/register"
+	"github.com/dudenest/dudenest-relay/internal/relaytoken"
 	"github.com/dudenest/dudenest-relay/internal/thumbnail"
 	"github.com/dudenest/dudenest-relay/internal/ws"
 	"github.com/dudenest/dudenest-relay/pkg/types"
@@ -127,11 +128,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("thumbnail cache: %w", err)
 	}
 	key, _ := getKey() // key already validated in getPipeline(), safe to ignore error here
+	var ownerFromCreds string // Layer 2: relay owner known at startup if relay was previously registered
 	if creds, err2 := register.EnsureRegistered(authConfigDir, cfg.Backup.URL, cfg.Backup.PublicURL); err2 != nil { // auto-register with backup on first start
 		log.Printf("⚠️  register: %v (backup disabled)", err2)
 	} else if creds != nil {
 		os.Setenv("RELAY_ID", creds.RelayID)         //nolint:errcheck
 		os.Setenv("RELAY_SECRET", creds.RelaySecret) //nolint:errcheck
+		ownerFromCreds = creds.UserID                // may be empty for old relay_creds.json (will be set on first request)
 	}
 	bc := backup.New(key, authConfigDir, cfg.Backup.URL, cfg.Debounce()) // nil if URL/RELAY_ID/RELAY_SECRET not set
 	if bc != nil {
@@ -152,6 +155,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	mux.Handle("/ws", wsHub) // WebSocket: Flutter connects for relay→Flutter auth requests
 	fs := &fileServer{p: p, thumbCache: tc, backupClient: bc, maxUploadBytes: cfg.MaxUploadBytes()}
 	lr := &lazyRegistrar{configDir: authConfigDir, masterKey: key, fs: fs, backupURL: cfg.Backup.URL, publicURL: cfg.Backup.PublicURL, debounce: cfg.Debounce()}
+	if ownerFromCreds != "" { lr.setOwner(ownerFromCreds) } // preload owner from creds (set before ListenAndServe, no races)
 	mux.HandleFunc("/files", requireAuthWithReg(lr, fs.handleList))
 	mux.HandleFunc("/files/", requireAuthWithReg(lr, fs.handleFile))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }) //nolint:errcheck
@@ -188,13 +192,26 @@ func (fs *fileServer) setBackup(bc *backup.Client) {
 // lazyRegistrar triggers relay registration on first valid JWT request.
 // Eliminates the need for RELAY_USER_ID env var — user ID is extracted from JWT claims.
 type lazyRegistrar struct {
-	once      sync.Once
-	configDir string
-	masterKey []byte
-	fs        *fileServer
-	backupURL  string        // from config — used for registration and backup client init
-	publicURL  string        // from config — public HTTPS URL of this relay, sent during registration for Flutter routing
-	debounce  time.Duration // from config — used for backup client init
+	once        sync.Once
+	mu          sync.RWMutex
+	ownerUserID string        // relay owner's JWT sub — set once (startup or first request), never changes
+	configDir   string
+	masterKey   []byte
+	fs          *fileServer
+	backupURL   string        // from config — used for registration and backup client init
+	publicURL   string        // from config — public HTTPS URL of this relay, sent during registration for Flutter routing
+	debounce    time.Duration // from config — used for backup client init
+}
+
+func (lr *lazyRegistrar) getOwner() string {
+	lr.mu.RLock()
+	defer lr.mu.RUnlock()
+	return lr.ownerUserID
+}
+func (lr *lazyRegistrar) setOwner(userID string) {
+	lr.mu.Lock()
+	lr.ownerUserID = userID
+	lr.mu.Unlock()
 }
 
 func (lr *lazyRegistrar) tryRegister(userID string) {
@@ -204,15 +221,24 @@ func (lr *lazyRegistrar) tryRegister(userID string) {
 			log.Printf("⚠️  lazy register: %v (backup disabled)", err)
 			return
 		}
-		if creds == nil {
-			return
-		}
+		if creds == nil { return }
 		os.Setenv("RELAY_ID", creds.RelayID)         //nolint:errcheck
 		os.Setenv("RELAY_SECRET", creds.RelaySecret) //nolint:errcheck
+		// Layer 2: set owner — from saved creds (new format) or from current JWT (old relay_creds.json without user_id)
+		ownerID := creds.UserID
+		if ownerID == "" { ownerID = userID }
+		lr.setOwner(ownerID)
+		// Backfill user_id in relay_creds.json for old registrations that predate this field
+		if creds.UserID == "" {
+			creds.UserID = ownerID
+			if data, err2 := json.Marshal(creds); err2 == nil {
+				os.WriteFile(filepath.Join(lr.configDir, "relay_creds.json"), data, 0o600) //nolint:errcheck
+			}
+		}
 		bc := backup.New(lr.masterKey, lr.configDir, lr.backupURL, lr.debounce)
 		if bc != nil {
 			lr.fs.setBackup(bc)
-			log.Printf("✅ lazy register: backup enabled (relay_id=%s)", creds.RelayID)
+			log.Printf("✅ lazy register: backup enabled (relay_id=%s owner=%s)", creds.RelayID, ownerID)
 			if maps, err2 := lr.fs.p.ListFiles(); err2 == nil { bc.Trigger(maps) } // initial snapshot
 			bc.StartPingLoop(5 * time.Minute)
 		}
@@ -403,8 +429,11 @@ func (fs *fileServer) handleDelete(w http.ResponseWriter, r *http.Request, fileI
 	json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "file_id": fileID}) //nolint:errcheck
 }
 
-// requireAuthWithReg validates JWT Bearer token and triggers lazy relay registration on first valid request.
-// lr may be nil (disables lazy registration, e.g. if backup already configured at startup).
+// requireAuthWithReg validates JWT Bearer token and enforces three security layers:
+//   Layer 1 — network isolation (separate relay VM per user; enforced at infrastructure level)
+//   Layer 2 — JWT sub must match relay owner's user_id (stored in relay_creds.json)
+//   Layer 3 — X-Relay-Token must be a valid HMAC signed by backup using relay_secret
+// Also triggers lazy relay registration on first valid request (sync.Once).
 func requireAuthWithReg(lr *lazyRegistrar, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
@@ -418,7 +447,23 @@ func requireAuthWithReg(lr *lazyRegistrar, next http.HandlerFunc) http.HandlerFu
 			jsonErr(w, "invalid token: "+err.Error(), http.StatusUnauthorized)
 			return
 		}
-		if lr != nil && claims != nil && claims.Sub != "" {
+		// Layer 2: JWT sub must match relay owner — prevents any other account from accessing this relay
+		if lr != nil {
+			if ownerID := lr.getOwner(); ownerID != "" && claims.Sub != ownerID {
+				jsonErr(w, "forbidden: this relay belongs to a different user", http.StatusForbidden)
+				return
+			}
+		}
+		// Layer 3: relay_token must be valid HMAC signed by backup using relay_secret
+		// Only enforced after relay is registered (RELAY_SECRET set) — allows first-registration flow
+		if relaySecret := os.Getenv("RELAY_SECRET"); relaySecret != "" {
+			rtoken := r.Header.Get("X-Relay-Token")
+			if !relaytoken.Verify(rtoken, relaySecret, claims.Sub) {
+				jsonErr(w, "forbidden: invalid or expired relay token", http.StatusForbidden)
+				return
+			}
+		}
+		if lr != nil && claims.Sub != "" {
 			go lr.tryRegister(claims.Sub) // non-blocking; sync.Once ensures runs exactly once
 		}
 		next.ServeHTTP(w, r)
@@ -429,7 +474,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Relay-Token")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
