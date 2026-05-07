@@ -31,8 +31,9 @@ services:
       - relay_key
       - relay_gdrive_client_secret
     environment:
-      JWT_SECRET: ${JWT_SECRET}  # shared with dudenest-backend (passed via envsubst at deploy)
-      GDRIVE_WEB_CLIENT_ID: ""   # optional: override in GitHub Secrets if needed
+      JWT_SECRET: ${JWT_SECRET}                           # shared with dudenest-backend (passed via envsubst at deploy)
+      RELAY_PUBLIC_URL: ${RELAY_PUBLIC_URL}               # public HTTPS URL of this relay — stored in CRDB, returned to Flutter for per-user routing
+      GDRIVE_WEB_CLIENT_ID: ""                            # optional: override in GitHub Secrets if needed
       GDRIVE_WEB_CLIENT_SECRET: ""
     volumes:
       - relay_maps:/var/lib/dudenest/maps       # FileMap SQLite persistence

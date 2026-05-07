@@ -33,6 +33,7 @@ type BrowserConfig struct {
 }
 type BackupConfig struct {
 	URL             string  `json:"url"`              // dudenest-backup service base URL
+	PublicURL       string  `json:"public_url"`       // public HTTPS URL of this relay (e.g. "https://relay.dudenest.com") — sent during registration, returned to Flutter for per-user routing
 	DebounceSeconds float64 `json:"debounce_seconds"` // client-side debounce before sending snapshot
 }
 type NoVNCConfig struct {
@@ -85,6 +86,7 @@ func Load(path string) (*Config, error) {
 // Only non-sensitive values are overridable via env; secrets stay in CI/CD vars.
 func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("BACKUP_URL"); v != "" { cfg.Backup.URL = v }
+	if v := os.Getenv("RELAY_PUBLIC_URL"); v != "" { cfg.Backup.PublicURL = v } // public URL of this relay — set per-deployment in relay.env
 	if v := os.Getenv("RELAY_LISTEN"); v != "" { cfg.Server.Listen = v }
 	if v := os.Getenv("RELAY_DISPLAY"); v != "" { cfg.Server.Display = v }
 }

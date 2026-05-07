@@ -108,10 +108,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 		claims, err := auth.ValidateJWT(token)
 		if err != nil || claims == nil || claims.Sub == "" { return }
 		go standbyRegOnce.Do(func() {
-			if _, err2 := register.RegisterOnceWithUserID(authConfigDir, claims.Sub, cfg.Backup.URL); err2 != nil {
+			if _, err2 := register.RegisterOnceWithUserID(authConfigDir, claims.Sub, cfg.Backup.URL, cfg.Backup.PublicURL); err2 != nil {
 				log.Printf("⚠️  standby register: %v", err2)
 			} else {
-				log.Printf("✅ standby register: relay registered with backup (user=%s)", claims.Sub)
+				log.Printf("✅ standby register: relay registered with backup (user=%s relay_url=%s)", claims.Sub, cfg.Backup.PublicURL)
 			}
 		})
 	}
@@ -127,7 +127,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("thumbnail cache: %w", err)
 	}
 	key, _ := getKey() // key already validated in getPipeline(), safe to ignore error here
-	if creds, err2 := register.EnsureRegistered(authConfigDir, cfg.Backup.URL); err2 != nil { // auto-register with backup on first start
+	if creds, err2 := register.EnsureRegistered(authConfigDir, cfg.Backup.URL, cfg.Backup.PublicURL); err2 != nil { // auto-register with backup on first start
 		log.Printf("⚠️  register: %v (backup disabled)", err2)
 	} else if creds != nil {
 		os.Setenv("RELAY_ID", creds.RelayID)         //nolint:errcheck
@@ -146,7 +146,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	authSrv.RegisterRoutes(mux)
 	mux.Handle("/ws", wsHub) // WebSocket: Flutter connects for relay→Flutter auth requests
 	fs := &fileServer{p: p, thumbCache: tc, backupClient: bc, maxUploadBytes: cfg.MaxUploadBytes()}
-	lr := &lazyRegistrar{configDir: authConfigDir, masterKey: key, fs: fs, backupURL: cfg.Backup.URL, debounce: cfg.Debounce()}
+	lr := &lazyRegistrar{configDir: authConfigDir, masterKey: key, fs: fs, backupURL: cfg.Backup.URL, publicURL: cfg.Backup.PublicURL, debounce: cfg.Debounce()}
 	mux.HandleFunc("/files", requireAuthWithReg(lr, fs.handleList))
 	mux.HandleFunc("/files/", requireAuthWithReg(lr, fs.handleFile))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }) //nolint:errcheck
@@ -187,13 +187,14 @@ type lazyRegistrar struct {
 	configDir string
 	masterKey []byte
 	fs        *fileServer
-	backupURL string        // from config — used for registration and backup client init
+	backupURL  string        // from config — used for registration and backup client init
+	publicURL  string        // from config — public HTTPS URL of this relay, sent during registration for Flutter routing
 	debounce  time.Duration // from config — used for backup client init
 }
 
 func (lr *lazyRegistrar) tryRegister(userID string) {
 	lr.once.Do(func() {
-		creds, err := register.RegisterOnceWithUserID(lr.configDir, userID, lr.backupURL)
+		creds, err := register.RegisterOnceWithUserID(lr.configDir, userID, lr.backupURL, lr.publicURL)
 		if err != nil {
 			log.Printf("⚠️  lazy register: %v (backup disabled)", err)
 			return

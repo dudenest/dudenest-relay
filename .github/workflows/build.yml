@@ -172,6 +172,7 @@ jobs:
           JWT_SECRET: ${{ secrets.RELAY_JWT_SECRET }}
           GDRIVE_WEB_CLIENT_ID: ${{ secrets.GDRIVE_WEB_CLIENT_ID }}
           GDRIVE_WEB_CLIENT_SECRET: ${{ secrets.GDRIVE_WEB_CLIENT_SECRET }}
+          RELAY_PUBLIC_URL: "https://relay.dudenest.com"  # Swarm relay public URL
         run: |
           envsubst < deploy/relay-stack.yml > /tmp/relay-stack-resolved.yml
           docker stack deploy \
@@ -220,7 +221,7 @@ jobs:
             > .ssh/known_hosts
           chmod 644 .ssh/known_hosts
           # Generate relay.env with current secrets from GitHub (overwrites existing on VM)
-          printf 'RELAY_KEY=%s\nGDRIVE_WEB_CLIENT_ID=%s\nGDRIVE_WEB_CLIENT_SECRET=%s\nJWT_SECRET=%s\n' \
+          printf 'RELAY_KEY=%s\nGDRIVE_WEB_CLIENT_ID=%s\nGDRIVE_WEB_CLIENT_SECRET=%s\nJWT_SECRET=%s\nRELAY_PUBLIC_URL=https://relay.dudenest.com\n' \
             "${RELAY_KEY}" "${GDRIVE_WEB_CLIENT_ID}" "${GDRIVE_WEB_CLIENT_SECRET}" "${RELAY_JWT_SECRET}" > relay.env
           DEPLOYER="deployer-${{ github.run_id }}-${{ github.run_attempt }}"
           docker rm -f $DEPLOYER 2>/dev/null || true
