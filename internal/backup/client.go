@@ -72,6 +72,25 @@ func (c *Client) Trigger(maps []*types.FileMap) {
 	c.mu.Unlock()
 }
 
+// UpdateURL updates relay_url in CRDB for this relay. Safe to call on nil.
+// Called at startup when relay already has credentials — ensures relay_url stays current
+// without re-registration (relay_id and backup history are preserved).
+func (c *Client) UpdateURL(publicURL string) error {
+	if c == nil || publicURL == "" { return nil }
+	body, _ := json.Marshal(map[string]string{"relay_url": publicURL})
+	req, err := http.NewRequest(http.MethodPost, c.url+"/relay/update-url", bytes.NewReader(body))
+	if err != nil { return fmt.Errorf("update-url: new request: %w", err) }
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Relay-ID", c.relayID)
+	req.Header.Set("X-Relay-Secret", c.secret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil { return fmt.Errorf("update-url: http post: %w", err) }
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK { return fmt.Errorf("update-url: status %d", resp.StatusCode) }
+	log.Printf("backup: relay_url updated in CRDB → %s", publicURL)
+	return nil
+}
+
 // Ping updates last_seen_at on the backup server. Safe to call on nil.
 func (c *Client) Ping() error {
 	if c == nil { return nil }

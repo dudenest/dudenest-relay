@@ -134,7 +134,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 		os.Setenv("RELAY_SECRET", creds.RelaySecret) //nolint:errcheck
 	}
 	bc := backup.New(key, authConfigDir, cfg.Backup.URL, cfg.Debounce()) // nil if URL/RELAY_ID/RELAY_SECRET not set
-	if bc != nil { bc.StartPingLoop(5 * time.Minute) } // keep last_seen_at current
+	if bc != nil {
+		bc.StartPingLoop(5 * time.Minute)                          // keep last_seen_at current
+		if err2 := bc.UpdateURL(cfg.Backup.PublicURL); err2 != nil { // sync relay_url in CRDB at every startup
+			log.Printf("⚠️  backup: update-url: %v", err2)
+		}
+	}
 	if maps, err2 := p.ListFiles(); err2 == nil && len(maps) == 0 { // startup recovery: restore if no local files
 		if restored, err3 := bc.Restore(); err3 != nil {
 			log.Printf("⚠️  startup restore: %v", err3)
