@@ -134,6 +134,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		os.Setenv("RELAY_SECRET", creds.RelaySecret) //nolint:errcheck
 	}
 	bc := backup.New(key, authConfigDir, cfg.Backup.URL, cfg.Debounce()) // nil if URL/RELAY_ID/RELAY_SECRET not set
+	if bc != nil { bc.StartPingLoop(5 * time.Minute) } // keep last_seen_at current
 	if maps, err2 := p.ListFiles(); err2 == nil && len(maps) == 0 { // startup recovery: restore if no local files
 		if restored, err3 := bc.Restore(); err3 != nil {
 			log.Printf("⚠️  startup restore: %v", err3)
@@ -206,6 +207,8 @@ func (lr *lazyRegistrar) tryRegister(userID string) {
 		if bc != nil {
 			lr.fs.setBackup(bc)
 			log.Printf("✅ lazy register: backup enabled (relay_id=%s)", creds.RelayID)
+			if maps, err2 := lr.fs.p.ListFiles(); err2 == nil { bc.Trigger(maps) } // initial snapshot
+			bc.StartPingLoop(5 * time.Minute)
 		}
 	})
 }

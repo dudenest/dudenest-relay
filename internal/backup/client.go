@@ -72,6 +72,34 @@ func (c *Client) Trigger(maps []*types.FileMap) {
 	c.mu.Unlock()
 }
 
+// Ping updates last_seen_at on the backup server. Safe to call on nil.
+func (c *Client) Ping() error {
+	if c == nil { return nil }
+	req, err := http.NewRequest(http.MethodPost, c.url+"/relay/ping", nil)
+	if err != nil { return fmt.Errorf("ping: new request: %w", err) }
+	req.Header.Set("X-Relay-ID", c.relayID)
+	req.Header.Set("X-Relay-Secret", c.secret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil { return fmt.Errorf("ping: http post: %w", err) }
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK { return fmt.Errorf("ping: status %d", resp.StatusCode) }
+	log.Printf("backup: ping ok (relay_id=%s)", c.relayID)
+	return nil
+}
+
+// StartPingLoop sends POST /relay/ping every interval to keep last_seen_at current.
+// Runs in background goroutine. Safe to call on nil.
+func (c *Client) StartPingLoop(interval time.Duration) {
+	if c == nil { return }
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := c.Ping(); err != nil { log.Printf("backup: ping failed: %v", err) }
+		}
+	}()
+}
+
 // backupRequest matches dudenest-backup POST /relay/backup body.
 type backupRequest struct {
 	MapsJSON      string   `json:"maps_json"`
