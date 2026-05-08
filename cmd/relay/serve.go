@@ -461,6 +461,7 @@ func requireAuthWithReg(lr *lazyRegistrar, next http.HandlerFunc) http.HandlerFu
 		// Layer 2: JWT sub must match relay owner — prevents any other account from accessing this relay
 		if lr != nil {
 			if ownerID := lr.getOwner(); ownerID != "" && claims.Sub != ownerID {
+				log.Printf("security L2 rejected: sub=%q owner=%q path=%s", claims.Sub, ownerID, r.URL.Path)
 				jsonErr(w, "forbidden: this relay belongs to a different user", http.StatusForbidden)
 				return
 			}
@@ -474,6 +475,7 @@ func requireAuthWithReg(lr *lazyRegistrar, next http.HandlerFunc) http.HandlerFu
 				if relaySecret := os.Getenv("RELAY_SECRET"); relaySecret != "" {
 					rtoken := r.Header.Get("X-Relay-Token")
 					if !relaytoken.Verify(rtoken, relaySecret, claims.Sub) {
+						log.Printf("security L3 rejected: sub=%q relay_token_present=%v path=%s", claims.Sub, rtoken != "", r.URL.Path)
 						jsonErr(w, "forbidden: invalid or expired relay token", http.StatusForbidden)
 						return
 					}
