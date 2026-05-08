@@ -1,6 +1,6 @@
 # dudenest-relay
 
-![Version](https://img.shields.io/badge/Version-v0.5.0-blue) ![Status](https://img.shields.io/badge/Status-Pre--Alpha-orange) ![Language](https://img.shields.io/badge/Language-Go-00ADD8) ![License](https://img.shields.io/badge/License-Apache%202.0-green) ![Hardware](https://img.shields.io/badge/Hardware-Raspberry%20Pi%20Zero%202W%2B-red) ![Last Update](https://img.shields.io/badge/Update-2026--05--06-lightgrey)
+![Version](https://img.shields.io/badge/Version-v0.5.7-blue) ![Status](https://img.shields.io/badge/Status-Pre--Alpha-orange) ![Language](https://img.shields.io/badge/Language-Go-00ADD8) ![License](https://img.shields.io/badge/License-Apache%202.0-green) ![Hardware](https://img.shields.io/badge/Hardware-Raspberry%20Pi%20Zero%202W%2B-red) ![Last Update](https://img.shields.io/badge/Update-2026--05--08-lightgrey)
 
 **The privacy-preserving bridge between your Dudenest app and your cloud storage accounts.**
 
@@ -205,6 +205,16 @@ Apache License 2.0
 **Organization**: https://github.com/dudenest
 
 ## Changelog
+
+### v0.5.7 — 2026-05-08 — Security Hardening + Per-User Routing
+
+- 🔒 **3-Layer Security**: L1 network isolation, L2 JWT sub owner check, L3 HMAC relay_token (signed by backup service)
+- 🔍 **Security Logging**: L2/L3 rejections logged with `sub`, `owner`, `path` for diagnostics
+- 🔄 **Relay URL Routing**: relay registers its public HTTPS URL (`RELAY_PUBLIC_URL`) in CRDB; Flutter fetches per-user relay URL automatically from API — no manual config
+- 🔁 **Startup CRDB Sync**: relay syncs `user_id` and `relay_url` to CRDB on every restart
+- 📡 **Ping Loop**: relay sends `POST /relay/ping` every 5 minutes → `last_seen_at` visible in Flutter "My Relays"
+- 📸 **Initial Backup**: first backup snapshot sent immediately after registration
+- 🐛 **Bootstrap Deadlock Fix**: L3 skipped when `ownerUserID=""` → new relay registers without relay_token (which it can't have yet)
 
 ### v0.5.0 — 2026-05-06 — Config System
 - ⚙️ **relay.json**: All hardcoded values moved to `~/.config/dudenest/relay.json` (stdlib `encoding/json`, no external deps)
