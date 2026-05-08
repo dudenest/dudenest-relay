@@ -91,6 +91,23 @@ func (c *Client) UpdateURL(publicURL string) error {
 	return nil
 }
 
+// UpdateUserID sets user_id in CRDB for this relay. Called on first JWT request for old relays. Safe to call on nil.
+func (c *Client) UpdateUserID(userID string) error {
+	if c == nil || userID == "" { return nil }
+	body, _ := json.Marshal(map[string]string{"user_id": userID})
+	req, err := http.NewRequest(http.MethodPost, c.url+"/relay/update-user-id", bytes.NewReader(body))
+	if err != nil { return fmt.Errorf("update-user-id: new request: %w", err) }
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Relay-ID", c.relayID)
+	req.Header.Set("X-Relay-Secret", c.secret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil { return fmt.Errorf("update-user-id: http post: %w", err) }
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK { return fmt.Errorf("update-user-id: status %d", resp.StatusCode) }
+	log.Printf("backup: user_id updated in CRDB → %s", userID)
+	return nil
+}
+
 // Ping updates last_seen_at on the backup server. Safe to call on nil.
 func (c *Client) Ping() error {
 	if c == nil { return nil }

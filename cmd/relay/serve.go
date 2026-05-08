@@ -228,11 +228,17 @@ func (lr *lazyRegistrar) tryRegister(userID string) {
 		ownerID := creds.UserID
 		if ownerID == "" { ownerID = userID }
 		lr.setOwner(ownerID)
-		// Backfill user_id in relay_creds.json for old registrations that predate this field
+		// Backfill user_id in relay_creds.json and CRDB for old registrations that predate this field
 		if creds.UserID == "" {
 			creds.UserID = ownerID
 			if data, err2 := json.Marshal(creds); err2 == nil {
 				os.WriteFile(filepath.Join(lr.configDir, "relay_creds.json"), data, 0o600) //nolint:errcheck
+			}
+			// Update CRDB so GET /user/relays returns this relay for its owner
+			if existing := lr.fs.backup(); existing != nil {
+				if err2 := existing.UpdateUserID(ownerID); err2 != nil {
+					log.Printf("⚠️  lazy register: update-user-id: %v", err2)
+				}
 			}
 		}
 		bc := backup.New(lr.masterKey, lr.configDir, lr.backupURL, lr.debounce)
