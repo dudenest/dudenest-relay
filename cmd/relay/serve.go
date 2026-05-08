@@ -142,6 +142,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 		if err2 := bc.UpdateURL(cfg.Backup.PublicURL); err2 != nil { // sync relay_url in CRDB at every startup
 			log.Printf("⚠️  backup: update-url: %v", err2)
 		}
+		if ownerFromCreds != "" { // sync user_id in CRDB — fixes old relays that had user_id in file but not CRDB
+			if err2 := bc.UpdateUserID(ownerFromCreds); err2 != nil {
+				log.Printf("⚠️  backup: update-user-id: %v", err2)
+			}
+		}
 	}
 	if maps, err2 := p.ListFiles(); err2 == nil && len(maps) == 0 { // startup recovery: restore if no local files
 		if restored, err3 := bc.Restore(); err3 != nil {
