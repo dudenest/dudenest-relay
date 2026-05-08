@@ -461,12 +461,18 @@ func requireAuthWithReg(lr *lazyRegistrar, next http.HandlerFunc) http.HandlerFu
 			}
 		}
 		// Layer 3: relay_token must be valid HMAC signed by backup using relay_secret
-		// Only enforced after relay is registered (RELAY_SECRET set) — allows first-registration flow
-		if relaySecret := os.Getenv("RELAY_SECRET"); relaySecret != "" {
-			rtoken := r.Header.Get("X-Relay-Token")
-			if !relaytoken.Verify(rtoken, relaySecret, claims.Sub) {
-				jsonErr(w, "forbidden: invalid or expired relay token", http.StatusForbidden)
-				return
+		// Only enforced when owner is known — prevents bootstrap deadlock for old relays without user_id in CRDB.
+		// Old relays: ownerUserID="" on startup → L3 skipped → tryRegister fires → sets ownerUserID + updates CRDB
+		//             → Flutter gets relay_token from /user/relays → next request includes token → L3 enforced.
+		if lr != nil {
+			if ownerID := lr.getOwner(); ownerID != "" {
+				if relaySecret := os.Getenv("RELAY_SECRET"); relaySecret != "" {
+					rtoken := r.Header.Get("X-Relay-Token")
+					if !relaytoken.Verify(rtoken, relaySecret, claims.Sub) {
+						jsonErr(w, "forbidden: invalid or expired relay token", http.StatusForbidden)
+						return
+					}
+				}
 			}
 		}
 		if lr != nil && claims.Sub != "" {
