@@ -52,7 +52,7 @@ func serveCmd() *cobra.Command {
 // so users can re-authorize cloud providers without restarting the relay.
 // /health returns 200 (degraded) so HAProxy keeps the node in rotation.
 // tryReg is called on /files requests even in standby so JWT-based registration fires regardless of cloud auth state.
-func degradedServerWithAuth(listen, reason string, authSrv interface{ RegisterRoutes(*http.ServeMux) }, wsHub http.Handler, tryReg func(string)) error {
+func degradedServerWithAuth(listen, reason, configDir string, authSrv interface{ RegisterRoutes(*http.ServeMux) }, wsHub http.Handler, tryReg func(string)) error {
 	log.Printf("⚠️  relay: entering standby mode — %s", reason)
 	log.Printf("⚠️  relay: /files=503, /auth active — re-authorize via Flutter app")
 	ticker := time.NewTicker(5 * time.Minute)
@@ -68,6 +68,7 @@ func degradedServerWithAuth(listen, reason string, authSrv interface{ RegisterRo
 	mux := http.NewServeMux()
 	authSrv.RegisterRoutes(mux) // /auth/* active even in standby — user can add/re-auth providers
 	mux.Handle("/ws", wsHub)
+	mux.HandleFunc("/relay/bootstrap", makeBootstrapHandler(configDir)) // ZT: receive creds even in standby
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "degraded", "reason": reason}) //nolint:errcheck
@@ -96,6 +97,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		webCfg = browser.BuildWebOAuthConfig(id, secret, cfg.OAuth.WebRedirectURL)
 		fmt.Println("relay serve: web OAuth client loaded (GDRIVE_WEB_CLIENT_ID)")
 	}
+	maybeAnnounce(authConfigDir, cfg.Backup.URL) // ZT provisioning: announce to hub if no creds and ZT_ANNOUNCE=true
 	wsHub := ws.NewHub()
 	bm := blockmap.New(storePath) // blockmap for file_count in /auth/providers
 	authSrv := browser.NewServer(cfg.Server.Display, cfg.Server.Listen, browser.BuildAuthURL(cfg2), cfg2, webCfg, authConfigDir, wsHub, bm, cfg.OAuth.CallbackPort, cfg.NoVNC.BackendAddr, cfg.SessionTimeout())
@@ -119,7 +121,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	p, err := getPipeline()
 	if err != nil {
 		if isCredentialError(err) { // OAuth expired/revoked or no providers yet → standby with auth routes active
-			return degradedServerWithAuth(cfg.Server.Listen, fmt.Sprintf("pipeline init: %v", err), authSrv, wsHub, tryReg)
+			return degradedServerWithAuth(cfg.Server.Listen, fmt.Sprintf("pipeline init: %v", err), authConfigDir, authSrv, wsHub, tryReg)
 		}
 		return fmt.Errorf("pipeline init: %w", err)
 	}
@@ -161,6 +163,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	fs := &fileServer{p: p, thumbCache: tc, backupClient: bc, maxUploadBytes: cfg.MaxUploadBytes()}
 	lr := &lazyRegistrar{configDir: authConfigDir, masterKey: key, fs: fs, backupURL: cfg.Backup.URL, publicURL: cfg.Backup.PublicURL, debounce: cfg.Debounce()}
 	if ownerFromCreds != "" { lr.setOwner(ownerFromCreds) } // preload owner from creds (set before ListenAndServe, no races)
+	mux.HandleFunc("/relay/bootstrap", makeBootstrapHandler(authConfigDir)) // ZT provisioner delivers creds via ZT network
 	mux.HandleFunc("/files", requireAuthWithReg(lr, fs.handleList))
 	mux.HandleFunc("/files/", requireAuthWithReg(lr, fs.handleFile))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }) //nolint:errcheck
@@ -501,6 +504,48 @@ func corsMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+// makeBootstrapHandler returns a handler for POST /relay/bootstrap.
+// Called by relay-provisioner via ZT network after ZT member is authorized.
+// Validates X-Announce-Token, writes relay_creds.json, sets RELAY_ID + RELAY_SECRET env vars.
+// Auth: one-time token saved at announce time (announce_token.tmp) — deleted after use.
+func makeBootstrapHandler(configDir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost { http.Error(w, "POST only", http.StatusMethodNotAllowed); return }
+		token := r.Header.Get("X-Announce-Token")
+		if token == "" { jsonErr(w, "X-Announce-Token required", http.StatusUnauthorized); return }
+		saved, err := register.LoadAnnounceToken(configDir)
+		if err != nil { jsonErr(w, "no pending announce (not in ZT provisioning mode)", http.StatusBadRequest); return }
+		if token != saved { jsonErr(w, "invalid announce token", http.StatusUnauthorized); return }
+		var payload register.BootstrapPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil { jsonErr(w, "bad json: "+err.Error(), 400); return }
+		if payload.RelayID == "" || payload.RelaySecret == "" || payload.JWTSecret == "" {
+			jsonErr(w, "relay_id, relay_secret, jwt_secret required", 400); return
+		}
+		if _, err := register.WriteBootstrapCreds(configDir, &payload); err != nil {
+			jsonErr(w, "write creds: "+err.Error(), 500); return
+		}
+		os.Setenv("RELAY_ID", payload.RelayID)         //nolint:errcheck
+		os.Setenv("RELAY_SECRET", payload.RelaySecret) //nolint:errcheck
+		os.Setenv("JWT_SECRET", payload.JWTSecret)     //nolint:errcheck — sets for current process; relay.env updated by install script
+		if payload.BackupURL != "" { os.Setenv("BACKUP_URL", payload.BackupURL) } //nolint:errcheck
+		register.ClearAnnounceToken(configDir) // one-time use — delete after success
+		log.Printf("✅ relay bootstrapped: relay_id=%s relay_url=%s", payload.RelayID, payload.RelayURL)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "relay_url": payload.RelayURL}) //nolint:errcheck
+	}
+}
+
+// maybeAnnounce announces to hub if no relay_creds.json and ZT_ANNOUNCE=true env var is set.
+// Called at startup; errors are non-fatal (relay enters standby and tries lazy registration on first JWT).
+func maybeAnnounce(configDir, hubURL string) {
+	if os.Getenv("ZT_ANNOUNCE") != "true" { return } // ZT provisioning mode must be explicitly enabled
+	if _, err := os.ReadFile(filepath.Join(configDir, "relay_creds.json")); err == nil { return } // already registered
+	log.Printf("relay: ZT provisioning mode — announcing to %s ...", hubURL)
+	if _, err := register.Announce(configDir, hubURL); err != nil {
+		log.Printf("⚠️  relay: announce failed: %v (will retry on next restart)", err)
+	}
+}
+
 // isCredentialError detects OAuth token errors that should not trigger a crash loop.
 // These errors are permanent until credentials are refreshed — retrying is wasteful.
 // "no cloud providers available" = fresh install, no users authenticated yet → standby.

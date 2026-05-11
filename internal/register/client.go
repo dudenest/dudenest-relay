@@ -6,17 +6,25 @@
 // dudenest-backup stores it in CRDB. Flutter clients read it via GET /api/v1/relays and use
 // it as the relay baseURL — enabling automatic per-user relay routing without manual configuration.
 // Set via RELAY_PUBLIC_URL env var in relay.env (e.g. "https://relay.dudenest.com").
+//
+// ZT auto-provisioning (added 2026-05-11): Announce() + BootstrapPayload for no-domain relay setup.
+// Flow: relay → POST /relay/announce → relay-provisioner authorizes ZT → POST /relay/bootstrap → relay has creds.
 package register
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 )
 
 type Credentials struct {
@@ -109,4 +117,85 @@ func relayVersion() string {
 		return info.Main.Version
 	}
 	return "unknown"
+}
+
+// ── ZT Auto-Provisioning (added 2026-05-11) ──────────────────────────────────
+
+const announceTokenFile = "announce_token.tmp"
+
+// BootstrapPayload is delivered by relay-provisioner via POST /relay/bootstrap (ZT-only endpoint).
+type BootstrapPayload struct {
+	JWTSecret   string `json:"jwt_secret"`   // delivered once — write to relay.env
+	RelayID     string `json:"relay_id"`     // permanent relay identity
+	RelaySecret string `json:"relay_secret"` // HMAC key for relay→backup auth
+	RelayURL    string `json:"relay_url"`    // assigned subdomain (relay-XXXX.dudenest.com)
+	BackupURL   string `json:"backup_url"`   // dudenest-backup base URL
+}
+
+// Announce generates a one-time token, POSTs to hub /relay/announce, and saves token to disk.
+// Gets ZT node ID from zerotier-cli and public IP from api.ipify.org.
+// Returns announce_token for later bootstrap validation.
+func Announce(configDir, hubURL string) (string, error) {
+	ztID, err := getZerotierID()
+	if err != nil { return "", fmt.Errorf("zerotier-cli: %w", err) }
+	publicIP, err := getPublicIP()
+	if err != nil { return "", fmt.Errorf("public ip: %w", err) }
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil { return "", fmt.Errorf("rand: %w", err) }
+	token := hex.EncodeToString(tokenBytes)
+	if err := os.WriteFile(filepath.Join(configDir, announceTokenFile), []byte(token), 0o600); err != nil {
+		return "", fmt.Errorf("save token: %w", err)
+	}
+	body, _ := json.Marshal(map[string]string{"zt_id": ztID, "public_ip": publicIP, "announce_token": token, "version": relayVersion()})
+	resp, err := http.Post(hubURL+"/relay/announce", "application/json", bytes.NewReader(body))
+	if err != nil { return "", fmt.Errorf("announce POST: %w", err) }
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK { return "", fmt.Errorf("announce: hub returned %d", resp.StatusCode) }
+	log.Printf("register: ✅ announced to hub (zt_id=%s public_ip=%s)", ztID, publicIP)
+	return token, nil
+}
+
+// LoadAnnounceToken reads the saved announce_token from disk (for bootstrap validation).
+func LoadAnnounceToken(configDir string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(configDir, announceTokenFile))
+	if err != nil { return "", err }
+	return strings.TrimSpace(string(data)), nil
+}
+
+// ClearAnnounceToken removes the announce_token temp file after successful bootstrap.
+func ClearAnnounceToken(configDir string) { os.Remove(filepath.Join(configDir, announceTokenFile)) } //nolint:errcheck
+
+// WriteBootstrapCreds writes relay_creds.json from bootstrap payload and returns credentials.
+// Does NOT write jwt_secret — caller must write it to relay.env separately.
+func WriteBootstrapCreds(configDir string, p *BootstrapPayload) (*Credentials, error) {
+	creds := &Credentials{RelayID: p.RelayID, RelaySecret: p.RelaySecret}
+	data, _ := json.Marshal(creds)
+	if err := os.MkdirAll(configDir, 0o700); err != nil { return nil, fmt.Errorf("mkdir: %w", err) }
+	if err := os.WriteFile(filepath.Join(configDir, credsFile), data, 0o600); err != nil {
+		return nil, fmt.Errorf("write creds: %w", err)
+	}
+	log.Printf("register: ✅ bootstrap complete (relay_id=%s relay_url=%s)", p.RelayID, p.RelayURL)
+	return creds, nil
+}
+
+// getZerotierID runs zerotier-cli info and extracts the 10-char node ID.
+func getZerotierID() (string, error) {
+	out, err := exec.Command("zerotier-cli", "info").Output()
+	if err != nil { return "", err }
+	// Output: "200 info <nodeID> <version> <status>"
+	parts := strings.Fields(string(out))
+	if len(parts) < 3 { return "", fmt.Errorf("unexpected zerotier-cli output: %q", string(out)) }
+	return parts[2], nil
+}
+
+// getPublicIP fetches public WAN IP from ipify.org (simple plaintext endpoint).
+func getPublicIP() (string, error) {
+	resp, err := http.Get("https://api.ipify.org")
+	if err != nil { return "", err }
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil { return "", err }
+	ip := strings.TrimSpace(string(body))
+	if ip == "" { return "", fmt.Errorf("empty response from ipify.org") }
+	return ip, nil
 }
