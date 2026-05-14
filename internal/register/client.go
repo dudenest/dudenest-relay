@@ -56,11 +56,37 @@ func EnsureRegistered(configDir, backupURL, relayPublicURL string) (*Credentials
 
 // RegisterOnceWithUserID registers relay using userID from JWT claims.
 // relayPublicURL is the public HTTPS URL of this relay (from config). Idempotent: returns saved creds if already registered.
+// ZT pairing: if relay_creds.json exists but user_id is empty (ZT-bootstrapped relay), calls POST /relay/update-user-id
+// to pair the relay with the authenticated user in CRDB, then persists user_id to relay_creds.json.
 func RegisterOnceWithUserID(configDir, userID, backupURL, relayPublicURL string) (*Credentials, error) {
 	if creds, err := loadExisting(configDir); err == nil && creds != nil {
+		if creds.UserID == "" && userID != "" && backupURL != "" { // ZT relay: pair with user on first JWT request
+			return pairUserID(configDir, creds, userID, backupURL)
+		}
 		return creds, nil
 	}
 	return registerCore(configDir, backupURL, userID, relayPublicURL)
+}
+
+// pairUserID calls POST /relay/update-user-id on hub to pair an existing relay (ZT-bootstrapped, no user_id) with a user.
+// Updates relay_creds.json with user_id on success. Returns updated creds.
+func pairUserID(configDir string, creds *Credentials, userID, backupURL string) (*Credentials, error) {
+	body, _ := json.Marshal(map[string]string{"user_id": userID})
+	req, err := http.NewRequest(http.MethodPost, backupURL+"/relay/update-user-id", bytes.NewReader(body))
+	if err != nil { return creds, fmt.Errorf("pair: build request: %w", err) }
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Relay-ID", creds.RelayID)
+	req.Header.Set("X-Relay-Secret", creds.RelaySecret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil { return creds, fmt.Errorf("pair: POST update-user-id: %w", err) }
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK { return creds, fmt.Errorf("pair: hub returned %d", resp.StatusCode) }
+	creds.UserID = userID
+	if data, err2 := json.Marshal(creds); err2 == nil {
+		os.WriteFile(filepath.Join(configDir, credsFile), data, 0o600) //nolint:errcheck
+	}
+	log.Printf("register: ✅ paired relay_id=%s with user_id=%s", creds.RelayID, userID)
+	return creds, nil
 }
 
 // loadExisting reads relay_creds.json if it exists and has a non-empty relay_id.
