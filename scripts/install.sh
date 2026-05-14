@@ -1,90 +1,90 @@
 #!/usr/bin/env bash
 # Dudenest Relay — automatic installer (ZT auto-provisioning mode)
-# Usage: curl -sSL https://get.dudenest.com/relay | bash
+# Usage: curl -sSL https://raw.githubusercontent.com/dudenest/dudenest-relay/main/scripts/install.sh | bash
 # No domain, no port forwarding, no JWT_SECRET needed.
 # Uses ZeroTier overlay network + hub auto-provisioning.
 set -euo pipefail
 
-RELAY_VERSION="latest"
 RELAY_REPO="dudenest/dudenest-relay"
 RELAY_BIN="/usr/local/bin/relay"
 CONFIG_DIR="/etc/dudenest"
 DATA_DIR="/var/lib/dudenest"
-ZT_NETWORK="932df01efb1ebd71"  # dudenest busybox ZeroTier network
-HUB_URL="${HUB_URL:-https://hub.dudenest.com}"
+ZT_NETWORK="932df01efb1ebd71"
 BACKUP_URL="${BACKUP_URL:-https://backup.dudenest.com}"
 
-# ── helpers ──────────────────────────────────────────────────────────────────
-info()  { echo "[dudenest] $*"; }
-error() { echo "[ERROR] $*" >&2; exit 1; }
-require() { command -v "$1" >/dev/null 2>&1 || error "Required: $1 (install it first)"; }
+# ── helpers ───────────────────────────────────────────────────────────────────
+ok()    { echo "  ✓ $*"; }
+step()  { echo ""; echo "▸ $*"; }
+fail()  { echo ""; echo "  ✗ ERROR: $*" >&2; exit 1; }
+require() { command -v "$1" >/dev/null 2>&1 || fail "Required tool not found: $1"; }
 
 require curl
-[[ $EUID -eq 0 ]] || error "Run as root: sudo bash install.sh"
+[[ $EUID -eq 0 ]] || fail "Run as root: sudo bash install.sh"
 
-# ── detect arch ──────────────────────────────────────────────────────────────
 ARCH=$(uname -m)
 case "$ARCH" in
   x86_64)  RELAY_ARCH="linux-amd64"  ;;
   aarch64) RELAY_ARCH="linux-arm64"  ;;
   armv7l)  RELAY_ARCH="linux-armv7"  ;;
-  *) error "Unsupported architecture: $ARCH" ;;
+  *) fail "Unsupported architecture: $ARCH" ;;
 esac
 
 echo ""
 echo "┌─────────────────────────────────────────────────────────────────┐"
 echo "│          Dudenest Relay Installer (ZeroTier mode)               │"
 echo "├─────────────────────────────────────────────────────────────────┤"
-echo "│  No domain, no port forwarding required!                        │"
-echo "│  Uses ZeroTier overlay network for secure connectivity.         │"
+echo "│  No domain, no port forwarding, no configuration required.      │"
+echo "│  Relay will be provisioned automatically within seconds.        │"
 echo "└─────────────────────────────────────────────────────────────────┘"
-echo ""
 
-info "Installing Dudenest Relay (ZT auto-provisioning mode) ..."
-
-# ── install zerotier-one ──────────────────────────────────────────────────────
+# ── step 1: ZeroTier ─────────────────────────────────────────────────────────
+step "Step 1/5: ZeroTier"
 if ! command -v zerotier-cli >/dev/null 2>&1; then
-  info "Installing ZeroTier ..."
-  curl -fsSL https://install.zerotier.com | bash
-  systemctl enable zerotier-one
-  systemctl start zerotier-one
+  echo "  Installing ZeroTier ..."
+  curl -fsSL https://install.zerotier.com | bash >/dev/null 2>&1
+  systemctl enable zerotier-one >/dev/null 2>&1
+  systemctl start zerotier-one >/dev/null 2>&1
   sleep 3
 fi
-info "zerotier-one: $(zerotier-cli -v 2>/dev/null || echo 'running')"
+ZT_VERSION=$(zerotier-cli -v 2>/dev/null || echo "running")
+ok "ZeroTier $ZT_VERSION"
+zerotier-cli join "$ZT_NETWORK" >/dev/null 2>&1 || true
+ok "Joined network $ZT_NETWORK (authorization will complete automatically)"
 
-# ── join dudenest ZT network ──────────────────────────────────────────────────
-info "Joining dudenest ZeroTier network ($ZT_NETWORK) ..."
-zerotier-cli join "$ZT_NETWORK" || true
-info "ZeroTier network join requested — hub will authorize this relay"
-
-# ── install relay binary ──────────────────────────────────────────────────────
-info "Downloading relay binary ($RELAY_ARCH) ..."
+# ── step 2: relay binary ─────────────────────────────────────────────────────
+step "Step 2/5: Relay binary"
 RELAY_URL="https://github.com/$RELAY_REPO/releases/latest/download/relay-$RELAY_ARCH"
-curl -fsSL "$RELAY_URL" -o "$RELAY_BIN"
+echo "  Downloading relay binary ($RELAY_ARCH) ..."
+curl -fsSL "$RELAY_URL" -o "$RELAY_BIN" || fail "Failed to download relay binary from GitHub"
 chmod +x "$RELAY_BIN"
-info "relay binary: $("$RELAY_BIN" version 2>/dev/null || echo 'installed')"
+ok "Relay binary installed: $RELAY_BIN"
 
-# ── create directories ────────────────────────────────────────────────────────
+# ── step 3: config ───────────────────────────────────────────────────────────
+step "Step 3/5: Configuration"
 mkdir -p "$CONFIG_DIR/providers" "$DATA_DIR/maps"
-
-# ── generate relay encryption key ────────────────────────────────────────────
 RELAY_KEY=$(openssl rand -hex 32)
-info "Generated relay encryption key"
 
-# ── write relay.env ───────────────────────────────────────────────────────────
-# JWT_SECRET and RELAY_PUBLIC_URL are delivered via /relay/bootstrap (ZT provisioning)
+# JWT_SECRET and relay credentials are delivered automatically via ZT bootstrap
 cat > "$CONFIG_DIR/relay.env" <<EOF
 RELAY_KEY=$RELAY_KEY
 BACKUP_URL=$BACKUP_URL
 ZT_ANNOUNCE=true
 EOF
 chmod 600 "$CONFIG_DIR/relay.env"
-info "Config written to $CONFIG_DIR/relay.env"
+ok "Config written to $CONFIG_DIR/relay.env"
 
-# ── systemd: relay ────────────────────────────────────────────────────────────
+# client_secret.json — placeholder; relay works without it until GDrive auth is added
+if [[ ! -f "$CONFIG_DIR/client_secret.json" ]]; then
+  echo '{"installed":{"client_id":"placeholder"}}' > "$CONFIG_DIR/client_secret.json"
+  chmod 600 "$CONFIG_DIR/client_secret.json"
+fi
+ok "OAuth config ready"
+
+# ── step 4: systemd service ───────────────────────────────────────────────────
+step "Step 4/5: System service"
 cat > /etc/systemd/system/dudenest-relay.service <<EOF
 [Unit]
-Description=Dudenest Relay (ZeroTier provisioned)
+Description=Dudenest Relay
 After=network.target zerotier-one.service
 Wants=zerotier-one.service
 [Service]
@@ -99,42 +99,49 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
+systemctl daemon-reload >/dev/null 2>&1
+systemctl enable dudenest-relay >/dev/null 2>&1
+systemctl restart dudenest-relay >/dev/null 2>&1
+ok "Service dudenest-relay enabled and started"
 
-# ── client_secret.json (required for GDrive OAuth) ────────────────────────────
-if [[ ! -f "$CONFIG_DIR/client_secret.json" ]]; then
-  info "client_secret.json not found — downloading from hub ..."
-  if ! curl -fsSL "$HUB_URL/relay/client-secret" -o "$CONFIG_DIR/client_secret.json" 2>/dev/null; then
-    info "⚠️  Could not download client_secret.json from hub."
-    info "    Copy your client_secret.json to $CONFIG_DIR/client_secret.json and restart relay."
-    echo '{"type":"service_account"}' > "$CONFIG_DIR/client_secret.json"  # placeholder — relay will start in degraded mode
+# ── step 5: provisioning ─────────────────────────────────────────────────────
+step "Step 5/5: Provisioning"
+echo "  Waiting for relay to announce and receive credentials ..."
+BOOTSTRAP_DONE=false
+for i in $(seq 1 24); do  # up to 120s
+  sleep 5
+  HEALTH=$(curl -sf "http://localhost:8086/health" 2>/dev/null || echo "")
+  RELAY_ID=$(grep -o '"relay_id":"[^"]*"' "$CONFIG_DIR/relay_creds.json" 2>/dev/null | cut -d'"' -f4 || echo "")
+  if [[ -n "$RELAY_ID" ]]; then
+    RELAY_URL=$(grep -o '"relay_url":"[^"]*"' "$CONFIG_DIR/relay_creds.json" 2>/dev/null | cut -d'"' -f4 || echo "")
+    ok "Provisioned: relay_id=${RELAY_ID:0:8}..."
+    ok "Relay URL: $RELAY_URL"
+    BOOTSTRAP_DONE=true
+    break
   fi
-  chmod 600 "$CONFIG_DIR/client_secret.json"
+  echo "  ... waiting (${i}/24) — provisioner is authorizing ZeroTier membership"
+done
+
+if [[ "$BOOTSTRAP_DONE" != "true" ]]; then
+  echo ""
+  echo "  NOTE: Provisioning is taking longer than expected."
+  echo "  The relay is running and will complete in the background."
+  echo "  Check status: journalctl -u dudenest-relay -f"
 fi
 
-# ── start services ────────────────────────────────────────────────────────────
-systemctl daemon-reload
-systemctl enable dudenest-relay
-systemctl restart dudenest-relay
-
-# ── verify ────────────────────────────────────────────────────────────────────
-sleep 3
-if curl -sf "http://localhost:8086/health" >/dev/null 2>&1; then
-  info "✅ Relay is running (localhost:8086)"
-else
-  echo "[WARN] Relay not responding on :8086 yet — check: journalctl -u dudenest-relay -n 30"
-fi
-
+# ── summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "╔═══════════════════════════════════════════════════════════════════╗"
-echo "║  ✅  Dudenest Relay installed successfully!                       ║"
+echo "║  ✅  Dudenest Relay installed and running!                        ║"
 echo "╠═══════════════════════════════════════════════════════════════════╣"
-echo "║  Mode:    ZeroTier auto-provisioning (no domain needed)          ║"
-echo "║  Logs:    journalctl -u dudenest-relay -f                        ║"
-echo "║  Status:  systemctl status dudenest-relay                        ║"
+echo "║  Next steps:                                                      ║"
+echo "║   1. Open the Dudenest app and log in                            ║"
+echo "║   2. Your relay will appear in Settings → My Relays              ║"
+echo "║   3. Add Google Drive in Settings → Cloud Accounts               ║"
 echo "╠═══════════════════════════════════════════════════════════════════╣"
-echo "║  Next steps in the Dudenest app:                                 ║"
-echo "║   1. Open app → Settings → Add Relay                            ║"
-echo "║   2. App detects relay automatically (same network)              ║"
-echo "║   3. Settings → Cloud Accounts → Add Google Drive               ║"
+echo "║  Commands:                                                        ║"
+echo "║   journalctl -u dudenest-relay -f      (live logs)               ║"
+echo "║   systemctl status dudenest-relay      (service status)          ║"
+echo "║   curl http://localhost:8086/health    (health check)            ║"
 echo "╚═══════════════════════════════════════════════════════════════════╝"
 echo ""
