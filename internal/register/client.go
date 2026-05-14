@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"time"
 )
 
 type Credentials struct {
@@ -176,6 +177,43 @@ func WriteBootstrapCreds(configDir string, p *BootstrapPayload) (*Credentials, e
 	}
 	log.Printf("register: ✅ bootstrap complete (relay_id=%s relay_url=%s)", p.RelayID, p.RelayURL)
 	return creds, nil
+}
+
+// PollBootstrap polls hub GET /relay/bootstrap?announce_token=<token> until credentials arrive (relay-pull arch).
+// Runs in a goroutine; writes relay_creds.json and sets RELAY_ID/RELAY_SECRET/JWT_SECRET env vars on success.
+func PollBootstrap(configDir, hubURL, announceToken string) {
+	url := hubURL + "/relay/bootstrap?announce_token=" + announceToken
+	deadline := time.Now().Add(10 * time.Minute)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url)
+		if err != nil { log.Printf("register: bootstrap poll: %v — retry in 10s", err); time.Sleep(10 * time.Second); continue }
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		switch resp.StatusCode {
+		case http.StatusOK:
+			var p BootstrapPayload
+			if err := json.Unmarshal(body, &p); err != nil { log.Printf("register: bootstrap decode: %v", err); return }
+			if _, err := WriteBootstrapCreds(configDir, &p); err != nil { log.Printf("register: bootstrap write: %v", err); return }
+			os.Setenv("RELAY_ID", p.RelayID)         //nolint:errcheck
+			os.Setenv("RELAY_SECRET", p.RelaySecret) //nolint:errcheck
+			os.Setenv("JWT_SECRET", p.JWTSecret)     //nolint:errcheck
+			if p.BackupURL != "" { os.Setenv("BACKUP_URL", p.BackupURL) } //nolint:errcheck
+			ClearAnnounceToken(configDir)
+			log.Printf("register: ✅ bootstrapped (relay_id=%s relay_url=%s)", p.RelayID, p.RelayURL)
+			return
+		case http.StatusAccepted:  // 202 — provisioner not yet done
+			log.Printf("register: bootstrap pending — retry in 10s")
+			time.Sleep(10 * time.Second)
+		case http.StatusGone:     // 410 — token already used
+			log.Printf("register: bootstrap token already consumed"); return
+		case http.StatusNotFound: // 404 — token invalid or expired
+			log.Printf("register: bootstrap token invalid or expired"); return
+		default:
+			log.Printf("register: bootstrap unexpected %d — retry in 10s", resp.StatusCode)
+			time.Sleep(10 * time.Second)
+		}
+	}
+	log.Printf("register: ⚠️  bootstrap timed out after 10 minutes")
 }
 
 // getZerotierID runs zerotier-cli info and extracts the 10-char node ID.

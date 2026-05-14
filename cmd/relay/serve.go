@@ -536,14 +536,18 @@ func makeBootstrapHandler(configDir string) http.HandlerFunc {
 }
 
 // maybeAnnounce announces to hub if no relay_creds.json and ZT_ANNOUNCE=true env var is set.
-// Called at startup; errors are non-fatal (relay enters standby and tries lazy registration on first JWT).
+// Relay-pull arch: after announce, polls GET /relay/bootstrap?announce_token=<token> in background.
+// Non-fatal — relay enters standby and waits for bootstrap credentials.
 func maybeAnnounce(configDir, hubURL string) {
 	if os.Getenv("ZT_ANNOUNCE") != "true" { return } // ZT provisioning mode must be explicitly enabled
 	if _, err := os.ReadFile(filepath.Join(configDir, "relay_creds.json")); err == nil { return } // already registered
 	log.Printf("relay: ZT provisioning mode — announcing to %s ...", hubURL)
-	if _, err := register.Announce(configDir, hubURL); err != nil {
+	token, err := register.Announce(configDir, hubURL)
+	if err != nil {
 		log.Printf("⚠️  relay: announce failed: %v (will retry on next restart)", err)
+		return
 	}
+	go register.PollBootstrap(configDir, hubURL, token) // relay-pull arch: poll hub until provisioner completes
 }
 
 // isCredentialError detects OAuth token errors that should not trigger a crash loop.
