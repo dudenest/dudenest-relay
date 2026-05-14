@@ -34,8 +34,10 @@ jobs:
           GOARM: ${{ matrix.goarm || '' }}
           CGO_ENABLED: "0"
         run: |
+          VERSION="${{ github.ref_name }}"
+          [ "$VERSION" = "" ] && VERSION="dev"
           go mod tidy
-          go build -o relay-${{ matrix.suffix }} ./cmd/relay/
+          go build -ldflags "-X main.Version=${VERSION}" -o relay-${{ matrix.suffix }} ./cmd/relay/
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

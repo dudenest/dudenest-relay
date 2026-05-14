@@ -56,9 +56,10 @@ func main() {
 	root.PersistentFlags().StringVar(&gdriveBasePath, "gdrive-path", "dudenest-relay", "Google Drive base folder name")
 	root.PersistentFlags().StringVar(&uploadStrategy, "strategy", types.StrategyChunking, "upload strategy: Chunking, Replica")
 
+	root.Version = Version
 	authCmd := &cobra.Command{Use: "auth", Short: "Authenticate cloud provider accounts"}
 	authCmd.AddCommand(authGDriveCmd())
-	root.AddCommand(uploadCmd(), downloadCmd(), infoCmd(), benchCmd(), serveCmd(), serveAuthCmd(), authCmd, setupCmd(), recoverCmd())
+	root.AddCommand(uploadCmd(), downloadCmd(), infoCmd(), benchCmd(), serveCmd(), serveAuthCmd(), authCmd, setupCmd(), recoverCmd(), versionCmd(), updateCmd())
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}

@@ -91,6 +91,7 @@ Wants=zerotier-one.service
 Type=simple
 User=root
 EnvironmentFile=$CONFIG_DIR/relay.env
+ExecStartPre=-$RELAY_BIN update
 ExecStart=$RELAY_BIN serve --key \${RELAY_KEY} --listen 0.0.0.0:8086 --config-dir $CONFIG_DIR --map-store $DATA_DIR/maps --client-secret $CONFIG_DIR/client_secret.json
 Restart=always
 RestartSec=5
