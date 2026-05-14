@@ -1,242 +1,201 @@
-// Package main — dudenest-relay CLI
-// Commands: upload, download, info, bench
+// cmd/relay — Dudenest Relay binary (ZT auto-provisioning mode + HTTP server)
+// Usage: relay serve --key <hex> --listen :8086 --config-dir /etc/dudenest --map-store /var/lib/dudenest/maps
+// ZT provisioning: set ZT_ANNOUNCE=true; hub URL from BACKUP_URL env var.
 package main
 
-import "path/filepath"
-
 import (
-	"encoding/hex"
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
+	"log"
+	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
-
-	gdriveconn "github.com/dudenest/dudenest-relay/internal/cloudconn/gdrive"
-	"github.com/dudenest/dudenest-relay/internal/cloudconn/local"
-	megaconn "github.com/dudenest/dudenest-relay/internal/cloudconn/mega"
-	"github.com/dudenest/dudenest-relay/internal/crypto"
-	"github.com/dudenest/dudenest-relay/internal/pipeline"
-	"github.com/dudenest/dudenest-relay/pkg/types"
 )
 
-var (
-	masterKey        string
-	storePath        string
-	cloudPath        string
-	outputPath       string
-	provider         string
-	megaEmail        string
-	megaPassword     string
-	megaBasePath     string
-	gdriveTokenPath  string
-	gdriveSecretPath string
-	gdriveBasePath   string
-	uploadStrategy   string
-)
+const version = "0.1.0"
+
+// relayCreds is persisted to relay_creds.json after bootstrap.
+type relayCreds struct {
+	RelayID     string `json:"relay_id"`
+	RelaySecret string `json:"relay_secret"`
+	RelayURL    string `json:"relay_url"`
+	JwtSecret   string `json:"jwt_secret"`
+	BackupURL   string `json:"backup_url"`
+}
 
 func main() {
-	root := &cobra.Command{
-		Use:   "relay",
-		Short: "dudenest-relay — encrypted block storage with erasure coding",
-	}
-	root.PersistentFlags().StringVar(&masterKey, "key", "", "master key hex (32 bytes) or password")
-	root.PersistentFlags().StringVar(&relayConfigPath, "config", "", "path to relay.json config file (default: ~/.config/dudenest/relay.json)")
-	root.PersistentFlags().StringVar(&storePath, "map-store", "/tmp/dudenest-maps", "path for FileMap storage")
-	root.PersistentFlags().StringVar(&provider, "provider", "auto", "cloud provider: auto, local, mega, gdrive")
-	// local provider flags
-	root.PersistentFlags().StringVar(&cloudPath, "cloud-path", "/tmp/dudenest-blocks", "local cloud provider path")
-	// MEGA flags
-	root.PersistentFlags().StringVar(&megaEmail, "mega-email", "", "MEGA.nz account email")
-	root.PersistentFlags().StringVar(&megaPassword, "mega-password", "", "MEGA.nz account password")
-	root.PersistentFlags().StringVar(&megaBasePath, "mega-path", "dudenest-relay", "MEGA.nz base folder path")
-	// GDrive flags
-	root.PersistentFlags().StringVar(&gdriveTokenPath, "gdrive-token", "", "path to gdrive_<id>.json token file")
-	root.PersistentFlags().StringVar(&gdriveSecretPath, "gdrive-secret", "/root/.config/dudenest/gdrive_client_secret.json", "path to client_secret.json")
-	root.PersistentFlags().StringVar(&gdriveBasePath, "gdrive-path", "dudenest-relay", "Google Drive base folder name")
-	root.PersistentFlags().StringVar(&uploadStrategy, "strategy", types.StrategyChunking, "upload strategy: Chunking, Replica")
-
-	authCmd := &cobra.Command{Use: "auth", Short: "Authenticate cloud provider accounts"}
-	authCmd.AddCommand(authGDriveCmd())
-	root.AddCommand(uploadCmd(), downloadCmd(), infoCmd(), benchCmd(), serveCmd(), serveAuthCmd(), authCmd, setupCmd(), recoverCmd())
-	if err := root.Execute(); err != nil {
-		os.Exit(1)
-	}
+	log.SetFlags(log.Ltime | log.Lshortfile)
+	root := &cobra.Command{Use: "relay", Version: version, SilenceUsage: true}
+	root.AddCommand(serveCmd(), versionCmd())
+	if err := root.Execute(); err != nil { os.Exit(1) }
 }
 
-func getKey() ([]byte, error) {
-	if masterKey == "" {
-		return nil, fmt.Errorf("--key required")
-	}
-	if len(masterKey) == 64 { // hex encoded 32 bytes
-		return hex.DecodeString(masterKey)
-	}
-	key := crypto.DeriveKeyFromPassword(masterKey, "dudenest-relay-salt-v1")
-	return key, nil
-}
-
-func getClouds() ([]types.CloudProvider, error) {
-	// Use --config-dir if set (serve command), otherwise fallback to default
-	configDir := authConfigDir
-	if configDir == "" {
-		home, _ := os.UserHomeDir()
-		configDir = filepath.Join(home, ".config/dudenest")
-	}
-	// If provider is "auto", load all saved tokens
-	if provider == "auto" || provider == "" {
-		return pipeline.LoadAllProviders(configDir, gdriveSecretPath, gdriveBasePath)
-	}
-
-	switch provider {
-	case "mega":
-		if megaEmail == "" || megaPassword == "" {
-			return nil, fmt.Errorf("--mega-email and --mega-password required for mega provider")
-		}
-		p, err := megaconn.New(megaEmail, megaPassword, megaBasePath)
-		if err != nil {
-			return nil, err
-		}
-		return []types.CloudProvider{p}, nil
-	case "gdrive":
-		if gdriveTokenPath == "" {
-			return nil, fmt.Errorf("--gdrive-token required for gdrive provider")
-		}
-		p, err := gdriveconn.New("gdrive:manual", gdriveTokenPath, gdriveSecretPath, gdriveBasePath)
-		if err != nil {
-			return nil, err
-		}
-		return []types.CloudProvider{p}, nil
-	default: // "local"
-		return []types.CloudProvider{local.New(cloudPath)}, nil
-	}
-}
-
-func getPipeline() (*pipeline.Pipeline, error) {
-	key, err := getKey()
-	if err != nil {
-		return nil, err
-	}
-	clouds, err := getClouds()
-	if err != nil {
-		return nil, fmt.Errorf("cloud init: %w", err)
-	}
-	if len(clouds) == 0 {
-		return nil, fmt.Errorf("no cloud providers available")
-	}
-	return pipeline.New(key, clouds, storePath)
-}
-func uploadCmd() *cobra.Command {
+func versionCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "upload <file>",
-		Short: "Chunk, encrypt, erasure-code or replicate and upload a file",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			p, err := getPipeline()
-			if err != nil {
-				return err
-			}
-			start := time.Now()
-			fm, err := p.Upload(args[0], uploadStrategy)
-			if err != nil {
-				return fmt.Errorf("upload failed: %w", err)
-			}
-			elapsed := time.Since(start)
-			fmt.Printf("✅ Uploaded: %s (strategy: %s)\n", fm.Name, fm.Strategy)
-			fmt.Printf("   File ID:  %s\n", fm.FileID)
-			fmt.Printf("   Size:     %d bytes (%.1f MB)\n", fm.Size, float64(fm.Size)/1024/1024)
-			fmt.Printf("   Chunks:   %d × %.0fMB\n", len(fm.Chunks), float64(fm.ChunkSize)/1024/1024)
-			if fm.Strategy == types.StrategyReplica {
-				fmt.Printf("   Replicas: 3 (1 main + 2 backups)\n")
-			} else {
-				fmt.Printf("   Shards:   %d per chunk (6 data + 3 parity)\n", 9)
-			}
-			fmt.Printf("   SHA-256:  %s\n", fm.Hash)
-			fmt.Printf("   Time:     %s (%.1f MB/s)\n", elapsed, float64(fm.Size)/elapsed.Seconds()/1024/1024)
-			return nil
-		},
+		Use: "version", Short: "Print version",
+		Run: func(_ *cobra.Command, _ []string) { fmt.Println(version) },
 	}
 }
 
-func downloadCmd() *cobra.Command {
+func serveCmd() *cobra.Command {
+	var key, listen, configDir, mapStore string
 	cmd := &cobra.Command{
-		Use:   "download <file-id>",
-		Short: "Download, decrypt and reassemble a file",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			p, err := getPipeline()
-			if err != nil {
-				return err
-			}
-			if outputPath == "" {
-				return fmt.Errorf("--output required")
-			}
-			start := time.Now()
-			if err := p.Download(args[0], outputPath); err != nil {
-				return fmt.Errorf("download failed: %w", err)
-			}
-			fmt.Printf("✅ Downloaded: %s (%.1fs)\n", outputPath, time.Since(start).Seconds())
-			return nil
+		Use:   "serve",
+		Short: "Start relay HTTP server",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return serve(key, listen, configDir, mapStore)
 		},
 	}
-	cmd.Flags().StringVar(&outputPath, "output", "", "output file path")
+	cmd.Flags().StringVar(&key, "key", os.Getenv("RELAY_KEY"), "AES-256 encryption key (hex)")
+	cmd.Flags().StringVar(&listen, "listen", "0.0.0.0:8086", "HTTP listen address")
+	cmd.Flags().StringVar(&configDir, "config-dir", "/etc/dudenest", "Config directory (relay_creds.json location)")
+	cmd.Flags().StringVar(&mapStore, "map-store", "/var/lib/dudenest/maps", "File map store directory")
 	return cmd
 }
 
-func infoCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "info",
-		Short: "Show relay configuration",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			key, err := getKey()
-			if err != nil {
-				return err
-			}
-			fmt.Printf("dudenest-relay v0.4.2\n")
-			fmt.Printf("Master key: %s...\n", hex.EncodeToString(key[:4]))
-			fmt.Printf("Provider:   %s\n", provider)
-			if provider == "local" {
-				fmt.Printf("Cloud path: %s\n", cloudPath)
-			}
-			fmt.Printf("Map store:  %s\n", storePath)
-			fmt.Printf("Chunk size: 8 MB\n")
-			fmt.Printf("Strategies: Chunking (6+3 RS), Replica (1+2)\n")
-			return nil
-		},
+func serve(key, listen, configDir, _ string) error {
+	if key == "" { return fmt.Errorf("--key or RELAY_KEY required") }
+	if err := os.MkdirAll(configDir, 0700); err != nil { return fmt.Errorf("mkdir config-dir: %w", err) }
+	credsPath := filepath.Join(configDir, "relay_creds.json")
+	var creds *relayCreds
+
+	if _, err := os.Stat(credsPath); os.IsNotExist(err) {
+		if os.Getenv("ZT_ANNOUNCE") != "true" {
+			return fmt.Errorf("relay_creds.json not found and ZT_ANNOUNCE != true — provision relay first")
+		}
+		backupURL := os.Getenv("BACKUP_URL")
+		if backupURL == "" { backupURL = "https://backup.dudenest.com" }
+		log.Printf("ZT_ANNOUNCE=true — starting provisioning flow via %s", backupURL)
+		var err error
+		creds, err = ztProvision(backupURL, credsPath)
+		if err != nil { return fmt.Errorf("ZT provisioning failed: %w", err) }
+	} else {
+		c, err := loadCreds(credsPath)
+		if err != nil { return fmt.Errorf("load creds: %w", err) }
+		creds = c
+		log.Printf("relay credentials loaded: relay_id=%s relay_url=%s", creds.RelayID, creds.RelayURL)
 	}
+	return runHTTP(listen, creds)
 }
 
-func benchCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "bench <file>",
-		Short: "Benchmark upload+download pipeline",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			p, err := getPipeline()
-			if err != nil {
-				return err
-			}
-			fmt.Printf("Benchmarking %s (strategy: %s)...\n", args[0], uploadStrategy)
-			start := time.Now()
-			fm, err := p.Upload(args[0], uploadStrategy)
-			if err != nil {
-				return err
-			}
-			uploadTime := time.Since(start)
-			tmpOut := "/tmp/dudenest-bench-output"
-			start = time.Now()
-			if err := p.Download(fm.FileID, tmpOut); err != nil {
-				return err
-			}
-			downloadTime := time.Since(start)
-			os.Remove(tmpOut) //nolint:errcheck
-			size := float64(fm.Size) / 1024 / 1024
-			fmt.Printf("\n📊 Benchmark Results:\n")
-			fmt.Printf("   File size:     %.1f MB\n", size)
-			fmt.Printf("   Upload:        %s (%.1f MB/s)\n", uploadTime, size/uploadTime.Seconds())
-			fmt.Printf("   Download:      %s (%.1f MB/s)\n", downloadTime, size/downloadTime.Seconds())
-			fmt.Printf("   Strategy:      %s\n", fm.Strategy)
-			fmt.Printf("   Chunks:        %d\n", len(fm.Chunks))
-			return nil
-		},
+// ── ZT provisioning flow ──────────────────────────────────────────────────────
+
+func ztProvision(backupURL, credsPath string) (*relayCreds, error) {
+	ztID, err := getZtNodeID()
+	if err != nil { return nil, fmt.Errorf("get ZT node ID: %w", err) }
+	log.Printf("ZT node ID: %s", ztID)
+
+	publicIP, err := getPublicIP()
+	if err != nil { return nil, fmt.Errorf("get public IP: %w", err) }
+	log.Printf("public IP: %s", publicIP)
+
+	announceToken := uuid.New().String()
+	if err := postAnnounce(backupURL, ztID, publicIP, announceToken); err != nil {
+		return nil, fmt.Errorf("announce: %w", err)
 	}
+	log.Printf("announced to hub — waiting for ZeroTier authorization and provisioning ...")
+
+	creds, err := pollBootstrap(backupURL, announceToken)
+	if err != nil { return nil, fmt.Errorf("bootstrap: %w", err) }
+
+	data, _ := json.MarshalIndent(creds, "", "  ")
+	if err := os.WriteFile(credsPath, data, 0600); err != nil {
+		return nil, fmt.Errorf("write relay_creds.json: %w", err)
+	}
+	log.Printf("relay_creds.json written: relay_id=%s relay_url=%s", creds.RelayID, creds.RelayURL)
+	return creds, nil
+}
+
+func getZtNodeID() (string, error) {  // zerotier-cli info -> "200 info <nodeID> <ver> <status>"
+	out, err := exec.Command("zerotier-cli", "info").Output()
+	if err != nil { return "", err }
+	parts := strings.Fields(strings.TrimSpace(string(out)))
+	if len(parts) < 3 { return "", fmt.Errorf("unexpected zerotier-cli output: %q", string(out)) }
+	return parts[2], nil
+}
+
+func getPublicIP() (string, error) {
+	resp, err := http.Get("https://api.ipify.org")
+	if err != nil { return "", err }
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	ip := strings.TrimSpace(string(b))
+	if ip == "" { return "", fmt.Errorf("empty response from ipify") }
+	return ip, nil
+}
+
+func postAnnounce(backupURL, ztID, publicIP, announceToken string) error {
+	body, _ := json.Marshal(map[string]string{
+		"zt_id":          ztID,
+		"public_ip":      publicIP,
+		"announce_token": announceToken,
+		"version":        version,
+	})
+	resp, err := http.Post(backupURL+"/relay/announce", "application/json", bytes.NewReader(body))
+	if err != nil { return err }
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("hub announce: %s %s", resp.Status, b)
+	}
+	return nil
+}
+
+func pollBootstrap(backupURL, announceToken string) (*relayCreds, error) {
+	url := backupURL + "/relay/bootstrap?announce_token=" + announceToken
+	deadline := time.Now().Add(10 * time.Minute)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url)
+		if err != nil { log.Printf("bootstrap poll: %v — retry in 10s", err); time.Sleep(10 * time.Second); continue }
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		switch resp.StatusCode {
+		case http.StatusOK:
+			var creds relayCreds
+			if err := json.Unmarshal(body, &creds); err != nil { return nil, fmt.Errorf("decode creds: %w", err) }
+			return &creds, nil
+		case http.StatusAccepted:  // 202 — provisioner not yet done
+			log.Printf("bootstrap: pending — retry in 10s")
+			time.Sleep(10 * time.Second)
+		case http.StatusGone:  // 410 — token already used
+			return nil, fmt.Errorf("announce_token already consumed")
+		case http.StatusNotFound:
+			return nil, fmt.Errorf("announce_token invalid or expired")
+		default:
+			log.Printf("bootstrap: unexpected %d — retry in 10s", resp.StatusCode)
+			time.Sleep(10 * time.Second)
+		}
+	}
+	return nil, fmt.Errorf("bootstrap timed out after 10 minutes")
+}
+
+// ── HTTP server ───────────────────────────────────────────────────────────────
+
+func runHTTP(listen string, creds *relayCreds) error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
+			"status":    "ok",
+			"relay_id":  creds.RelayID,
+			"relay_url": creds.RelayURL,
+		})
+	})
+	log.Printf("relay HTTP listening on %s (relay_id=%s relay_url=%s)", listen, creds.RelayID, creds.RelayURL)
+	return http.ListenAndServe(listen, mux)
+}
+
+func loadCreds(path string) (*relayCreds, error) {
+	data, err := os.ReadFile(path)
+	if err != nil { return nil, err }
+	var c relayCreds
+	return &c, json.Unmarshal(data, &c)
 }
