@@ -91,7 +91,7 @@ Wants=zerotier-one.service
 Type=simple
 User=root
 EnvironmentFile=$CONFIG_DIR/relay.env
-ExecStart=$RELAY_BIN serve --key \${RELAY_KEY} --listen 0.0.0.0:8086 --config-dir $CONFIG_DIR --map-store $DATA_DIR/maps
+ExecStart=$RELAY_BIN serve --key \${RELAY_KEY} --listen 0.0.0.0:8086 --config-dir $CONFIG_DIR --map-store $DATA_DIR/maps --client-secret $CONFIG_DIR/client_secret.json
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -99,6 +99,17 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
+
+# ── client_secret.json (required for GDrive OAuth) ────────────────────────────
+if [[ ! -f "$CONFIG_DIR/client_secret.json" ]]; then
+  info "client_secret.json not found — downloading from hub ..."
+  if ! curl -fsSL "$HUB_URL/relay/client-secret" -o "$CONFIG_DIR/client_secret.json" 2>/dev/null; then
+    info "⚠️  Could not download client_secret.json from hub."
+    info "    Copy your client_secret.json to $CONFIG_DIR/client_secret.json and restart relay."
+    echo '{"type":"service_account"}' > "$CONFIG_DIR/client_secret.json"  # placeholder — relay will start in degraded mode
+  fi
+  chmod 600 "$CONFIG_DIR/client_secret.json"
+fi
 
 # ── start services ────────────────────────────────────────────────────────────
 systemctl daemon-reload
