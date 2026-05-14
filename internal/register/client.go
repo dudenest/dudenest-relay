@@ -9,6 +9,7 @@
 //
 // ZT auto-provisioning (added 2026-05-11): Announce() + BootstrapPayload for no-domain relay setup.
 // Flow: relay → POST /relay/announce → relay-provisioner authorizes ZT → POST /relay/bootstrap → relay has creds.
+// jwt_secret persistence (added 2026-05-14): PollBootstrap writes jwt_secret.txt; LoadJWTSecret reads it at startup.
 package register
 
 import (
@@ -26,6 +27,8 @@ import (
 	"runtime/debug"
 	"strings"
 	"time"
+
+	"github.com/dudenest/dudenest-relay/internal/auth"
 )
 
 type Credentials struct {
@@ -166,8 +169,10 @@ func LoadAnnounceToken(configDir string) (string, error) {
 // ClearAnnounceToken removes the announce_token temp file after successful bootstrap.
 func ClearAnnounceToken(configDir string) { os.Remove(filepath.Join(configDir, announceTokenFile)) } //nolint:errcheck
 
-// WriteBootstrapCreds writes relay_creds.json from bootstrap payload and returns credentials.
-// Does NOT write jwt_secret — caller must write it to relay.env separately.
+const jwtSecretFile = "jwt_secret.txt"
+
+// WriteBootstrapCreds writes relay_creds.json and jwt_secret.txt from bootstrap payload.
+// jwt_secret.txt is read at startup via LoadJWTSecret to restore the signing key across restarts.
 func WriteBootstrapCreds(configDir string, p *BootstrapPayload) (*Credentials, error) {
 	creds := &Credentials{RelayID: p.RelayID, RelaySecret: p.RelaySecret}
 	data, _ := json.Marshal(creds)
@@ -175,12 +180,28 @@ func WriteBootstrapCreds(configDir string, p *BootstrapPayload) (*Credentials, e
 	if err := os.WriteFile(filepath.Join(configDir, credsFile), data, 0o600); err != nil {
 		return nil, fmt.Errorf("write creds: %w", err)
 	}
+	if p.JWTSecret != "" { // persist jwt_secret for next restart
+		if err := os.WriteFile(filepath.Join(configDir, jwtSecretFile), []byte(p.JWTSecret), 0o600); err != nil {
+			log.Printf("register: ⚠️  failed to write jwt_secret.txt: %v", err)
+		}
+	}
 	log.Printf("register: ✅ bootstrap complete (relay_id=%s relay_url=%s)", p.RelayID, p.RelayURL)
 	return creds, nil
 }
 
+// LoadJWTSecret reads jwt_secret.txt and updates the auth package signing key.
+// Call at startup after configDir is known, before any JWT validation occurs.
+func LoadJWTSecret(configDir string) {
+	data, err := os.ReadFile(filepath.Join(configDir, jwtSecretFile))
+	if err != nil { return } // file missing = not yet bootstrapped, use env var (dev-secret or JWT_SECRET)
+	s := strings.TrimSpace(string(data))
+	if s == "" { return }
+	auth.SetJWTSecret(s)
+	log.Printf("register: jwt_secret loaded from %s", jwtSecretFile)
+}
+
 // PollBootstrap polls hub GET /relay/bootstrap?announce_token=<token> until credentials arrive (relay-pull arch).
-// Runs in a goroutine; writes relay_creds.json and sets RELAY_ID/RELAY_SECRET/JWT_SECRET env vars on success.
+// Runs in a goroutine; writes relay_creds.json + jwt_secret.txt, updates signing key immediately on success.
 func PollBootstrap(configDir, hubURL, announceToken string) {
 	url := hubURL + "/relay/bootstrap?announce_token=" + announceToken
 	deadline := time.Now().Add(10 * time.Minute)
@@ -198,6 +219,7 @@ func PollBootstrap(configDir, hubURL, announceToken string) {
 			os.Setenv("RELAY_SECRET", p.RelaySecret) //nolint:errcheck
 			os.Setenv("JWT_SECRET", p.JWTSecret)     //nolint:errcheck
 			if p.BackupURL != "" { os.Setenv("BACKUP_URL", p.BackupURL) } //nolint:errcheck
+			if p.JWTSecret != "" { auth.SetJWTSecret(p.JWTSecret) } // update signing key immediately (no restart needed)
 			ClearAnnounceToken(configDir)
 			log.Printf("register: ✅ bootstrapped (relay_id=%s relay_url=%s)", p.RelayID, p.RelayURL)
 			return

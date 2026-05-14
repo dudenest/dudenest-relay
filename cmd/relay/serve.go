@@ -97,7 +97,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 		webCfg = browser.BuildWebOAuthConfig(id, secret, cfg.OAuth.WebRedirectURL)
 		fmt.Println("relay serve: web OAuth client loaded (GDRIVE_WEB_CLIENT_ID)")
 	}
-	maybeAnnounce(authConfigDir, cfg.Backup.URL) // ZT provisioning: announce to hub if no creds and ZT_ANNOUNCE=true
+	register.LoadJWTSecret(authConfigDir)         // ZT bootstrap: restore jwt_secret from jwt_secret.txt if present
+	maybeAnnounce(authConfigDir, cfg.Backup.URL)  // ZT provisioning: announce to hub if no creds and ZT_ANNOUNCE=true
 	wsHub := ws.NewHub()
 	bm := blockmap.New(storePath) // blockmap for file_count in /auth/providers
 	authSrv := browser.NewServer(cfg.Server.Display, cfg.Server.Listen, browser.BuildAuthURL(cfg2), cfg2, webCfg, authConfigDir, wsHub, bm, cfg.OAuth.CallbackPort, cfg.NoVNC.BackendAddr, cfg.SessionTimeout())
