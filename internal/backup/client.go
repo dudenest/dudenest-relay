@@ -24,6 +24,7 @@ type Client struct {
 	url       string
 	relayID   string
 	secret    string
+	version   string // relay binary version, reported in every ping
 	enc       *crypto.Encryptor
 	configDir string
 	debounce  time.Duration // client-side debounce before sending snapshot
@@ -34,9 +35,10 @@ type Client struct {
 // New creates a backup client.
 // backupURL: base URL of dudenest-backup (e.g. "https://backup.dudenest.com").
 // debounce: client-side delay before sending snapshot (e.g. 3*time.Second).
+// version: relay binary version string reported in every ping (e.g. "v0.5.9").
 // RELAY_ID and RELAY_SECRET are still read from env — set by relay registration.
 // Returns nil if backupURL or credentials are missing — backup silently disabled.
-func New(masterKey []byte, configDir, backupURL string, debounce time.Duration) *Client {
+func New(masterKey []byte, configDir, backupURL string, debounce time.Duration, version string) *Client {
 	relayID := os.Getenv("RELAY_ID")
 	secret := os.Getenv("RELAY_SECRET")
 	if backupURL == "" || relayID == "" || secret == "" {
@@ -48,8 +50,8 @@ func New(masterKey []byte, configDir, backupURL string, debounce time.Duration) 
 		log.Printf("backup: crypto init: %v — backup disabled", err)
 		return nil
 	}
-	log.Printf("backup: client ready → %s (relay_id=%s)", backupURL, relayID)
-	return &Client{url: backupURL, relayID: relayID, secret: secret, enc: enc, configDir: configDir, debounce: debounce}
+	log.Printf("backup: client ready → %s (relay_id=%s version=%s)", backupURL, relayID, version)
+	return &Client{url: backupURL, relayID: relayID, secret: secret, version: version, enc: enc, configDir: configDir, debounce: debounce}
 }
 
 // Trigger schedules a backup with 3s client-side debounce.
@@ -108,18 +110,20 @@ func (c *Client) UpdateUserID(userID string) error {
 	return nil
 }
 
-// Ping updates last_seen_at on the backup server. Safe to call on nil.
+// Ping updates last_seen_at and relay_version on the backup server. Safe to call on nil.
 func (c *Client) Ping() error {
 	if c == nil { return nil }
-	req, err := http.NewRequest(http.MethodPost, c.url+"/relay/ping", nil)
+	body, _ := json.Marshal(map[string]string{"relay_version": c.version})
+	req, err := http.NewRequest(http.MethodPost, c.url+"/relay/ping", bytes.NewReader(body))
 	if err != nil { return fmt.Errorf("ping: new request: %w", err) }
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Relay-ID", c.relayID)
 	req.Header.Set("X-Relay-Secret", c.secret)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil { return fmt.Errorf("ping: http post: %w", err) }
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK { return fmt.Errorf("ping: status %d", resp.StatusCode) }
-	log.Printf("backup: ping ok (relay_id=%s)", c.relayID)
+	log.Printf("backup: ping ok (relay_id=%s version=%s)", c.relayID, c.version)
 	return nil
 }
 

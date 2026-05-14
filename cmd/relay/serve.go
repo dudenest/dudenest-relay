@@ -114,8 +114,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 		go standbyRegOnce.Do(func() {
 			if _, err2 := register.RegisterOnceWithUserID(authConfigDir, claims.Sub, cfg.Backup.URL, cfg.Backup.PublicURL); err2 != nil {
 				log.Printf("⚠️  standby register: %v", err2)
-			} else {
-				log.Printf("✅ standby register: relay registered with backup (user=%s relay_url=%s)", claims.Sub, cfg.Backup.PublicURL)
+				return
+			}
+			log.Printf("✅ standby register: relay registered with backup (user=%s relay_url=%s)", claims.Sub, cfg.Backup.PublicURL)
+			key, _ := getKey() // start ping loop even in standby — updates last_seen_at + relay_version
+			if bc := backup.New(key, authConfigDir, cfg.Backup.URL, cfg.Debounce(), Version); bc != nil {
+				bc.StartPingLoop(5 * time.Minute)
+				log.Printf("✅ standby: ping loop started (version=%s)", Version)
 			}
 		})
 	}
@@ -139,7 +144,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		os.Setenv("RELAY_SECRET", creds.RelaySecret) //nolint:errcheck
 		ownerFromCreds = creds.UserID                // may be empty for old relay_creds.json (will be set on first request)
 	}
-	bc := backup.New(key, authConfigDir, cfg.Backup.URL, cfg.Debounce()) // nil if URL/RELAY_ID/RELAY_SECRET not set
+	bc := backup.New(key, authConfigDir, cfg.Backup.URL, cfg.Debounce(), Version) // nil if URL/RELAY_ID/RELAY_SECRET not set
 	if bc != nil {
 		bc.StartPingLoop(5 * time.Minute)                          // keep last_seen_at current
 		if err2 := bc.UpdateURL(cfg.Backup.PublicURL); err2 != nil { // sync relay_url in CRDB at every startup
@@ -250,7 +255,7 @@ func (lr *lazyRegistrar) tryRegister(userID string) {
 				}
 			}
 		}
-		bc := backup.New(lr.masterKey, lr.configDir, lr.backupURL, lr.debounce)
+		bc := backup.New(lr.masterKey, lr.configDir, lr.backupURL, lr.debounce, Version)
 		if bc != nil {
 			lr.fs.setBackup(bc)
 			log.Printf("✅ lazy register: backup enabled (relay_id=%s owner=%s)", creds.RelayID, ownerID)
