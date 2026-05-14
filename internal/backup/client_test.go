@@ -22,7 +22,7 @@ func testMasterKey() []byte {
 // TestNewNoEnv: returns nil when credentials absent.
 func TestNewNoEnv(t *testing.T) {
 	os.Unsetenv("RELAY_ID"); os.Unsetenv("RELAY_SECRET")
-	c := New(testMasterKey(), t.TempDir(), "https://backup.example.com", 3*time.Second)
+	c := New(testMasterKey(), t.TempDir(), "https://backup.example.com", 3*time.Second, "test")
 	if c != nil { t.Fatal("expected nil client when RELAY_ID/RELAY_SECRET not set") }
 }
 
@@ -36,7 +36,7 @@ func TestTriggerNilSafe(t *testing.T) {
 func TestNewWithEnv(t *testing.T) {
 	t.Setenv("RELAY_ID", "test-relay")
 	t.Setenv("RELAY_SECRET", "test-secret")
-	c := New(testMasterKey(), t.TempDir(), "http://localhost:9999", 3*time.Second)
+	c := New(testMasterKey(), t.TempDir(), "http://localhost:9999", 3*time.Second, "test")
 	if c == nil { t.Fatal("expected non-nil client") }
 }
 
@@ -52,7 +52,7 @@ func TestTriggerTimerReset(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("RELAY_ID", "r-debounce")
 	t.Setenv("RELAY_SECRET", "s-debounce")
-	c := New(testMasterKey(), t.TempDir(), srv.URL, 3*time.Second)
+	c := New(testMasterKey(), t.TempDir(), srv.URL, 3*time.Second, "test")
 	if c == nil { t.Fatal("client nil") }
 	// Manually fire with short 50ms debounce to verify timer reset logic.
 	shortDebounce := 50 * time.Millisecond
@@ -85,7 +85,7 @@ func TestSendEncryptsAndPosts(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("RELAY_ID", "relay-abc")
 	t.Setenv("RELAY_SECRET", "secret-xyz")
-	c := New(testMasterKey(), t.TempDir(), srv.URL, 3*time.Second)
+	c := New(testMasterKey(), t.TempDir(), srv.URL, 3*time.Second, "test")
 	if c == nil { t.Fatal("client nil") }
 	fm := &types.FileMap{FileID: "f1", Name: "test.txt", Size: 42}
 	if err := c.send([]*types.FileMap{fm}); err != nil {
