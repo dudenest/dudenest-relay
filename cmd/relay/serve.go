@@ -112,9 +112,14 @@ func runServe(cmd *cobra.Command, args []string) error {
 		claims, err := auth.ValidateJWT(token)
 		if err != nil || claims == nil || claims.Sub == "" { return }
 		go standbyRegOnce.Do(func() {
-			if _, err2 := register.RegisterOnceWithUserID(authConfigDir, claims.Sub, cfg.Backup.URL, cfg.Backup.PublicURL); err2 != nil {
+			creds2, err2 := register.RegisterOnceWithUserID(authConfigDir, claims.Sub, cfg.Backup.URL, cfg.Backup.PublicURL)
+			if err2 != nil {
 				log.Printf("⚠️  standby register: %v", err2)
 				return
+			}
+			if creds2 != nil { // set env so backup.New() can read credentials
+				os.Setenv("RELAY_ID", creds2.RelayID)         //nolint:errcheck
+				os.Setenv("RELAY_SECRET", creds2.RelaySecret) //nolint:errcheck
 			}
 			log.Printf("✅ standby register: relay registered with backup (user=%s relay_url=%s)", claims.Sub, cfg.Backup.PublicURL)
 			key, _ := getKey() // start ping loop even in standby — updates last_seen_at + relay_version
