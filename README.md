@@ -1,6 +1,6 @@
 # dudenest-relay
 
-![Version](https://img.shields.io/badge/Version-v0.5.7-blue) ![Status](https://img.shields.io/badge/Status-Pre--Alpha-orange) ![Language](https://img.shields.io/badge/Language-Go-00ADD8) ![License](https://img.shields.io/badge/License-Apache%202.0-green) ![Hardware](https://img.shields.io/badge/Hardware-Raspberry%20Pi%20Zero%202W%2B-red) ![Last Update](https://img.shields.io/badge/Update-2026--05--08-lightgrey)
+[![Version](https://img.shields.io/github/v/release/dudenest/dudenest-relay?color=blue&label=Version)](https://github.com/dudenest/dudenest-relay/releases/latest) [![Release Date](https://img.shields.io/github/release-date/dudenest/dudenest-relay?color=lightgrey&label=Released)](https://github.com/dudenest/dudenest-relay/releases/latest) ![Status](https://img.shields.io/badge/Status-Pre--Alpha-orange) ![Language](https://img.shields.io/badge/Language-Go-00ADD8) ![License](https://img.shields.io/badge/License-Apache%202.0-green) ![Hardware](https://img.shields.io/badge/Hardware-Raspberry%20Pi%20Zero%202W%2B-red)
 
 **The privacy-preserving bridge between your Dudenest app and your cloud storage accounts.**
 
@@ -16,11 +16,10 @@ Your Home Network
 │   │  Relay Daemon│                │  Your Cloud Accounts │   │
 │   │  (this repo) │◄──────────────►│  Google Drive        │   │
 │   │              │                │  MEGA                │   │
-│   │  • Chunking  │                │  OneDrive            │   │
-│   │  • AES-256   │                │  pCloud              │   │
-│   │  • Reed-     │                │  Filen...            │   │
-│   │    Solomon   │                └──────────────────────┘   │
-│   │  • Block Map │                                           │
+│   │  • Replica   │                │  OneDrive            │   │
+│   │    storage   │                │  pCloud              │   │
+│   │  • FileMap   │                │  Filen...            │   │
+│   │    (SQLite)  │                └──────────────────────┘   │
 │   │  • Thumbnails│                                           │
 │   └──────────────┘                                           │
 │          │                                                    │
@@ -36,13 +35,12 @@ Your Home Network
 
 | Function | Description |
 |----------|-------------|
-| **Chunking** | Split files into 5-10 MB blocks |
-| **Encryption** | AES-256-GCM per-block with HKDF-SHA256 derived keys |
-| **Erasure Coding** | Reed-Solomon 6+3: survive loss of 3 cloud accounts |
-| **Block Map** | SQLite index: which block is on which account |
+| **Replica Storage** | Full file stored as-is on up to 2 cloud accounts (1 per provider email) |
+| **Failover** | Download tries Main replica first; falls back to Backup replica on error |
+| **FileMap** | SQLite index: file_id → list of `scheme:email:path` locations |
 | **Thumbnail Cache** | Local thumbnails for instant gallery scrolling |
 | **Prefetch** | Smart prediction of what to pre-download while scrolling |
-| **Cloud Connectors** | rclone-based adapters for each cloud provider |
+| **Cloud Connectors** | Adapters for each cloud provider (Google Drive, etc.) |
 | **Tunnel** | WireGuard via Headscale for secure app connection |
 
 ## Supported Cloud Providers
@@ -146,32 +144,30 @@ See `configs/relay.json.example` for a fully-annotated example.
 ```
 cmd/relay/          # Entry point (main.go)
 internal/
-├── blockstore/     # Chunking engine
-├── crypto/         # AES-256-GCM, HKDF
-├── erasure/        # Reed-Solomon wrappers
+├── pipeline/       # Replica upload/download engine (current default)
+├── blockmap/       # SQLite FileMap index (file→provider locations)
+├── cloudconn/      # Cloud provider connectors (Google Drive, ...)
 ├── thumbnail/      # Thumbnail generation (libvips/ffmpeg)
-├── blockmap/       # SQLite block index
-├── cloudconn/      # Cloud provider connectors
-│   ├── gdrive/     # Google Drive
-│   ├── mega/       # MEGA
-│   ├── onedrive/   # OneDrive
-│   ├── pcloud/     # pCloud
-│   └── filen/      # Filen
-├── tunnel/         # WireGuard / Headscale
 ├── prefetch/       # Smart prefetch engine
 ├── api/            # Local REST API (for app)
-└── config/         # Config loading
+├── auth/           # JWT validation, relay token (L2/L3 security)
+├── backup/         # Backup client (ping loop, FileMap sync)
+├── register/       # Relay registration with backup.dudenest.com
+├── config/         # Config loading (relay.json)
+├── blockstore/     # Legacy chunking engine (unused, Replica is default)
+├── crypto/         # Legacy AES-256-GCM/HKDF (unused in Replica mode)
+└── erasure/        # Legacy Reed-Solomon wrappers (unused in Replica mode)
 pkg/
-├── reedsolomon/    # Reed-Solomon implementation wrappers
+├── reedsolomon/    # Legacy Reed-Solomon implementation
 └── types/          # Shared types
 ```
 
 ## Security
 
-- **Zero-Knowledge**: Decryption keys and file maps never leave the Relay. Dudenest SaaS servers only see encrypted, erasure-coded chunks.
+- **Privacy-First**: File content never passes through Dudenest SaaS servers — files go directly from Relay to your cloud accounts.
 - **API Hardening**: All Relay API endpoints (except `/health` and noVNC static assets) require JWT authentication.
+- **3-Layer Security**: L1 network isolation (ZeroTier/Headscale), L2 JWT `sub` == owner check, L3 HMAC `relay_token` signed by backup service.
 - **Shared Secret**: Relay validates tokens issued by `dudenest-backend` using a shared `JWT_SECRET`.
-- **Per-block keys**: Each block has a unique HKDF-derived key.
 - **Memory safety**: Go's memory model prevents buffer overflows.
 
 ## Environment Variables
@@ -206,29 +202,4 @@ Apache License 2.0
 
 ## Changelog
 
-### v0.5.7 — 2026-05-08 — Security Hardening + Per-User Routing
-
-- 🔒 **3-Layer Security**: L1 network isolation, L2 JWT sub owner check, L3 HMAC relay_token (signed by backup service)
-- 🔍 **Security Logging**: L2/L3 rejections logged with `sub`, `owner`, `path` for diagnostics
-- 🔄 **Relay URL Routing**: relay registers its public HTTPS URL (`RELAY_PUBLIC_URL`) in CRDB; Flutter fetches per-user relay URL automatically from API — no manual config
-- 🔁 **Startup CRDB Sync**: relay syncs `user_id` and `relay_url` to CRDB on every restart
-- 📡 **Ping Loop**: relay sends `POST /relay/ping` every 5 minutes → `last_seen_at` visible in Flutter "My Relays"
-- 📸 **Initial Backup**: first backup snapshot sent immediately after registration
-- 🐛 **Bootstrap Deadlock Fix**: L3 skipped when `ownerUserID=""` → new relay registers without relay_token (which it can't have yet)
-
-### v0.5.0 — 2026-05-06 — Config System
-- ⚙️ **relay.json**: All hardcoded values moved to `~/.config/dudenest/relay.json` (stdlib `encoding/json`, no external deps)
-- 🔧 **`--config` flag**: `relay --config <path>` overrides default config path
-- 📦 **Priority chain**: CLI flag > env var > relay.json > built-in defaults
-- 🔑 **Lazy Registration**: Relay registers with backup on first valid JWT request (`sync.Once`), using `user_id` from JWT `Sub` claim
-
-### v0.4.1 — 2026-04-12 — Security & Stability
-- 🔐 **JWT Enforcement**: All Relay API endpoints now strictly require HS256 JWT authorization.
-- 🚀 **v0.4.1 Release**: Official cross-compiled binaries for Linux x86_64 and ARM64.
-- 🔧 **Service Restoration**: Successfully restored service on `relay-poc` after `pve101` host crash.
-
-### v0.4.0 — 2026-04-09 — Browser Auth & VNC UX
-- 🖥️ **noVNC Browser Auth**: Implemented integrated `/vnc` proxy for OAuth flow without leaving the app.
-- ✂️ **VNC Crop**: Optimized VNC view with 115px top crop to hide browser chrome and title bar.
-- 🐛 **Port 8085 Fix**: Resolved `cbCancel` lifecycle bug affecting authentication sessions.
-- 🌐 **HTTPS Protocol Forwarding**: Correctly handle `X-Forwarded-Proto: https` for Cloudflare tunnels.
+See [CHANGELOG.md](CHANGELOG.md) for the full version history.
