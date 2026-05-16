@@ -1,6 +1,8 @@
 # dudenest-relay
 
-[![Version](https://img.shields.io/github/v/release/dudenest/dudenest-relay?color=blue&label=Version)](https://github.com/dudenest/dudenest-relay/releases/latest) [![Release Date](https://img.shields.io/github/release-date/dudenest/dudenest-relay?color=lightgrey&label=Released)](https://github.com/dudenest/dudenest-relay/releases/latest) ![Status](https://img.shields.io/badge/Status-Pre--Alpha-orange) ![Language](https://img.shields.io/badge/Language-Go-00ADD8) ![License](https://img.shields.io/badge/License-Apache%202.0-green) ![Hardware](https://img.shields.io/badge/Hardware-Raspberry%20Pi%20Zero%202W%2B-red)
+[![Version](https://img.shields.io/github/v/release/dudenest/dudenest-relay?color=blue&label=Version)](https://github.com/dudenest/dudenest-relay/releases/latest) [![Release Date](https://img.shields.io/github/release-date/dudenest/dudenest-relay?color=lightgrey&label=Released)](https://github.com/dudenest/dudenest-relay/releases/latest) ![Last Update](https://img.shields.io/badge/Update-2026--05--17-orange) ![Status](https://img.shields.io/badge/Status-Pre--Alpha-orange) ![Language](https://img.shields.io/badge/Language-Go-00ADD8) ![License](https://img.shields.io/badge/License-Apache%202.0-green) ![Hardware](https://img.shields.io/badge/Hardware-Raspberry%20Pi%20Zero%202W%2B-red) ![Deployment](https://img.shields.io/badge/Deployment-VM%20%2F%20RPi%20only-blue)
+
+> ⚠️ **2026-05-16**: Swarm deployment has been **removed** — `dudenest-relay` runs only as VM or Raspberry Pi binary now. See [`docs/RELAY-OPS.md`](docs/RELAY-OPS.md) for details.
 
 **The privacy-preserving bridge between your Dudenest app and your cloud storage accounts.**
 
