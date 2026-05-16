@@ -1,12 +1,38 @@
 # dudenest-relay — Operational Guide
 
-**Last Updated**: 2026-04-25 (s270)
+**Last Updated**: 2026-05-16
 **Author**: Dariusz Porczyński
-**Status**: ✅ Relay deployed on NETOL Docker Swarm — standby mode, awaiting first OAuth
+**Status**: ✅ Relay deployed as VM / Raspberry Pi only (binary from GitHub Releases)
 
 ---
 
-## Architecture Overview
+## ⚠️ DEPRECATED: Swarm deployment (2026-05-16)
+
+**Decision**: Swarm-hosted `dudenest-relay_relay` service was **removed** on 2026-05-16.
+
+**Why**: Alpine Docker container has no Chromium / X server → cannot run OAuth interactive flow. Service was structurally unable to authorize GDrive accounts and crashed on startup when env vars were unset (`GDRIVE_WEB_CLIENT_ID=""`). Multiple incidents traced to phantom replicas and overlay routing complexity with no operational benefit.
+
+**Removed**:
+- Swarm service `dudenest-relay_relay` (`docker stack rm dudenest-relay`)
+- `deploy/relay-stack.yml`
+- `.github/workflows/deploy.yml` (Swarm deploy)
+- `docker` + `deploy-swarm` jobs from `build.yml`
+- Step "Deploy dudenest-relay" from `dudenest-infra/disaster-recovery.yml`
+
+**Retained** (current architecture — VM/RPi only):
+- Binary build (Linux amd64/arm64/armv7, Darwin, Windows) — `.github/workflows/build.yml`
+- GitHub Releases — `https://github.com/dudenest/dudenest-relay/releases/latest`
+- `deploy-relay-poc` job → SSH to VM `relay-poc` (10.51.1.119) via ZeroTier
+- `scripts/install.sh` — one-command setup for new VMs/RPi (Caddy + relay binary + systemd)
+- HAProxy `relay.dudenest.com` routing → VM relay-poc:8086 (unchanged, no Swarm involvement)
+
+**Future**: SaaS-managed relay (hosted by us in cloud, multi-tenant) is **planned** but on hold. Will require dedicated container image with Chromium baked in, or alternative non-interactive OAuth (Method A: Flutter-side OAuth — already supported by current relay binary). Re-evaluate when there's user demand.
+
+The sections below describe the OLD Swarm architecture for historical reference. **DO NOT USE** for current deployments — see `scripts/install.sh` and `deploy/relay-poc/` for active deployment paths.
+
+---
+
+## Architecture Overview (DEPRECATED — historical reference)
 
 ```
 Flutter app
