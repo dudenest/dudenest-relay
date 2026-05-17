@@ -37,19 +37,24 @@ func (c *Cache) Exists(fileID string) bool {
 	return err == nil
 }
 
+// Dims holds the original image dimensions extracted during thumbnail generation.
+type Dims struct{ Width, Height int }
+
 // Generate reads srcPath (image file), creates a square thumbnail, writes to dstPath as JPEG.
-// Returns error if srcPath is not a supported image format.
-func Generate(srcPath, dstPath string) error {
+// Returns original image dimensions and error. Returns zero Dims if srcPath is not a supported image format.
+func Generate(srcPath, dstPath string) (Dims, error) {
 	f, err := os.Open(srcPath)
-	if err != nil { return err }
+	if err != nil { return Dims{}, err }
 	defer f.Close()
 	src, _, err := image.Decode(f)
-	if err != nil { return err } // unsupported format → caller skips thumbnail
+	if err != nil { return Dims{}, err }
+	b := src.Bounds()
+	dims := Dims{Width: b.Dx(), Height: b.Dy()}
 	thumb := resizeSquare(src, ThumbSize)
 	out, err := os.Create(dstPath)
-	if err != nil { return err }
+	if err != nil { return dims, err }
 	defer out.Close()
-	return jpeg.Encode(out, thumb, &jpeg.Options{Quality: 78})
+	return dims, jpeg.Encode(out, thumb, &jpeg.Options{Quality: 78})
 }
 
 // resizeSquare crops src to a centered square then downscales to size×size.

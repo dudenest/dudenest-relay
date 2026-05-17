@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -270,6 +271,28 @@ func (lr *lazyRegistrar) tryRegister(userID string) {
 	})
 }
 
+// dimsPath returns the path to the .dims sidecar file for a given fileID.
+func (fs *fileServer) dimsPath(fileID string) string {
+	return filepath.Join(filepath.Dir(fs.thumbCache.Path(fileID)), fileID+".dims")
+}
+
+// readDims reads cached original image dimensions from a .dims sidecar file.
+// Returns zero Dims if file does not exist or is malformed.
+func (fs *fileServer) readDims(fileID string) thumbnail.Dims {
+	data, err := os.ReadFile(fs.dimsPath(fileID))
+	if err != nil { return thumbnail.Dims{} }
+	parts := strings.Fields(string(data))
+	if len(parts) != 2 { return thumbnail.Dims{} }
+	w, _ := strconv.Atoi(parts[0])
+	h, _ := strconv.Atoi(parts[1])
+	return thumbnail.Dims{Width: w, Height: h}
+}
+
+// writeDims writes original image dimensions to a .dims sidecar file.
+func (fs *fileServer) writeDims(fileID string, d thumbnail.Dims) {
+	os.WriteFile(fs.dimsPath(fileID), []byte(strconv.Itoa(d.Width)+" "+strconv.Itoa(d.Height)), 0o644) //nolint:errcheck
+}
+
 // handleList handles GET /files — returns list of uploaded FileMaps.
 func (fs *fileServer) handleList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -287,10 +310,16 @@ func (fs *fileServer) handleList(w http.ResponseWriter, r *http.Request) {
 		Size    int64     `json:"size"`
 		Hash    string    `json:"hash"`
 		Created time.Time `json:"created"`
+		Width   int       `json:"width,omitempty"`  // original image width (0 = unknown/non-image)
+		Height  int       `json:"height,omitempty"` // original image height
 	}
 	summaries := make([]fileSummary, 0, len(maps))
 	for _, fm := range maps {
-		summaries = append(summaries, fileSummary{FileID: fm.FileID, Name: fm.Name, Size: fm.Size, Hash: fm.Hash, Created: fm.Created})
+		d := fs.readDims(fm.FileID)
+		summaries = append(summaries, fileSummary{
+			FileID: fm.FileID, Name: fm.Name, Size: fm.Size, Hash: fm.Hash, Created: fm.Created,
+			Width: d.Width, Height: d.Height,
+		})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"files": summaries}) //nolint:errcheck
@@ -362,7 +391,9 @@ func (fs *fileServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if fs.thumbCache != nil { // generate thumbnail while local file still exists
-		thumbnail.Generate(tmpPath, fs.thumbCache.Path(fm.FileID)) //nolint:errcheck
+		if dims, err2 := thumbnail.Generate(tmpPath, fs.thumbCache.Path(fm.FileID)); err2 == nil && dims.Width > 0 {
+			fs.writeDims(fm.FileID, dims) // cache original dimensions for GET /files
+		}
 	}
 	if maps, err2 := fs.p.ListFiles(); err2 == nil { // trigger backup after successful upload
 		fs.backup().Trigger(maps)
@@ -426,10 +457,12 @@ func (fs *fileServer) handleThumbnail(w http.ResponseWriter, r *http.Request, fi
 			jsonErr(w, "download for thumbnail: "+err.Error(), 500)
 			return
 		}
-		if err := thumbnail.Generate(tmp.Name(), thumbPath); err != nil {
-			jsonErr(w, "generate thumbnail: "+err.Error(), 500)
+		dims, err2 := thumbnail.Generate(tmp.Name(), thumbPath)
+		if err2 != nil {
+			jsonErr(w, "generate thumbnail: "+err2.Error(), 500)
 			return
 		}
+		if dims.Width > 0 { fs.writeDims(fileID, dims) } // cache dims on lazy generation
 	}
 	data, err := os.ReadFile(thumbPath)
 	if err != nil {
