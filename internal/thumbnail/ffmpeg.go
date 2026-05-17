@@ -98,3 +98,9 @@ func (c *Cache) MediumExists(fileID string) bool {
 
 // LQIPPath returns the cache path for the LQIP base64 data-URI of fileID.
 func (c *Cache) LQIPPath(fileID string) string { return filepath.Join(c.dir, fileID+".lqip") }
+
+// LQIPExists reports whether a LQIP data-URI is cached.
+func (c *Cache) LQIPExists(fileID string) bool {
+	_, err := os.Stat(c.LQIPPath(fileID))
+	return err == nil
+}

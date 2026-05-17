@@ -44,6 +44,17 @@ type Dims struct {
 	TakenAt       *time.Time // EXIF DateTimeOriginal; nil if absent or non-image
 }
 
+// ReadDims returns the pixel dimensions of an image file without generating a thumbnail.
+func ReadDims(srcPath string) (Dims, error) {
+	f, err := os.Open(srcPath)
+	if err != nil { return Dims{}, err }
+	defer f.Close()
+	src, _, err := image.Decode(f)
+	if err != nil { return Dims{}, err }
+	b := src.Bounds()
+	return Dims{Width: b.Dx(), Height: b.Dy(), TakenAt: exifDate(srcPath)}, nil
+}
+
 // Generate reads srcPath (image file), creates a square thumbnail, writes to dstPath as JPEG.
 // Returns image metadata (dimensions + EXIF date) and error.
 func Generate(srcPath, dstPath string) (Dims, error) {

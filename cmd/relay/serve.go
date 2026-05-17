@@ -347,7 +347,18 @@ func (fs *fileServer) handleList(w http.ResponseWriter, r *http.Request) {
 	summaries := make([]fileSummary, 0, len(maps))
 	for _, fm := range maps {
 		d := fs.readDims(fm.FileID)
+		// Fast path: read dims from cached medium preview if .dims sidecar is missing
+		if d.Width == 0 && fs.thumbCache.MediumExists(fm.FileID) {
+			if md, err2 := thumbnail.ReadDims(fs.thumbCache.MediumPath(fm.FileID)); err2 == nil && md.Width > 0 {
+				d.Width = md.Width; d.Height = md.Height
+				fs.writeDims(fm.FileID, d) // persist so next list is instant
+			}
+		}
 		lqipData, _ := os.ReadFile(fs.thumbCache.LQIPPath(fm.FileID))
+		// Kick off lazy sidecar generation for files missing dims or LQIP (async, non-blocking)
+		if d.Width == 0 || len(lqipData) == 0 {
+			go fs.lazyGenSidecars(fm.FileID, fm.Name)
+		}
 		summaries = append(summaries, fileSummary{
 			FileID: fm.FileID, Name: fm.Name, Size: fm.Size, Hash: fm.Hash, Created: fm.Created,
 			Width: d.Width, Height: d.Height, TakenAt: d.TakenAt, LQIP: string(lqipData),
@@ -456,7 +467,10 @@ func (fs *fileServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 			if !isVideo {
 				thumbnail.GenerateMedium(tmpPath, fs.thumbCache.MediumPath(fm.FileID)) //nolint:errcheck
 			}
-			if lqip := thumbnail.LQIPBase64(thumbPath); lqip != "" {
+			// LQIP from medium preview (aspect-preserving) — fallback to square thumbnail
+			lqipSrc := fs.thumbCache.MediumPath(fm.FileID)
+			if !fs.thumbCache.MediumExists(fm.FileID) { lqipSrc = thumbPath }
+			if lqip := thumbnail.LQIPBase64(lqipSrc); lqip != "" {
 				os.WriteFile(fs.thumbCache.LQIPPath(fm.FileID), []byte(lqip), 0o644) //nolint:errcheck
 			}
 		}
@@ -505,6 +519,7 @@ func (fs *fileServer) handleDownload(w http.ResponseWriter, r *http.Request, fil
 }
 
 // handleThumbnail serves a cached 200×200 JPEG thumbnail; lazy-generates on first request.
+// Supports both images (Generate) and videos (VideoThumbnail via ffmpeg).
 func (fs *fileServer) handleThumbnail(w http.ResponseWriter, r *http.Request, fileID string) {
 	if fileID == "" {
 		http.NotFound(w, r)
@@ -512,7 +527,10 @@ func (fs *fileServer) handleThumbnail(w http.ResponseWriter, r *http.Request, fi
 	}
 	thumbPath := fs.thumbCache.Path(fileID)
 	if !fs.thumbCache.Exists(fileID) { // lazy-generate: download full file once, then cache
-		tmp, err := os.CreateTemp("", "relay-thumb-*")
+		fm, _ := fs.p.GetFileMap(fileID)
+		ext := ""
+		if fm != nil { ext = strings.ToLower(filepath.Ext(fm.Name)) }
+		tmp, err := os.CreateTemp("", "relay-thumb-*"+ext) // preserve extension so ffmpeg detects format
 		if err != nil {
 			jsonErr(w, "tmp file: "+err.Error(), 500)
 			return
@@ -523,12 +541,23 @@ func (fs *fileServer) handleThumbnail(w http.ResponseWriter, r *http.Request, fi
 			jsonErr(w, "download for thumbnail: "+err.Error(), 500)
 			return
 		}
-		dims, err2 := thumbnail.Generate(tmp.Name(), thumbPath)
-		if err2 != nil {
-			jsonErr(w, "generate thumbnail: "+err2.Error(), 500)
-			return
+		if isVideoExt(ext) {
+			if err2 := thumbnail.VideoThumbnail(tmp.Name(), thumbPath); err2 != nil {
+				jsonErr(w, "video thumbnail: "+err2.Error(), 500)
+				return
+			}
+		} else {
+			dims, err2 := thumbnail.Generate(tmp.Name(), thumbPath)
+			if err2 != nil {
+				jsonErr(w, "generate thumbnail: "+err2.Error(), 500)
+				return
+			}
+			if dims.Width > 0 { fs.writeDims(fileID, dims) } // cache dims on lazy generation
 		}
-		if dims.Width > 0 { fs.writeDims(fileID, dims) } // cache dims on lazy generation
+		// Generate LQIP lazily after thumbnail is ready (best-effort, non-blocking)
+		name := fileID
+		if fm != nil { name = fm.Name }
+		go fs.lazyGenSidecars(fileID, name)
 	}
 	data, err := os.ReadFile(thumbPath)
 	if err != nil {
@@ -754,6 +783,77 @@ func (fs *fileServer) writeMeta(fileID string, m fileMeta) error {
 }
 
 func fileExists(path string) bool { _, err := os.Stat(path); return err == nil }
+
+func isVideoExt(ext string) bool {
+	switch ext {
+	case ".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".3gp", ".wmv", ".flv":
+		return true
+	}
+	return false
+}
+
+// lazyGenMu deduplicates concurrent lazyGenSidecars calls for the same fileID.
+var lazyGenMu sync.Map
+
+// lazyGenSidecars downloads the original file once and generates any missing sidecars:
+// thumbnail (images+videos), dims, medium preview (800px), and LQIP.
+// Called from handleList and handleThumbnail; safe to call concurrently — deduplicated.
+func (fs *fileServer) lazyGenSidecars(fileID, nameOrExt string) {
+	if _, loaded := lazyGenMu.LoadOrStore(fileID, true); loaded { return }
+	defer lazyGenMu.Delete(fileID)
+
+	ext := strings.ToLower(filepath.Ext(nameOrExt))
+	isVideo := isVideoExt(ext)
+	thumbPath := fs.thumbCache.Path(fileID)
+	mediumPath := fs.thumbCache.MediumPath(fileID)
+	lqipPath := fs.thumbCache.LQIPPath(fileID)
+
+	needThumb  := !fs.thumbCache.Exists(fileID)
+	needDims   := !fileExists(fs.dimsPath(fileID))
+	needMedium := !isVideo && !fs.thumbCache.MediumExists(fileID)
+	needLQIP   := !fs.thumbCache.LQIPExists(fileID)
+	if !needThumb && !needDims && !needMedium && !needLQIP { return }
+
+	tmp, err := os.CreateTemp("", "relay-lazy-*"+ext)
+	if err != nil { log.Printf("⚠️  lazyGenSidecars %s: tmp: %v", fileID, err); return }
+	tmp.Close()
+	defer os.Remove(tmp.Name())
+	if err := fs.p.Download(fileID, tmp.Name()); err != nil {
+		log.Printf("⚠️  lazyGenSidecars %s: download: %v", fileID, err)
+		return
+	}
+
+	if needThumb || needDims {
+		if isVideo {
+			if needThumb {
+				if err2 := thumbnail.VideoThumbnail(tmp.Name(), thumbPath); err2 != nil {
+					log.Printf("⚠️  lazyGenSidecars %s: video thumb: %v", fileID, err2)
+				}
+			}
+		} else {
+			dims, err2 := thumbnail.Generate(tmp.Name(), thumbPath)
+			if err2 != nil {
+				log.Printf("⚠️  lazyGenSidecars %s: generate: %v", fileID, err2)
+			} else if dims.Width > 0 {
+				fs.writeDims(fileID, dims)
+			}
+		}
+	}
+	if needMedium && !isVideo {
+		if err2 := thumbnail.GenerateMedium(tmp.Name(), mediumPath); err2 != nil {
+			log.Printf("⚠️  lazyGenSidecars %s: medium: %v", fileID, err2)
+		}
+	}
+	if needLQIP {
+		// Prefer medium preview (aspect-preserving); fall back to thumbnail (square)
+		lqipSrc := mediumPath
+		if !fs.thumbCache.MediumExists(fileID) { lqipSrc = thumbPath }
+		if lqip := thumbnail.LQIPBase64(lqipSrc); lqip != "" {
+			os.WriteFile(lqipPath, []byte(lqip), 0o644) //nolint:errcheck
+		}
+	}
+	log.Printf("✅ lazyGenSidecars: %s done", fileID)
+}
 
 func jsonErr(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
