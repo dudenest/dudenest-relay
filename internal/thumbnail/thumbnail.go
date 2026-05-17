@@ -12,6 +12,7 @@ import (
 	_ "image/png" // register png decoder
 	"os"
 	"path/filepath"
+	"time"
 )
 
 const ThumbSize = 200 // square thumbnail side in pixels
@@ -37,11 +38,14 @@ func (c *Cache) Exists(fileID string) bool {
 	return err == nil
 }
 
-// Dims holds the original image dimensions extracted during thumbnail generation.
-type Dims struct{ Width, Height int }
+// Dims holds image metadata extracted during thumbnail generation.
+type Dims struct {
+	Width, Height int
+	TakenAt       *time.Time // EXIF DateTimeOriginal; nil if absent or non-image
+}
 
 // Generate reads srcPath (image file), creates a square thumbnail, writes to dstPath as JPEG.
-// Returns original image dimensions and error. Returns zero Dims if srcPath is not a supported image format.
+// Returns image metadata (dimensions + EXIF date) and error.
 func Generate(srcPath, dstPath string) (Dims, error) {
 	f, err := os.Open(srcPath)
 	if err != nil { return Dims{}, err }
@@ -49,7 +53,7 @@ func Generate(srcPath, dstPath string) (Dims, error) {
 	src, _, err := image.Decode(f)
 	if err != nil { return Dims{}, err }
 	b := src.Bounds()
-	dims := Dims{Width: b.Dx(), Height: b.Dy()}
+	dims := Dims{Width: b.Dx(), Height: b.Dy(), TakenAt: exifDate(srcPath)}
 	thumb := resizeSquare(src, ThumbSize)
 	out, err := os.Create(dstPath)
 	if err != nil { return dims, err }

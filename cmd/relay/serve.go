@@ -276,21 +276,32 @@ func (fs *fileServer) dimsPath(fileID string) string {
 	return filepath.Join(filepath.Dir(fs.thumbCache.Path(fileID)), fileID+".dims")
 }
 
-// readDims reads cached original image dimensions from a .dims sidecar file.
+// readDims reads cached image metadata from a .dims sidecar file.
+// Format: "width height taken_at_unix" (taken_at_unix=0 means absent).
 // Returns zero Dims if file does not exist or is malformed.
 func (fs *fileServer) readDims(fileID string) thumbnail.Dims {
 	data, err := os.ReadFile(fs.dimsPath(fileID))
 	if err != nil { return thumbnail.Dims{} }
 	parts := strings.Fields(string(data))
-	if len(parts) != 2 { return thumbnail.Dims{} }
+	if len(parts) < 2 { return thumbnail.Dims{} }
 	w, _ := strconv.Atoi(parts[0])
 	h, _ := strconv.Atoi(parts[1])
-	return thumbnail.Dims{Width: w, Height: h}
+	d := thumbnail.Dims{Width: w, Height: h}
+	if len(parts) >= 3 {
+		if unix, err2 := strconv.ParseInt(parts[2], 10, 64); err2 == nil && unix > 0 {
+			t := time.Unix(unix, 0)
+			d.TakenAt = &t
+		}
+	}
+	return d
 }
 
-// writeDims writes original image dimensions to a .dims sidecar file.
+// writeDims writes image metadata to a .dims sidecar file.
 func (fs *fileServer) writeDims(fileID string, d thumbnail.Dims) {
-	os.WriteFile(fs.dimsPath(fileID), []byte(strconv.Itoa(d.Width)+" "+strconv.Itoa(d.Height)), 0o644) //nolint:errcheck
+	unix := int64(0)
+	if d.TakenAt != nil { unix = d.TakenAt.Unix() }
+	content := strconv.Itoa(d.Width) + " " + strconv.Itoa(d.Height) + " " + strconv.FormatInt(unix, 10)
+	os.WriteFile(fs.dimsPath(fileID), []byte(content), 0o644) //nolint:errcheck
 }
 
 // handleList handles GET /files — returns list of uploaded FileMaps.
@@ -305,20 +316,21 @@ func (fs *fileServer) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type fileSummary struct {
-		FileID  string    `json:"file_id"`
-		Name    string    `json:"name"`
-		Size    int64     `json:"size"`
-		Hash    string    `json:"hash"`
-		Created time.Time `json:"created"`
-		Width   int       `json:"width,omitempty"`  // original image width (0 = unknown/non-image)
-		Height  int       `json:"height,omitempty"` // original image height
+		FileID  string     `json:"file_id"`
+		Name    string     `json:"name"`
+		Size    int64      `json:"size"`
+		Hash    string     `json:"hash"`
+		Created time.Time  `json:"created"`
+		Width   int        `json:"width,omitempty"`    // original image width (0 = unknown/non-image)
+		Height  int        `json:"height,omitempty"`   // original image height
+		TakenAt *time.Time `json:"taken_at,omitempty"` // EXIF DateTimeOriginal; null if absent
 	}
 	summaries := make([]fileSummary, 0, len(maps))
 	for _, fm := range maps {
 		d := fs.readDims(fm.FileID)
 		summaries = append(summaries, fileSummary{
 			FileID: fm.FileID, Name: fm.Name, Size: fm.Size, Hash: fm.Hash, Created: fm.Created,
-			Width: d.Width, Height: d.Height,
+			Width: d.Width, Height: d.Height, TakenAt: d.TakenAt,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
