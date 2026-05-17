@@ -141,6 +141,15 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("thumbnail cache: %w", err)
 	}
+	metaDir := filepath.Join(authConfigDir, "meta")
+	if err2 := os.MkdirAll(metaDir, 0o750); err2 != nil {
+		return fmt.Errorf("meta dir: %w", err2)
+	}
+	go func() { // non-blocking: install ffmpeg in background at startup
+		if err2 := thumbnail.EnsureFFmpeg(); err2 != nil {
+			log.Printf("⚠️  ffmpeg: %v", err2)
+		}
+	}()
 	key, _ := getKey() // key already validated in getPipeline(), safe to ignore error here
 	var ownerFromCreds string // Layer 2: relay owner known at startup if relay was previously registered
 	if creds, err2 := register.EnsureRegistered(authConfigDir, cfg.Backup.URL, cfg.Backup.PublicURL); err2 != nil { // auto-register with backup on first start
@@ -172,7 +181,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	mux := http.NewServeMux()
 	authSrv.RegisterRoutes(mux)
 	mux.Handle("/ws", wsHub) // WebSocket: Flutter connects for relay→Flutter auth requests
-	fs := &fileServer{p: p, thumbCache: tc, backupClient: bc, maxUploadBytes: cfg.MaxUploadBytes()}
+	fs := &fileServer{p: p, thumbCache: tc, backupClient: bc, maxUploadBytes: cfg.MaxUploadBytes(), metaDir: metaDir}
 	lr := &lazyRegistrar{configDir: authConfigDir, masterKey: key, fs: fs, backupURL: cfg.Backup.URL, publicURL: cfg.Backup.PublicURL, debounce: cfg.Debounce()}
 	if ownerFromCreds != "" { lr.setOwner(ownerFromCreds) } // preload owner from creds (set before ListenAndServe, no races)
 	mux.HandleFunc("/relay/bootstrap", makeBootstrapHandler(authConfigDir)) // ZT provisioner delivers creds via ZT network
@@ -196,6 +205,15 @@ type fileServer struct {
 	backupMu       sync.RWMutex
 	backupClient   *backup.Client // nil = backup disabled; may be set lazily after JWT registration
 	maxUploadBytes int64          // max multipart upload size (from config)
+	metaDir        string         // directory for per-file meta.json (favorites, albums, captions)
+}
+
+// fileMeta stores user-editable metadata per file (favorites, albums, location, caption).
+type fileMeta struct {
+	Favorite bool     `json:"favorite,omitempty"`
+	Albums   []string `json:"albums,omitempty"`
+	Location string   `json:"location,omitempty"`
+	Caption  string   `json:"caption,omitempty"`
 }
 
 func (fs *fileServer) backup() *backup.Client {
@@ -324,13 +342,15 @@ func (fs *fileServer) handleList(w http.ResponseWriter, r *http.Request) {
 		Width   int        `json:"width,omitempty"`    // original image width (0 = unknown/non-image)
 		Height  int        `json:"height,omitempty"`   // original image height
 		TakenAt *time.Time `json:"taken_at,omitempty"` // EXIF DateTimeOriginal; null if absent
+		LQIP    string     `json:"lqip,omitempty"`     // data:image/jpeg;base64,... tiny blur placeholder
 	}
 	summaries := make([]fileSummary, 0, len(maps))
 	for _, fm := range maps {
 		d := fs.readDims(fm.FileID)
+		lqipData, _ := os.ReadFile(fs.thumbCache.LQIPPath(fm.FileID))
 		summaries = append(summaries, fileSummary{
 			FileID: fm.FileID, Name: fm.Name, Size: fm.Size, Hash: fm.Hash, Created: fm.Created,
-			Width: d.Width, Height: d.Height, TakenAt: d.TakenAt,
+			Width: d.Width, Height: d.Height, TakenAt: d.TakenAt, LQIP: string(lqipData),
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -345,6 +365,10 @@ func (fs *fileServer) handleFile(w http.ResponseWriter, r *http.Request) {
 		fs.handleUpload(w, r)
 	case strings.HasSuffix(path, "/thumbnail") && r.Method == http.MethodGet:
 		fs.handleThumbnail(w, r, strings.TrimSuffix(path, "/thumbnail"))
+	case strings.HasSuffix(path, "/preview") && r.Method == http.MethodGet:
+		fs.handlePreview(w, r, strings.TrimSuffix(path, "/preview"))
+	case strings.HasSuffix(path, "/meta") && (r.Method == http.MethodGet || r.Method == http.MethodPatch):
+		fs.handleMeta(w, r, strings.TrimSuffix(path, "/meta"))
 	case strings.HasSuffix(path, "/map") && r.Method == http.MethodGet:
 		fs.handleGetMap(w, r, strings.TrimSuffix(path, "/map"))
 	case path != "" && r.Method == http.MethodGet:
@@ -397,14 +421,44 @@ func (fs *fileServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 	tmp.Close()
 	strategy := r.FormValue("strategy")
 	if strategy == "" { strategy = types.StrategyReplica } // default: replica (full file, no encryption)
+	// HEIC/HEIF conversion: convert to JPEG before upload so all clients can display the file.
+	ext := strings.ToLower(filepath.Ext(header.Filename))
+	if ext == ".heic" || ext == ".heif" || ext == ".hif" {
+		base := strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename))
+		convertedPath := filepath.Join(tmpDir, base+".jpg")
+		if err2 := thumbnail.ConvertHEIC(tmpPath, convertedPath); err2 == nil {
+			tmpPath = convertedPath
+			header.Filename = base + ".jpg"
+			ext = ".jpg"
+		} else {
+			log.Printf("⚠️  HEIC conversion: %v (uploading as-is)", err2)
+		}
+	}
 	fm, err := fs.p.Upload(tmpPath, strategy)
 	if err != nil {
 		jsonErr(w, "upload: "+err.Error(), 500)
 		return
 	}
-	if fs.thumbCache != nil { // generate thumbnail while local file still exists
-		if dims, err2 := thumbnail.Generate(tmpPath, fs.thumbCache.Path(fm.FileID)); err2 == nil && dims.Width > 0 {
-			fs.writeDims(fm.FileID, dims) // cache original dimensions for GET /files
+	if fs.thumbCache != nil {
+		isVideo := ext == ".mp4" || ext == ".mov" || ext == ".avi" || ext == ".mkv" || ext == ".webm" || ext == ".m4v" || ext == ".3gp" || ext == ".wmv" || ext == ".flv"
+		thumbPath := fs.thumbCache.Path(fm.FileID)
+		if isVideo {
+			if err2 := thumbnail.VideoThumbnail(tmpPath, thumbPath); err2 != nil {
+				log.Printf("⚠️  video thumbnail: %v", err2)
+			}
+		} else {
+			if dims, err2 := thumbnail.Generate(tmpPath, thumbPath); err2 == nil && dims.Width > 0 {
+				fs.writeDims(fm.FileID, dims)
+			}
+		}
+		// Medium preview (800px) and LQIP generated from temp file while it still exists
+		if fs.thumbCache.Exists(fm.FileID) {
+			if !isVideo {
+				thumbnail.GenerateMedium(tmpPath, fs.thumbCache.MediumPath(fm.FileID)) //nolint:errcheck
+			}
+			if lqip := thumbnail.LQIPBase64(thumbPath); lqip != "" {
+				os.WriteFile(fs.thumbCache.LQIPPath(fm.FileID), []byte(lqip), 0o644) //nolint:errcheck
+			}
 		}
 	}
 	if maps, err2 := fs.p.ListFiles(); err2 == nil { // trigger backup after successful upload
@@ -507,6 +561,15 @@ func (fs *fileServer) handleDelete(w http.ResponseWriter, r *http.Request, fileI
 func requireAuthWithReg(lr *lazyRegistrar, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
+		// ?token= query param: fallback for web video player (HTMLVideoElement can't send custom headers).
+		// Requests using this path skip Layer 3 (no X-Relay-Token available in URL-only auth).
+		queryTokenAuth := false
+		if authHeader == "" {
+			if tok := r.URL.Query().Get("token"); tok != "" {
+				authHeader = "Bearer " + tok
+				queryTokenAuth = true
+			}
+		}
 		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
 			jsonErr(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -529,7 +592,7 @@ func requireAuthWithReg(lr *lazyRegistrar, next http.HandlerFunc) http.HandlerFu
 		// Only enforced when owner is known — prevents bootstrap deadlock for old relays without user_id in CRDB.
 		// Old relays: ownerUserID="" on startup → L3 skipped → tryRegister fires → sets ownerUserID + updates CRDB
 		//             → Flutter gets relay_token from /user/relays → next request includes token → L3 enforced.
-		if lr != nil {
+		if lr != nil && !queryTokenAuth { // Layer 3 skipped for ?token= requests (web video: no X-Relay-Token in URL)
 			if ownerID := lr.getOwner(); ownerID != "" {
 				if relaySecret := os.Getenv("RELAY_SECRET"); relaySecret != "" {
 					rtoken := r.Header.Get("X-Relay-Token")
@@ -551,7 +614,7 @@ func requireAuthWithReg(lr *lazyRegistrar, next http.HandlerFunc) http.HandlerFu
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, PATCH, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Relay-Token")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -619,6 +682,78 @@ func isCredentialError(err error) bool {
 		strings.Contains(s, "oauth2: cannot fetch token") ||
 		strings.Contains(s, "no cloud providers available")
 }
+
+// handlePreview serves an 800px medium JPEG preview; lazy-generates from the original if missing.
+// Falls back to the 200px thumbnail for video files or unsupported image formats.
+func (fs *fileServer) handlePreview(w http.ResponseWriter, r *http.Request, fileID string) {
+	if fileID == "" { http.NotFound(w, r); return }
+	mediumPath := fs.thumbCache.MediumPath(fileID)
+	if !fs.thumbCache.MediumExists(fileID) {
+		tmp, err := os.CreateTemp("", "relay-preview-*")
+		if err != nil { jsonErr(w, "tmp: "+err.Error(), 500); return }
+		tmp.Close()
+		defer os.Remove(tmp.Name())
+		if err := fs.p.Download(fileID, tmp.Name()); err != nil { jsonErr(w, "download: "+err.Error(), 500); return }
+		if err := thumbnail.GenerateMedium(tmp.Name(), mediumPath); err != nil {
+			// Not a supported image (e.g. video) — fall back to thumbnail; generate video thumb if missing
+			thumbPath := fs.thumbCache.Path(fileID)
+			if !fs.thumbCache.Exists(fileID) {
+				if vtErr := thumbnail.VideoThumbnail(tmp.Name(), thumbPath); vtErr != nil {
+					jsonErr(w, "no preview available", http.StatusNotFound)
+					return
+				}
+			}
+			mediumPath = thumbPath
+		} else {
+			// Medium generated — also write LQIP from it
+			if lqipPath := fs.thumbCache.LQIPPath(fileID); !fileExists(lqipPath) {
+				if lqip := thumbnail.LQIPBase64(fs.thumbCache.Path(fileID)); lqip != "" {
+					os.WriteFile(lqipPath, []byte(lqip), 0o644) //nolint:errcheck
+				}
+			}
+		}
+	}
+	data, err := os.ReadFile(mediumPath)
+	if err != nil { jsonErr(w, "read preview: "+err.Error(), 500); return }
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Write(data) //nolint:errcheck
+}
+
+// handleMeta handles GET/PATCH /files/{id}/meta for favorites, albums, location, caption.
+func (fs *fileServer) handleMeta(w http.ResponseWriter, r *http.Request, fileID string) {
+	if fileID == "" { http.NotFound(w, r); return }
+	switch r.Method {
+	case http.MethodGet:
+		m := fs.readMeta(fileID)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(m) //nolint:errcheck
+	case http.MethodPatch:
+		var patch fileMeta
+		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil { jsonErr(w, "bad json: "+err.Error(), 400); return }
+		if err := fs.writeMeta(fileID, patch); err != nil { jsonErr(w, "write meta: "+err.Error(), 500); return }
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(patch) //nolint:errcheck
+	}
+}
+
+func (fs *fileServer) metaPath(fileID string) string { return filepath.Join(fs.metaDir, fileID+".json") }
+
+func (fs *fileServer) readMeta(fileID string) fileMeta {
+	data, err := os.ReadFile(fs.metaPath(fileID))
+	if err != nil { return fileMeta{} }
+	var m fileMeta
+	json.Unmarshal(data, &m) //nolint:errcheck
+	return m
+}
+
+func (fs *fileServer) writeMeta(fileID string, m fileMeta) error {
+	data, err := json.Marshal(m)
+	if err != nil { return err }
+	return os.WriteFile(fs.metaPath(fileID), data, 0o644)
+}
+
+func fileExists(path string) bool { _, err := os.Stat(path); return err == nil }
 
 func jsonErr(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
