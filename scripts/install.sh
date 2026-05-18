@@ -27,6 +27,7 @@ DATA_DIR="/var/lib/dudenest"
 ZT_NETWORK="${ZT_NETWORK:-932df01efb1ebd71}"
 BACKUP_URL="${BACKUP_URL:-https://backup.dudenest.com}"
 DUDE_USER="${DUDE_USER:-dude}"
+# DUDE_UID is preferred (matches the reference relay-poc) but skipped if already taken
 DUDE_UID="${DUDE_UID:-1000}"
 VNC_DISPLAY=":99"
 VNC_PORT="5999"
@@ -115,13 +116,20 @@ fi
 ok "All required packages installed (browser: $BROWSER_BIN → /usr/local/bin/chromium)"
 
 # ── step 2: dude user + groups ───────────────────────────────────────────────
-step "Step 2/9: User '$DUDE_USER' (uid $DUDE_UID)"
+step "Step 2/9: User '$DUDE_USER'"
 if ! id "$DUDE_USER" >/dev/null 2>&1; then
-  useradd -m -u "$DUDE_UID" -s /bin/bash -G audio,video,plugdev "$DUDE_USER"
-  ok "Created user $DUDE_USER"
+  # Prefer the canonical UID 1000 but fall back to whatever useradd picks if it's taken
+  if getent passwd "$DUDE_UID" >/dev/null; then
+    OWNER=$(getent passwd "$DUDE_UID" | cut -d: -f1)
+    warn "UID $DUDE_UID already used by '$OWNER' — letting useradd pick the next free UID"
+    useradd -m -s /bin/bash -G audio,video,plugdev "$DUDE_USER"
+  else
+    useradd -m -u "$DUDE_UID" -s /bin/bash -G audio,video,plugdev "$DUDE_USER"
+  fi
+  ok "Created user $DUDE_USER (uid $(id -u "$DUDE_USER"))"
 else
   usermod -aG audio,video,plugdev "$DUDE_USER" 2>/dev/null || true
-  ok "User $DUDE_USER exists"
+  ok "User $DUDE_USER exists (uid $(id -u "$DUDE_USER"))"
 fi
 
 # ── step 3: LightDM autologin → Xfce on :0 ──────────────────────────────────
