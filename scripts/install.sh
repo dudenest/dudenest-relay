@@ -68,7 +68,7 @@ export DEBIAN_FRONTEND=noninteractive
 DISTRO_ID="${ID:-unknown}"
 APT_PKGS=(
   ca-certificates curl wget openssl jq gnupg
-  xorg xserver-xorg lightdm
+  xorg xserver-xorg lightdm accountsservice
   xfce4 xfce4-session xfce4-settings xfwm4 xfdesktop4
   xfce4-terminal  # satisfies xorg's `x-terminal-emulator` dep so gnome-terminal isn't pulled in
   tigervnc-standalone-server tigervnc-common tigervnc-tools
@@ -141,8 +141,12 @@ autologin-user=$DUDE_USER
 autologin-user-timeout=0
 user-session=xfce
 EOF
+systemctl set-default graphical.target >/dev/null 2>&1 || true
 systemctl enable lightdm >/dev/null 2>&1 || true
-ok "LightDM autologin configured → $DUDE_USER (xfce)"
+# `systemctl enable lightdm` only sets "indirect" via display-manager.service alias — must also
+# start it explicitly here so the console is in graphical mode without rebooting the VM.
+systemctl start lightdm 2>/dev/null || warn "lightdm failed to start — check: journalctl -u lightdm"
+ok "LightDM autologin configured → $DUDE_USER (xfce), service started"
 
 # ── step 4: dude home — xstartup, kiosk script, Chromium autostart ──────────
 step "Step 4/9: Desktop files (Xfce + Chromium autostart on :0)"
@@ -162,32 +166,31 @@ EOF
 chown "$DUDE_USER:$DUDE_USER" "$DUDE_HOME/.vnc/xstartup"
 chmod 755 "$DUDE_HOME/.vnc/xstartup"
 
+# Kiosk Chromium runs as ROOT via dudenest-kiosk.service (see Step 8) instead of via dude's
+# Xfce autostart. Google Chrome on Ubuntu 24.04 hits a trap-int3 self-abort when launched
+# under an unprivileged user (independent of --no-sandbox / userns settings) but works fine
+# under root. Lightdm autologin → Xfce on :0 still happens — it brings up the Xorg server
+# and authorizes root via xhost; the kiosk service then opens Chromium on the same display.
+cat > "$DUDE_HOME/.config/autostart/xhost-allow-root.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Allow root to draw on :0 (for kiosk Chromium)
+Exec=/usr/bin/xhost +SI:localuser:root
+X-GNOME-Autostart-enabled=true
+EOF
+chown "$DUDE_USER:$DUDE_USER" "$DUDE_HOME/.config/autostart/xhost-allow-root.desktop"
+# Keep the helper script around for documentation / debugging — service launches Chromium directly.
 cat > "$DUDE_HOME/kiosk-novnc.sh" <<EOF
 #!/bin/bash
-# Chromium showing noVNC viewer of display :99 — only on the local screen (:0).
-# Skip when this autostart fires inside the TigerVNC :99 session (would loop).
-[ "\$DISPLAY" = ":0" ] || exit 0
-# /usr/local/bin/chromium is a symlink installed by install.sh — points at chromium (Debian)
-# or google-chrome-stable (Ubuntu). --user-data-dir isolates from relay's OAuth Chromium on :99.
+# Manual kiosk launcher (debug). dudenest-kiosk.service uses these flags too.
 exec /usr/local/bin/chromium \\
-  --no-sandbox \\
-  --no-first-run \\
-  --disable-infobars \\
-  --user-data-dir=$DUDE_HOME/.config/chromium-novnc \\
+  --no-sandbox --no-first-run --disable-infobars \\
+  --user-data-dir=/var/lib/dudenest/kiosk-chrome \\
   --start-maximized \\
   http://localhost:$NOVNC_PORT/dudenest.html
 EOF
 chown "$DUDE_USER:$DUDE_USER" "$DUDE_HOME/kiosk-novnc.sh"
 chmod 755 "$DUDE_HOME/kiosk-novnc.sh"
-
-cat > "$DUDE_HOME/.config/autostart/chromium-novnc.desktop" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Chromium noVNC viewer
-Exec=$DUDE_HOME/kiosk-novnc.sh
-X-GNOME-Autostart-enabled=true
-EOF
-chown "$DUDE_USER:$DUDE_USER" "$DUDE_HOME/.config/autostart/chromium-novnc.desktop"
 
 # Disable xfwm4 compositing on :99 (smoother Chromium-in-VNC rendering)
 cat > "$DUDE_HOME/xfwm4_nocomp.sh" <<'EOF'
@@ -410,8 +413,31 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
+# Kiosk Chromium as root on display :0. dude's Xfce autostart issues `xhost +SI:localuser:root`,
+# which authorizes this service to draw on the lightdm Xorg server.
+# `ExecStartPre` polls for both the X socket and lightdm's auth file — handles boot ordering
+# without coupling to graphical-session.target (which isn't reliable when no user is logged in
+# via a real greeter).
+mkdir -p /var/lib/dudenest/kiosk-chrome
+cat > /etc/systemd/system/dudenest-kiosk.service <<EOF
+[Unit]
+Description=Dudenest noVNC kiosk — Chromium on :0 showing http://localhost:$NOVNC_PORT/dudenest.html
+After=lightdm.service novnc.service
+Wants=lightdm.service novnc.service
+[Service]
+Type=simple
+User=root
+Environment=DISPLAY=:0 XAUTHORITY=/var/run/lightdm/root/:0
+ExecStartPre=/bin/bash -c 'for i in {1..30}; do [[ -S /tmp/.X11-unix/X0 && -f /var/run/lightdm/root/:0 ]] && exit 0; sleep 2; done; exit 1'
+ExecStart=/usr/local/bin/chromium --no-sandbox --no-first-run --disable-infobars --user-data-dir=/var/lib/dudenest/kiosk-chrome --start-maximized http://localhost:$NOVNC_PORT/dudenest.html
+Restart=on-failure
+RestartSec=8
+[Install]
+WantedBy=multi-user.target
+EOF
+
 systemctl daemon-reload
-for svc in tigervnc-99 novnc dudenest-relay dudenest-relay-update.timer; do
+for svc in tigervnc-99 novnc dudenest-relay dudenest-relay-update.timer dudenest-kiosk; do
   systemctl enable "$svc" >/dev/null 2>&1
 done
 # Replace legacy relay.service (older relay-poc setup) with the new dudenest-relay.service.
@@ -426,7 +452,8 @@ systemctl restart tigervnc-99 || warn "tigervnc-99 failed to start — check: jo
 systemctl restart novnc       || warn "novnc failed to start"
 systemctl restart dudenest-relay || warn "dudenest-relay failed to start"
 systemctl restart dudenest-relay-update.timer
-ok "All 4 systemd units enabled and started"
+systemctl restart dudenest-kiosk 2>/dev/null || warn "dudenest-kiosk failed (Chromium kiosk on :0)"
+ok "All 5 systemd units enabled and started"
 
 # ── step 9: ZT auto-provisioning wait ────────────────────────────────────────
 step "Step 9/9: ZeroTier hub auto-provisioning"
