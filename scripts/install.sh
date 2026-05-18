@@ -68,7 +68,7 @@ export DEBIAN_FRONTEND=noninteractive
 DISTRO_ID="${ID:-unknown}"
 APT_PKGS=(
   ca-certificates curl wget openssl jq gnupg
-  xorg xserver-xorg lightdm accountsservice
+  xorg xserver-xorg lightdm accountsservice dbus-x11
   xfce4 xfce4-session xfce4-settings xfwm4 xfdesktop4
   xfce4-terminal  # satisfies xorg's `x-terminal-emulator` dep so gnome-terminal isn't pulled in
   tigervnc-standalone-server tigervnc-common tigervnc-tools
@@ -429,7 +429,7 @@ Type=simple
 User=root
 Environment=DISPLAY=:0 XAUTHORITY=/var/run/lightdm/root/:0
 ExecStartPre=/bin/bash -c 'for i in {1..30}; do [[ -S /tmp/.X11-unix/X0 && -f /var/run/lightdm/root/:0 ]] && exit 0; sleep 2; done; exit 1'
-ExecStart=/usr/local/bin/chromium --no-sandbox --no-first-run --disable-infobars --user-data-dir=/var/lib/dudenest/kiosk-chrome --start-maximized http://localhost:$NOVNC_PORT/dudenest.html
+ExecStart=/usr/local/bin/chromium --no-sandbox --test-type --no-first-run --disable-infobars --disable-translate --user-data-dir=/var/lib/dudenest/kiosk-chrome --start-maximized http://localhost:$NOVNC_PORT/dudenest.html
 Restart=on-failure
 RestartSec=8
 [Install]
