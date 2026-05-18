@@ -1,19 +1,21 @@
 [Unit]
-Description=dudenest relay — full API (files + browser auth)
-After=tigervnc-99.service network.target
+Description=Dudenest Relay — full API (files + OAuth browser auth on display :99)
+After=network.target tigervnc-99.service zerotier-one.service
 Requires=tigervnc-99.service
+Wants=zerotier-one.service
 
 [Service]
 Type=simple
 User=root
-EnvironmentFile=/root/.config/dudenest/relay.env
+EnvironmentFile=/etc/dudenest/relay.env
+ExecStartPre=-/usr/local/bin/relay update
 ExecStart=/usr/local/bin/relay serve \
   --display :99 \
   --listen 0.0.0.0:8086 \
   --key ${RELAY_KEY} \
-  --client-secret /root/.config/dudenest/gdrive_client_secret.json \
+  --config-dir /etc/dudenest \
   --map-store /var/lib/dudenest/maps \
-  --config-dir /root/.config/dudenest
+  --client-secret /etc/dudenest/gdrive_client_secret.json
 Restart=always
 RestartSec=5
 StandardOutput=journal

@@ -1,8 +1,101 @@
 # dudenest-relay — Operational Guide
 
-**Last Updated**: 2026-05-16
+**Last Updated**: 2026-05-18
 **Author**: Dariusz Porczyński
-**Status**: ✅ Relay deployed as VM / Raspberry Pi only (binary from GitHub Releases)
+**Status**: ✅ Relay deployed as VM / Raspberry Pi only (binary from GitHub Releases). Full-stack bootstrap (X11 + Chromium + noVNC) shipped in v0.8.0.
+
+---
+
+## 🧩 Architecture: Full-Stack Relay (v0.8.0+)
+
+A fully-functional relay needs more than the Go binary. To register a Google Drive (or any OAuth-based) cloud account the relay launches a real Chromium window — there's no headless API for Google's web sign-in. That Chromium has to draw somewhere, and an operator needs to be able to see it on the VM console.
+
+```
+VM console (your monitor / Proxmox noVNC tab)
+       │
+       ▼  display :0
+┌─────────────────────────────────────────────────────────────────┐
+│ lightdm autologin (user: dude)                                  │
+│   └── Xfce session                                              │
+│         └── chromium --start-maximized                          │
+│               └── http://localhost:6080/dudenest.html  ◄──┐     │
+│                     (custom noVNC viewer, title cropped)  │     │
+└──────────────────────────────────────────────────────────│─────┘
+                                                           │ ws
+                                            display :99    │
+┌──────────────────────────────────────────────────────────▼─────┐
+│ TigerVNC standalone (rfb 5999, no auth, dude user)             │
+│   └── Xfce session                                             │
+│         └── Chromium spawned by /usr/local/bin/relay for OAuth │
+│                                                                │
+│ relay listens on 0.0.0.0:8086 (Files API + /auth/url + /vnc/*) │
+└────────────────────────────────────────────────────────────────┘
+```
+
+| Process | Display | Started by | Visible to user as |
+|---------|---------|------------|-------------------|
+| `lightdm` + Xfce | `:0` | systemd | The VM's main screen |
+| `chromium --start-maximized` (noVNC viewer) | `:0` | `~/.config/autostart/chromium-novnc.desktop` | The kiosk-like view filling the screen |
+| `tigervncserver :99` | `:99` | `tigervnc-99.service` | Streamed back to `:0` via the noVNC viewer |
+| `websockify` | n/a | `novnc.service` | TCP `:6080` (HTTP + WS bridge → `:5999`) |
+| `relay serve --display :99` | `:99` (spawns Chromium here) | `dudenest-relay.service` | TCP `:8086` (Files API), and Chromium windows appear in the noVNC view |
+| `relay update` | n/a | `dudenest-relay-update.timer` (24h) + `ExecStartPre` on boot | Auto-pulls newest release from GitHub Releases |
+
+### Why two Xfce sessions?
+
+The kiosk-novnc autostart script guards with `[ "$DISPLAY" = ":0" ] || exit 0` so it does **not** loop when Xfce also auto-starts on `:99`. Only `:0` runs the maximized Chromium viewer; `:99` is empty until the relay binary opens a Chromium window for OAuth.
+
+---
+
+## 🛠️ Bootstrap installation
+
+Single command on a fresh Debian 12 VM / RPi (idempotent — safe to re-run):
+
+```bash
+curl -sSL https://raw.githubusercontent.com/dudenest/dudenest-relay/main/scripts/install.sh | sudo bash
+```
+
+What it installs:
+
+| Step | What | Where |
+|------|------|-------|
+| 1 | apt packages (xorg, lightdm, xfce4, tigervnc, novnc, websockify, chromium, …) | system-wide |
+| 2 | `dude` user (uid 1000, groups audio/video/plugdev) | `/etc/passwd` |
+| 3 | LightDM autologin → Xfce | `/etc/lightdm/lightdm.conf.d/50-dudenest-autologin.conf` |
+| 4 | Xfce autostart files (kiosk Chromium, no-compositing, hide light-locker) | `/home/dude/.config/autostart/*.desktop` |
+| 5 | `dudenest.html` — cropped noVNC viewer | `/usr/share/novnc/dudenest.html` |
+| 6 | ZeroTier client + join `932df01efb1ebd71` | `/var/lib/zerotier-one` |
+| 7 | Relay binary from GitHub Releases + `relay.env` (preserved if exists) | `/usr/local/bin/relay`, `/etc/dudenest/` |
+| 8 | 4 systemd units (`tigervnc-99`, `novnc`, `dudenest-relay`, `dudenest-relay-update.{service,timer}`) | `/etc/systemd/system/` |
+| 9 | Wait for ZT hub to authorize + provision `relay_id` | logs |
+
+Re-running on an existing relay (e.g. one bootstrapped before v0.8.0):
+- apt packages already installed → skipped
+- `dude` user exists → only group membership refreshed
+- `relay.env` exists → **preserved** (`RELAY_KEY` is **never** overwritten)
+- systemd units overwritten with the new canonical content → harmless restart
+
+---
+
+## 🔄 Auto-update
+
+Two complementary mechanisms:
+
+1. **On every service start** — `dudenest-relay.service` has `ExecStartPre=-/usr/local/bin/relay update`, so a `systemctl restart dudenest-relay` always pulls the newest release first.
+2. **Daily timer** — `dudenest-relay-update.timer`:
+   - `OnBootSec=10min` (one check shortly after boot)
+   - `OnUnitActiveSec=24h` (every 24h after that)
+   - `RandomizedDelaySec=30min` (avoid thundering-herd against GitHub)
+   - `Persistent=true` (runs at next boot if missed)
+   The timer fires `dudenest-relay-update.service` which calls `relay update` and only restarts `dudenest-relay.service` if the binary was actually replaced (`grep -q "Updated to"`).
+
+Status:
+
+```bash
+systemctl list-timers dudenest-relay-update.timer
+journalctl -u dudenest-relay-update.service -n 20
+/usr/local/bin/relay version
+```
 
 ---
 

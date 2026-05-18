@@ -1,0 +1,15 @@
+[Unit]
+Description=noVNC websocket proxy for VNC :5999 on HTTP :6080
+After=tigervnc-99.service
+Requires=tigervnc-99.service
+
+[Service]
+Type=simple
+User=dude
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/bin/websockify --web=/usr/share/novnc 6080 localhost:5999
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

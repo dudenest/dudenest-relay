@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dudenest relay</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#000; overflow:hidden; height:100vh; }
+/* cropTop: pixels to hide from top of VNC (window title 27px + Chromium tabs+address ~88px = 115px) */
+#screen {
+  position: fixed;
+  top: calc(-1 * var(--crop-top, 115px));
+  left: 0; right: 0;
+  height: calc(100vh + var(--crop-top, 115px));
+  overflow: hidden;
+}
+#dot {
+  position: fixed; bottom: 6px; right: 8px; z-index: 100;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #555;
+}
+#dot.connected { background: #4caf50; }
+</style>
+</head>
+<body>
+<div id="screen"></div>
+<div id="dot" title="VNC status"></div>
+<script type="module">
+import RFB from "./core/rfb.js";
+const dot = document.getElementById("dot");
+const host = window.location.hostname;
+const port = window.location.port || (window.location.protocol === "https:" ? "443" : "80");
+const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+const viaRelay = window.location.pathname.startsWith("/vnc");
+const wsPath = viaRelay ? "/vnc/websockify" : "/websockify";
+const sessionParam = new URLSearchParams(window.location.search).get("session");
+const wsURL = proto + "//" + host + ":" + port + wsPath + (sessionParam ? "?session=" + encodeURIComponent(sessionParam) : "");
+let rfb;
+function connect() {
+  rfb = new RFB(document.getElementById("screen"), wsURL);
+  rfb.scaleViewport = true;
+  rfb.resizeSession = false;
+  rfb.addEventListener("connect", () => { dot.className = "connected"; });
+  rfb.addEventListener("disconnect", () => { dot.className = ""; setTimeout(connect, 3000); });
+}
+connect();
+</script>
+</body>
+</html>

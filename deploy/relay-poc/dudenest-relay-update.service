@@ -1,0 +1,8 @@
+[Unit]
+Description=Dudenest Relay — check GitHub for new release and restart if updated
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c '/usr/local/bin/relay update | tee /tmp/relay-update.log; if grep -q "Updated to" /tmp/relay-update.log; then systemctl restart dudenest-relay; fi; rm -f /tmp/relay-update.log'

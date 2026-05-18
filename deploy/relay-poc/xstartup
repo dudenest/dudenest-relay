@@ -1,0 +1,6 @@
+#!/bin/bash
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+xhost +SI:localuser:root
+xset s off -dpms
+exec startxfce4

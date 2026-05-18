@@ -1,0 +1,21 @@
+[Unit]
+Description=TigerVNC server on display :99 (Xfce + VNC combined)
+After=network.target
+Before=novnc.service
+
+[Service]
+Type=forking
+User=dude
+Group=dude
+WorkingDirectory=/home/dude
+Environment=HOME=/home/dude USER=dude LOGNAME=dude
+ExecStartPre=/bin/bash -c 'rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null; true'
+ExecStart=/usr/bin/tigervncserver :99 -geometry 1280x1024 -depth 24 -rfbport 5999 -localhost no -SecurityTypes None --I-KNOW-THIS-IS-INSECURE -desktop dudenest-relay
+ExecStop=/usr/bin/tigervncserver -kill :99
+ExecStopPost=/bin/bash -c 'rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null; true'
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=3
+
+[Install]
+WantedBy=multi-user.target

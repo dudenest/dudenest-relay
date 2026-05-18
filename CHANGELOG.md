@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.0] — 2026-05-18 — Full-Stack Bootstrap (Chromium + X11 + noVNC)
+
+### Added
+- **scripts/install.sh — full media-capable bootstrap** — single `curl | sudo bash` command now installs every component a fully-functional relay needs, not just the Go binary. Previous installer left machines unable to register Google Drive accounts because Chromium and an X server were missing. New installer is idempotent and safe to re-run on existing relays.
+  - **apt packages**: `xorg`, `lightdm`, `xfce4` (+ session/settings/wm/desktop), `tigervnc-standalone-server`, `novnc`, `python3-websockify`, `chromium`, `chromium-sandbox`, `unattended-upgrades`
+  - **Linux user `dude`** (uid 1000) with `audio,video,plugdev` groups
+  - **LightDM autologin** → `/etc/lightdm/lightdm.conf.d/50-dudenest-autologin.conf` — boots straight into Xfce on display `:0` for `dude`
+  - **`/home/dude/.vnc/xstartup`** — Xfce session for TigerVNC on `:99`
+  - **`/home/dude/kiosk-novnc.sh`** — Chromium autostart on `:0` (`--start-maximized`, isolated `--user-data-dir`), opens `http://localhost:6080/dudenest.html` — visible on the VM console as soon as the machine boots
+  - **`/usr/share/novnc/dudenest.html`** — custom noVNC viewer that crops the Chromium title bar (115px) so the relay's OAuth window fills the kiosk frame edge-to-edge; small green status dot indicates VNC connection
+  - **Xfwm4 compositing disabled on `:99`** — smoother Chromium rendering inside VNC
+- **4 systemd units**
+  - `tigervnc-99.service` — TigerVNC standalone server on `:99` (rfb 5999, no auth, `dude` user)
+  - `novnc.service` — websockify bridge `:6080` → `localhost:5999`, requires `tigervnc-99.service`
+  - `dudenest-relay.service` — relay binary with `--display :99 --config-dir /etc/dudenest --map-store /var/lib/dudenest/maps`, requires `tigervnc-99.service`, `ExecStartPre=-relay update`
+  - `dudenest-relay-update.timer` + `.service` — daily check of GitHub Releases API; runs `relay update` and `systemctl restart dudenest-relay` only when a new tag is fetched (10 min after boot + every 24h, randomized 30 min jitter)
+- **deploy/relay-poc/ canonical reference files** — each systemd unit, autostart desktop entry, helper script and `dudenest.html` checked in as the IaC source of truth. install.sh embeds the same content via heredocs so the bootstrap stays a single self-contained file.
+
+### Changed
+- **install.sh path conventions** — `RELAY_KEY`, `BACKUP_URL`, `ZT_ANNOUNCE` now live in `/etc/dudenest/relay.env` (chmod 600); maps in `/var/lib/dudenest/maps`; OAuth secret in `/etc/dudenest/gdrive_client_secret.json`. Previous `relay.service` unit name (`relay.service`) is disabled by the new install in favor of `dudenest-relay.service`.
+- **deploy/relay-poc/relay.service** — updated to standard `/etc/dudenest/` paths, depends on `tigervnc-99.service`, and gains `ExecStartPre=-/usr/local/bin/relay update` so every restart pulls the newest release before launch.
+
+### Fixed
+- **relay-poc2 was structurally unable to register cloud accounts** — bootstrap-installed relays were missing Chromium and the X server, so the relay binary's OAuth flow had nowhere to draw a browser. New install closes that gap on first install and on every re-run of `install.sh` on existing hosts.
+
+---
+
 ## [0.7.0] — 2026-05-18 — Media Processing Pipeline
 
 ### Added

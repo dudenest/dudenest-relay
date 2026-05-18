@@ -3,6 +3,8 @@
 [![Version](https://img.shields.io/github/v/release/dudenest/dudenest-relay?color=blue&label=Version)](https://github.com/dudenest/dudenest-relay/releases/latest) [![Release Date](https://img.shields.io/github/release-date/dudenest/dudenest-relay?color=lightgrey&label=Released)](https://github.com/dudenest/dudenest-relay/releases/latest) ![Last Update](https://img.shields.io/badge/Update-2026--05--18-orange) ![Status](https://img.shields.io/badge/Status-Pre--Alpha-orange) ![Language](https://img.shields.io/badge/Language-Go-00ADD8) ![License](https://img.shields.io/badge/License-Apache%202.0-green) ![Hardware](https://img.shields.io/badge/Hardware-Raspberry%20Pi%20Zero%202W%2B-red) ![Deployment](https://img.shields.io/badge/Deployment-VM%20%2F%20RPi%20only-blue)
 
 > ⚠️ **2026-05-16**: Swarm deployment has been **removed** — `dudenest-relay` runs only as VM or Raspberry Pi binary now. See [`docs/RELAY-OPS.md`](docs/RELAY-OPS.md) for details.
+>
+> ✨ **2026-05-18 (v0.8.0)**: `scripts/install.sh` now provisions a **fully media-capable relay** in one command — X server, Chromium, TigerVNC, noVNC and a daily auto-update timer are installed automatically. Cloud-account registration (Google OAuth) works out of the box on every new install.
 
 **The privacy-preserving bridge between your Dudenest app and your cloud storage accounts.**
 
@@ -72,32 +74,57 @@ Your Home Network
 
 ## Getting Started
 
-### Quick Install (Raspberry Pi)
+### One-line bootstrap (VM / Raspberry Pi)
 
 ```bash
-curl -sSL https://get.dudenest.com/relay | bash
+curl -sSL https://raw.githubusercontent.com/dudenest/dudenest-relay/main/scripts/install.sh | sudo bash
 ```
 
-### Manual Install
+This installs **everything** a fully-functional relay needs:
+
+| Layer | Component | Purpose |
+|-------|-----------|---------|
+| **Display** | `lightdm` + autologin (user `dude`) | Boots straight into a graphical session on display `:0` |
+| **Desktop** | `xfce4` + `xorg` | Lightweight Xfce for `:0` and `:99` |
+| **OAuth display** | `tigervnc-standalone-server` on `:99` | Where the relay launches Chromium for Google OAuth |
+| **Web bridge** | `novnc` + `websockify` on `:6080` | Streams `:99` to a browser as HTML5 + WebSocket |
+| **Console kiosk** | `chromium --start-maximized → http://localhost:6080/dudenest.html` | Always-on Chromium on the VM screen showing the OAuth session live |
+| **Relay** | `/usr/local/bin/relay serve --display :99` | Go binary from GitHub Releases; talks to GDrive, MEGA, etc. |
+| **Auto-update** | `dudenest-relay-update.timer` (24 h) + `ExecStartPre=-relay update` | Pulls the newest release from GitHub Releases and restarts the service |
+| **Networking** | `zerotier-one` joined to overlay `932df01efb1ebd71` | Hub auto-provisions `relay_id`, `relay_url`, `JWT_SECRET`, etc. |
+
+The script is **idempotent** — running it again on an already-installed host only fills in the missing pieces (e.g. adding Chromium/X to a relay that was bootstrapped before v0.8.0).
+
+After it finishes, the VM console shows the noVNC view (green status dot bottom-right) and the relay listens on `0.0.0.0:8086`. Open the Dudenest app → **Settings → My Relays → Add Cloud Account** to start the OAuth flow.
+
+### Manual install (binary only — no desktop)
+
+If you already have your own X / Chromium / VNC stack (e.g. when embedding the relay inside a custom appliance) you can install just the binary:
 
 ```bash
-# Download binary
+# Download the binary
 wget https://github.com/dudenest/dudenest-relay/releases/latest/download/relay-linux-arm64
-chmod +x relay-linux-arm64
+chmod +x relay-linux-arm64 && sudo mv relay-linux-arm64 /usr/local/bin/relay
 
-# Create config directory and copy example config
-mkdir -p ~/.config/dudenest
-cp configs/relay.json.example ~/.config/dudenest/relay.json
-# Edit relay.json with your values (see Configuration section below)
+# Minimal config
+sudo mkdir -p /etc/dudenest /var/lib/dudenest/maps
+sudo tee /etc/dudenest/relay.env >/dev/null <<EOF
+RELAY_KEY=$(openssl rand -hex 32)
+BACKUP_URL=https://backup.dudenest.com
+EOF
+sudo chmod 600 /etc/dudenest/relay.env
 
-# Run (config auto-loaded from ~/.config/dudenest/relay.json)
-./relay-linux-arm64
-
-# Or specify config path explicitly
-./relay-linux-arm64 --config /path/to/relay.json
+# Run pointing at your own X display
+DISPLAY=:99 /usr/local/bin/relay serve \
+  --display :99 \
+  --listen 0.0.0.0:8086 \
+  --config-dir /etc/dudenest \
+  --map-store /var/lib/dudenest/maps
 ```
 
-### Docker
+### Docker (binary only — OAuth disabled)
+
+The Docker image ships without Chromium / X11, so Google OAuth flows do **not** work. Use it only as a non-interactive backend node (e.g. behind a hub that handles registration elsewhere):
 
 ```bash
 docker run -d \

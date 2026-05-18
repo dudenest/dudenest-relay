@@ -1,98 +1,324 @@
 #!/usr/bin/env bash
-# Dudenest Relay — automatic installer (ZT auto-provisioning mode)
-# Usage: curl -sSL https://raw.githubusercontent.com/dudenest/dudenest-relay/main/scripts/install.sh | bash
-# No domain, no port forwarding, no JWT_SECRET needed.
-# Uses ZeroTier overlay network + hub auto-provisioning.
+# Dudenest Relay — full bootstrap installer (relay binary + X11 + Chromium + noVNC).
+#
+# Installs everything a fully-functional Dudenest Relay needs:
+#   1. apt packages: lightdm, xfce4, xorg, tigervnc-standalone-server, novnc/websockify, chromium, zerotier
+#   2. Linux user `dude` with LightDM autologin → Xfce on :0
+#   3. Chromium autostart on :0 showing http://localhost:6080/dudenest.html (kiosk-style viewer)
+#   4. TigerVNC headless on :99 (where the relay launches Chromium for Google OAuth)
+#   5. noVNC websockify on :6080 bridging :5999 → browser
+#   6. dudenest.html — custom noVNC client that crops the title bar (fills the viewport)
+#   7. Relay binary from GitHub Releases (https://github.com/dudenest/dudenest-relay/releases/latest)
+#   8. 4 systemd units: tigervnc-99, novnc, dudenest-relay, dudenest-relay-update.{service,timer}
+#   9. Daily auto-update: timer runs `relay update` and restarts the service on new releases
+#  10. ZeroTier overlay + hub auto-provisioning (relay_id, relay_url, JWT_SECRET, etc.)
+#
+# Usage (idempotent — safe to re-run):
+#   curl -sSL https://raw.githubusercontent.com/dudenest/dudenest-relay/main/scripts/install.sh | sudo bash
+#
+# Tested on Debian 12 (bookworm). Other Debian/Ubuntu releases should also work.
 set -euo pipefail
 
-RELAY_REPO="dudenest/dudenest-relay"
+# ── configuration ────────────────────────────────────────────────────────────
+RELAY_REPO="${RELAY_REPO:-dudenest/dudenest-relay}"
 RELAY_BIN="/usr/local/bin/relay"
 CONFIG_DIR="/etc/dudenest"
 DATA_DIR="/var/lib/dudenest"
-ZT_NETWORK="932df01efb1ebd71"
+ZT_NETWORK="${ZT_NETWORK:-932df01efb1ebd71}"
 BACKUP_URL="${BACKUP_URL:-https://backup.dudenest.com}"
+DUDE_USER="${DUDE_USER:-dude}"
+DUDE_UID="${DUDE_UID:-1000}"
+VNC_DISPLAY=":99"
+VNC_PORT="5999"
+NOVNC_PORT="6080"
+RAW_BASE="https://raw.githubusercontent.com/${RELAY_REPO}/main/deploy/relay-poc"
 
-# ── helpers ───────────────────────────────────────────────────────────────────
+# ── helpers ──────────────────────────────────────────────────────────────────
 ok()    { echo "  ✓ $*"; }
 step()  { echo ""; echo "▸ $*"; }
+warn()  { echo "  ⚠ $*"; }
 fail()  { echo ""; echo "  ✗ ERROR: $*" >&2; exit 1; }
-require() { command -v "$1" >/dev/null 2>&1 || fail "Required tool not found: $1"; }
+have()  { command -v "$1" >/dev/null 2>&1; }
+require() { have "$1" || fail "Required tool not found: $1"; }
 
 require curl
 [[ $EUID -eq 0 ]] || fail "Run as root: sudo bash install.sh"
 
 ARCH=$(uname -m)
 case "$ARCH" in
-  x86_64)  RELAY_ARCH="linux-amd64"  ;;
-  aarch64) RELAY_ARCH="linux-arm64"  ;;
-  armv7l)  RELAY_ARCH="linux-armv7"  ;;
+  x86_64)  RELAY_ARCH="linux-amd64" ;;
+  aarch64) RELAY_ARCH="linux-arm64" ;;
+  armv7l)  RELAY_ARCH="linux-armv7" ;;
   *) fail "Unsupported architecture: $ARCH" ;;
 esac
 
 echo ""
-echo "┌─────────────────────────────────────────────────────────────────┐"
-echo "│          Dudenest Relay Installer (ZeroTier mode)               │"
-echo "├─────────────────────────────────────────────────────────────────┤"
-echo "│  No domain, no port forwarding, no configuration required.      │"
-echo "│  Relay will be provisioned automatically within seconds.        │"
-echo "└─────────────────────────────────────────────────────────────────┘"
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│       Dudenest Relay — Full Bootstrap (X11 + Chromium + noVNC)      │"
+echo "├─────────────────────────────────────────────────────────────────────┤"
+echo "│  No domain, no port forwarding, no configuration required.          │"
+echo "│  ZeroTier overlay + hub auto-provisioning handle the rest.          │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
 
-# ── step 1: ZeroTier ─────────────────────────────────────────────────────────
-step "Step 1/5: ZeroTier"
-if ! command -v zerotier-cli >/dev/null 2>&1; then
-  echo "  Installing ZeroTier ..."
+# ── step 1: apt packages ─────────────────────────────────────────────────────
+step "Step 1/9: System packages (apt)"
+export DEBIAN_FRONTEND=noninteractive
+APT_PKGS=(
+  ca-certificates curl wget openssl jq
+  xorg xserver-xorg lightdm
+  xfce4 xfce4-session xfce4-settings xfwm4 xfdesktop4
+  tigervnc-standalone-server tigervnc-common tigervnc-tools
+  novnc python3-websockify websockify
+  chromium chromium-sandbox
+  unattended-upgrades apt-listchanges
+)
+MISSING=()
+for p in "${APT_PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 || MISSING+=("$p"); done
+if [[ ${#MISSING[@]} -gt 0 ]]; then
+  echo "  Installing ${#MISSING[@]} package(s): ${MISSING[*]}"
+  apt-get update -qq
+  apt-get install -y --no-install-recommends "${MISSING[@]}" >/dev/null
+fi
+ok "All required packages installed"
+
+# ── step 2: dude user + groups ───────────────────────────────────────────────
+step "Step 2/9: User '$DUDE_USER' (uid $DUDE_UID)"
+if ! id "$DUDE_USER" >/dev/null 2>&1; then
+  useradd -m -u "$DUDE_UID" -s /bin/bash -G audio,video,plugdev "$DUDE_USER"
+  ok "Created user $DUDE_USER"
+else
+  usermod -aG audio,video,plugdev "$DUDE_USER" 2>/dev/null || true
+  ok "User $DUDE_USER exists"
+fi
+
+# ── step 3: LightDM autologin → Xfce on :0 ──────────────────────────────────
+step "Step 3/9: LightDM autologin (Xfce session for '$DUDE_USER')"
+mkdir -p /etc/lightdm/lightdm.conf.d
+cat > /etc/lightdm/lightdm.conf.d/50-dudenest-autologin.conf <<EOF
+[Seat:*]
+autologin-user=$DUDE_USER
+autologin-user-timeout=0
+user-session=xfce
+EOF
+systemctl enable lightdm >/dev/null 2>&1 || true
+ok "LightDM autologin configured → $DUDE_USER (xfce)"
+
+# ── step 4: dude home — xstartup, kiosk script, Chromium autostart ──────────
+step "Step 4/9: Desktop files (Xfce + Chromium autostart on :0)"
+DUDE_HOME="/home/$DUDE_USER"
+install -d -o "$DUDE_USER" -g "$DUDE_USER" -m 700 "$DUDE_HOME/.vnc"
+install -d -o "$DUDE_USER" -g "$DUDE_USER" -m 755 "$DUDE_HOME/.config/autostart"
+install -d -o "$DUDE_USER" -g "$DUDE_USER" -m 755 "$DUDE_HOME/.config/chromium-novnc"
+
+cat > "$DUDE_HOME/.vnc/xstartup" <<'EOF'
+#!/bin/bash
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+xhost +SI:localuser:root
+xset s off -dpms
+exec startxfce4
+EOF
+chown "$DUDE_USER:$DUDE_USER" "$DUDE_HOME/.vnc/xstartup"
+chmod 755 "$DUDE_HOME/.vnc/xstartup"
+
+cat > "$DUDE_HOME/kiosk-novnc.sh" <<EOF
+#!/bin/bash
+# Chromium showing noVNC viewer of display :99 — only on the local screen (:0).
+# Skip when this autostart fires inside the TigerVNC :99 session (would loop).
+[ "\$DISPLAY" = ":0" ] || exit 0
+# --user-data-dir isolates from the Chromium instance relay launches for OAuth on :99
+exec chromium \\
+  --no-sandbox \\
+  --no-first-run \\
+  --disable-infobars \\
+  --user-data-dir=$DUDE_HOME/.config/chromium-novnc \\
+  --start-maximized \\
+  http://localhost:$NOVNC_PORT/dudenest.html
+EOF
+chown "$DUDE_USER:$DUDE_USER" "$DUDE_HOME/kiosk-novnc.sh"
+chmod 755 "$DUDE_HOME/kiosk-novnc.sh"
+
+cat > "$DUDE_HOME/.config/autostart/chromium-novnc.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Chromium noVNC viewer
+Exec=$DUDE_HOME/kiosk-novnc.sh
+X-GNOME-Autostart-enabled=true
+EOF
+chown "$DUDE_USER:$DUDE_USER" "$DUDE_HOME/.config/autostart/chromium-novnc.desktop"
+
+# Disable xfwm4 compositing on :99 (smoother Chromium-in-VNC rendering)
+cat > "$DUDE_HOME/xfwm4_nocomp.sh" <<'EOF'
+#!/bin/bash
+sleep 5
+DISPLAY=:99 XAUTHORITY=/home/dude/.Xauthority xfconf-query -c xfwm4 -p /general/use_compositing -s false 2>/dev/null || \
+  DISPLAY=:99 XAUTHORITY=/home/dude/.Xauthority xfwm4 --compositor=off --replace &
+EOF
+chown "$DUDE_USER:$DUDE_USER" "$DUDE_HOME/xfwm4_nocomp.sh"
+chmod 755 "$DUDE_HOME/xfwm4_nocomp.sh"
+
+cat > "$DUDE_HOME/.config/autostart/xfwm4-nocomp.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=xfwm4 no-compositing (:99)
+Exec=$DUDE_HOME/xfwm4_nocomp.sh
+X-GNOME-Autostart-enabled=true
+EOF
+chown "$DUDE_USER:$DUDE_USER" "$DUDE_HOME/.config/autostart/xfwm4-nocomp.desktop"
+
+# Hide light-locker (would interfere with kiosk)
+cat > "$DUDE_HOME/.config/autostart/light-locker.desktop" <<'EOF'
+[Desktop Entry]
+Hidden=true
+EOF
+chown "$DUDE_USER:$DUDE_USER" "$DUDE_HOME/.config/autostart/light-locker.desktop"
+ok "Xfce autostart files installed for $DUDE_USER"
+
+# ── step 5: dudenest.html (custom noVNC viewer) ─────────────────────────────
+step "Step 5/9: dudenest.html (cropped noVNC viewer)"
+cat > /usr/share/novnc/dudenest.html <<'EOF'
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dudenest relay</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#000; overflow:hidden; height:100vh; }
+#screen {
+  position: fixed;
+  top: calc(-1 * var(--crop-top, 115px));
+  left: 0; right: 0;
+  height: calc(100vh + var(--crop-top, 115px));
+  overflow: hidden;
+}
+#dot {
+  position: fixed; bottom: 6px; right: 8px; z-index: 100;
+  width: 8px; height: 8px; border-radius: 50%; background: #555;
+}
+#dot.connected { background: #4caf50; }
+</style>
+</head>
+<body>
+<div id="screen"></div>
+<div id="dot" title="VNC status"></div>
+<script type="module">
+import RFB from "./core/rfb.js";
+const dot = document.getElementById("dot");
+const host = window.location.hostname;
+const port = window.location.port || (window.location.protocol === "https:" ? "443" : "80");
+const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+const viaRelay = window.location.pathname.startsWith("/vnc");
+const wsPath = viaRelay ? "/vnc/websockify" : "/websockify";
+const sessionParam = new URLSearchParams(window.location.search).get("session");
+const wsURL = proto + "//" + host + ":" + port + wsPath + (sessionParam ? "?session=" + encodeURIComponent(sessionParam) : "");
+let rfb;
+function connect() {
+  rfb = new RFB(document.getElementById("screen"), wsURL);
+  rfb.scaleViewport = true;
+  rfb.resizeSession = false;
+  rfb.addEventListener("connect", () => { dot.className = "connected"; });
+  rfb.addEventListener("disconnect", () => { dot.className = ""; setTimeout(connect, 3000); });
+}
+connect();
+</script>
+</body>
+</html>
+EOF
+ok "/usr/share/novnc/dudenest.html installed"
+
+# ── step 6: ZeroTier ─────────────────────────────────────────────────────────
+step "Step 6/9: ZeroTier"
+if ! have zerotier-cli; then
   curl -fsSL https://install.zerotier.com | bash >/dev/null 2>&1
   systemctl enable zerotier-one >/dev/null 2>&1
-  systemctl start zerotier-one >/dev/null 2>&1
+  systemctl start  zerotier-one >/dev/null 2>&1
   sleep 3
 fi
-ZT_VERSION=$(zerotier-cli -v 2>/dev/null || echo "running")
-ok "ZeroTier $ZT_VERSION"
 zerotier-cli join "$ZT_NETWORK" >/dev/null 2>&1 || true
-ok "Joined network $ZT_NETWORK (authorization will complete automatically)"
+ok "Joined ZT $ZT_NETWORK (hub will authorize automatically)"
 
-# ── step 2: relay binary ─────────────────────────────────────────────────────
-step "Step 2/5: Relay binary"
+# ── step 7: Relay binary + config ────────────────────────────────────────────
+step "Step 7/9: Relay binary + configuration"
 RELAY_URL="https://github.com/$RELAY_REPO/releases/latest/download/relay-$RELAY_ARCH"
-echo "  Downloading relay binary ($RELAY_ARCH) ..."
-curl -fsSL "$RELAY_URL" -o "$RELAY_BIN" || fail "Failed to download relay binary from GitHub"
+curl -fsSL "$RELAY_URL" -o "$RELAY_BIN" || fail "Failed to download relay binary"
 chmod +x "$RELAY_BIN"
-ok "Relay binary installed: $RELAY_BIN"
+ok "Relay binary: $RELAY_BIN ($RELAY_ARCH)"
 
-# ── step 3: config ───────────────────────────────────────────────────────────
-step "Step 3/5: Configuration"
-mkdir -p "$CONFIG_DIR/providers" "$DATA_DIR/maps"
-RELAY_KEY=$(openssl rand -hex 32)
-
-# JWT_SECRET and relay credentials are delivered automatically via ZT bootstrap
-cat > "$CONFIG_DIR/relay.env" <<EOF
+mkdir -p "$CONFIG_DIR/providers" "$DATA_DIR/maps" "$DATA_DIR/thumbs"
+if [[ ! -f "$CONFIG_DIR/relay.env" ]]; then
+  RELAY_KEY=$(openssl rand -hex 32)
+  cat > "$CONFIG_DIR/relay.env" <<EOF
 RELAY_KEY=$RELAY_KEY
 BACKUP_URL=$BACKUP_URL
 ZT_ANNOUNCE=true
 EOF
-chmod 600 "$CONFIG_DIR/relay.env"
-ok "Config written to $CONFIG_DIR/relay.env"
-
-# client_secret.json — placeholder; relay works without it until GDrive auth is added
-if [[ ! -f "$CONFIG_DIR/client_secret.json" ]]; then
-  echo '{"installed":{"client_id":"placeholder"}}' > "$CONFIG_DIR/client_secret.json"
-  chmod 600 "$CONFIG_DIR/client_secret.json"
+  chmod 600 "$CONFIG_DIR/relay.env"
+  ok "Generated $CONFIG_DIR/relay.env (new RELAY_KEY)"
+else
+  ok "Preserved existing $CONFIG_DIR/relay.env"
 fi
-ok "OAuth config ready"
 
-# ── step 4: systemd service ───────────────────────────────────────────────────
-step "Step 4/5: System service"
+if [[ ! -f "$CONFIG_DIR/gdrive_client_secret.json" ]]; then
+  echo '{"installed":{"client_id":"placeholder"}}' > "$CONFIG_DIR/gdrive_client_secret.json"
+  chmod 600 "$CONFIG_DIR/gdrive_client_secret.json"
+fi
+ok "OAuth client_secret placeholder ready"
+
+# ── step 8: systemd units (4 units) ──────────────────────────────────────────
+step "Step 8/9: systemd units (tigervnc-99, novnc, dudenest-relay, update timer)"
+
+cat > /etc/systemd/system/tigervnc-99.service <<EOF
+[Unit]
+Description=TigerVNC server on display $VNC_DISPLAY (Xfce + VNC combined)
+After=network.target
+Before=novnc.service
+[Service]
+Type=forking
+User=$DUDE_USER
+Group=$DUDE_USER
+WorkingDirectory=$DUDE_HOME
+Environment=HOME=$DUDE_HOME USER=$DUDE_USER LOGNAME=$DUDE_USER
+ExecStartPre=/bin/bash -c 'rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null; true'
+ExecStart=/usr/bin/tigervncserver $VNC_DISPLAY -geometry 1280x1024 -depth 24 -rfbport $VNC_PORT -localhost no -SecurityTypes None --I-KNOW-THIS-IS-INSECURE -desktop dudenest-relay
+ExecStop=/usr/bin/tigervncserver -kill $VNC_DISPLAY
+ExecStopPost=/bin/bash -c 'rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null; true'
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=3
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/novnc.service <<EOF
+[Unit]
+Description=noVNC websocket proxy for VNC $VNC_DISPLAY on HTTP :$NOVNC_PORT
+After=tigervnc-99.service
+Requires=tigervnc-99.service
+[Service]
+Type=simple
+User=$DUDE_USER
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/bin/websockify --web=/usr/share/novnc $NOVNC_PORT localhost:$VNC_PORT
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+EOF
+
 cat > /etc/systemd/system/dudenest-relay.service <<EOF
 [Unit]
-Description=Dudenest Relay
-After=network.target zerotier-one.service
+Description=Dudenest Relay — full API (files + OAuth browser auth on display $VNC_DISPLAY)
+After=network.target tigervnc-99.service zerotier-one.service
+Requires=tigervnc-99.service
 Wants=zerotier-one.service
 [Service]
 Type=simple
 User=root
 EnvironmentFile=$CONFIG_DIR/relay.env
 ExecStartPre=-$RELAY_BIN update
-ExecStart=$RELAY_BIN serve --key \${RELAY_KEY} --listen 0.0.0.0:8086 --config-dir $CONFIG_DIR --map-store $DATA_DIR/maps --client-secret $CONFIG_DIR/client_secret.json
+ExecStart=$RELAY_BIN serve --display $VNC_DISPLAY --listen 0.0.0.0:8086 --key \${RELAY_KEY} --config-dir $CONFIG_DIR --map-store $DATA_DIR/maps --client-secret $CONFIG_DIR/gdrive_client_secret.json
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -100,49 +326,78 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl daemon-reload >/dev/null 2>&1
-systemctl enable dudenest-relay >/dev/null 2>&1
-systemctl restart dudenest-relay >/dev/null 2>&1
-ok "Service dudenest-relay enabled and started"
 
-# ── step 5: provisioning ─────────────────────────────────────────────────────
-step "Step 5/5: Provisioning"
-echo "  Waiting for relay to announce and receive credentials ..."
+cat > /etc/systemd/system/dudenest-relay-update.service <<EOF
+[Unit]
+Description=Dudenest Relay — check GitHub for new release and restart if updated
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c '$RELAY_BIN update | tee /tmp/relay-update.log; if grep -q "Updated to" /tmp/relay-update.log; then systemctl restart dudenest-relay; fi; rm -f /tmp/relay-update.log'
+EOF
+
+cat > /etc/systemd/system/dudenest-relay-update.timer <<EOF
+[Unit]
+Description=Daily check for Dudenest Relay updates (GitHub Releases)
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=24h
+RandomizedDelaySec=30min
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+for svc in tigervnc-99 novnc dudenest-relay dudenest-relay-update.timer; do
+  systemctl enable "$svc" >/dev/null 2>&1
+done
+# Stop legacy unit name if a previous install used it
+systemctl stop relay.service 2>/dev/null || true
+systemctl disable relay.service 2>/dev/null || true
+# (Re)start in dependency order
+systemctl restart tigervnc-99 || warn "tigervnc-99 failed to start — check: journalctl -u tigervnc-99"
+systemctl restart novnc       || warn "novnc failed to start"
+systemctl restart dudenest-relay || warn "dudenest-relay failed to start"
+systemctl restart dudenest-relay-update.timer
+ok "All 4 systemd units enabled and started"
+
+# ── step 9: ZT auto-provisioning wait ────────────────────────────────────────
+step "Step 9/9: ZeroTier hub auto-provisioning"
 BOOTSTRAP_DONE=false
 for i in $(seq 1 24); do  # up to 120s
   sleep 5
-  HEALTH=$(curl -sf "http://localhost:8086/health" 2>/dev/null || echo "")
-  RELAY_ID=$(grep -o '"relay_id":"[^"]*"' "$CONFIG_DIR/relay_creds.json" 2>/dev/null | cut -d'"' -f4 || echo "")
-  if [[ -n "$RELAY_ID" ]]; then
-    RELAY_URL=$(grep -o '"relay_url":"[^"]*"' "$CONFIG_DIR/relay_creds.json" 2>/dev/null | cut -d'"' -f4 || echo "")
-    ok "Provisioned: relay_id=${RELAY_ID:0:8}..."
-    ok "Relay URL: $RELAY_URL"
+  RELAY_ID=$(grep -o '"relay_id":"[^"]*"' "$CONFIG_DIR/relay_creds.json" 2>/dev/null | cut -d'"' -f4 || true)
+  if [[ -n "${RELAY_ID:-}" ]]; then
+    RELAY_URL=$(grep -o '"relay_url":"[^"]*"' "$CONFIG_DIR/relay_creds.json" 2>/dev/null | cut -d'"' -f4 || true)
+    ok "Provisioned: relay_id=${RELAY_ID:0:8}…"
+    [[ -n "${RELAY_URL:-}" ]] && ok "Relay URL: $RELAY_URL"
     BOOTSTRAP_DONE=true
     break
   fi
-  echo "  ... waiting (${i}/24) — provisioner is authorizing ZeroTier membership"
+  echo "  … waiting (${i}/24) — hub is authorizing ZT membership"
 done
+$BOOTSTRAP_DONE || warn "Provisioning still pending — relay runs in background. Logs: journalctl -u dudenest-relay -f"
 
-if [[ "$BOOTSTRAP_DONE" != "true" ]]; then
-  echo ""
-  echo "  NOTE: Provisioning is taking longer than expected."
-  echo "  The relay is running and will complete in the background."
-  echo "  Check status: journalctl -u dudenest-relay -f"
-fi
-
-# ── summary ───────────────────────────────────────────────────────────────────
+# ── summary ──────────────────────────────────────────────────────────────────
 echo ""
-echo "╔═══════════════════════════════════════════════════════════════════╗"
-echo "║  ✅  Dudenest Relay installed and running!                        ║"
-echo "╠═══════════════════════════════════════════════════════════════════╣"
-echo "║  Next steps:                                                      ║"
-echo "║   1. Open the Dudenest app and log in                            ║"
-echo "║   2. Your relay will appear in Settings → My Relays              ║"
-echo "║   3. Add Google Drive in Settings → Cloud Accounts               ║"
-echo "╠═══════════════════════════════════════════════════════════════════╣"
-echo "║  Commands:                                                        ║"
-echo "║   journalctl -u dudenest-relay -f      (live logs)               ║"
-echo "║   systemctl status dudenest-relay      (service status)          ║"
-echo "║   curl http://localhost:8086/health    (health check)            ║"
-echo "╚═══════════════════════════════════════════════════════════════════╝"
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║  ✅  Dudenest Relay installed — full media-capable stack running.     ║"
+echo "╠═══════════════════════════════════════════════════════════════════════╣"
+echo "║  Local screen flow (auto-starts on VM console):                       ║"
+echo "║    lightdm autologin → Xfce on :0 → Chromium maximized →              ║"
+echo "║    http://localhost:6080/dudenest.html → noVNC → TigerVNC :99 →       ║"
+echo "║    where relay launches Chromium for Google OAuth.                    ║"
+echo "║                                                                       ║"
+echo "║  Updates: dudenest-relay-update.timer checks GitHub Releases daily.   ║"
+echo "║                                                                       ║"
+echo "║  Next: open the Dudenest app → Settings → My Relays → add Cloud.      ║"
+echo "╠═══════════════════════════════════════════════════════════════════════╣"
+echo "║  Useful:                                                              ║"
+echo "║    journalctl -u dudenest-relay -f                                    ║"
+echo "║    systemctl status tigervnc-99 novnc dudenest-relay                  ║"
+echo "║    systemctl list-timers dudenest-relay-update.timer                  ║"
+echo "║    curl http://localhost:8086/health                                  ║"
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
 echo ""
