@@ -63,15 +63,33 @@ echo "└───────────────────────�
 # ── step 1: apt packages ─────────────────────────────────────────────────────
 step "Step 1/9: System packages (apt)"
 export DEBIAN_FRONTEND=noninteractive
+. /etc/os-release  # populates ID=ubuntu|debian, VERSION_ID=…
+DISTRO_ID="${ID:-unknown}"
 APT_PKGS=(
-  ca-certificates curl wget openssl jq
+  ca-certificates curl wget openssl jq gnupg
   xorg xserver-xorg lightdm
   xfce4 xfce4-session xfce4-settings xfwm4 xfdesktop4
   tigervnc-standalone-server tigervnc-common tigervnc-tools
   novnc python3-websockify websockify
-  chromium chromium-sandbox
   unattended-upgrades apt-listchanges
 )
+# Chromium handling differs per distro: on Debian use the deb `chromium`; on Ubuntu the
+# `chromium` deb is empty and `chromium-browser` is a snap (breaks --user-data-dir + --no-sandbox).
+# Install Google Chrome from Google's apt repo on Ubuntu, then symlink to /usr/local/bin/chromium
+# so the relay binary's hardcoded `chromedp.ExecPath("chromium")` still resolves.
+case "$DISTRO_ID" in
+  debian)
+    APT_PKGS+=(chromium chromium-sandbox) ;;
+  ubuntu)
+    if ! [[ -f /etc/apt/sources.list.d/google-chrome.list ]]; then
+      install -d -m 755 /etc/apt/keyrings
+      curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
+      echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+      ok "Added Google Chrome apt repo"
+    fi
+    APT_PKGS+=(google-chrome-stable) ;;
+  *) warn "Untested distro '$DISTRO_ID' — trying Debian package set" ; APT_PKGS+=(chromium) ;;
+esac
 MISSING=()
 for p in "${APT_PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 || MISSING+=("$p"); done
 if [[ ${#MISSING[@]} -gt 0 ]]; then
@@ -79,7 +97,17 @@ if [[ ${#MISSING[@]} -gt 0 ]]; then
   apt-get update -qq
   apt-get install -y --no-install-recommends "${MISSING[@]}" >/dev/null
 fi
-ok "All required packages installed"
+# Pick the browser binary the relay can use (chromedp.ExecPath("chromium") relies on $PATH lookup
+# of `chromium`, so we expose Google Chrome under that name on Ubuntu).
+BROWSER_BIN=""
+for cand in /usr/bin/chromium /usr/bin/google-chrome-stable /usr/bin/google-chrome /usr/bin/chromium-browser; do
+  [[ -x "$cand" ]] && { BROWSER_BIN="$cand"; break; }
+done
+[[ -n "$BROWSER_BIN" ]] || fail "No Chromium/Chrome binary found after apt install"
+if [[ ! -x /usr/local/bin/chromium || "$(readlink -f /usr/local/bin/chromium 2>/dev/null)" != "$BROWSER_BIN" ]]; then
+  ln -sfn "$BROWSER_BIN" /usr/local/bin/chromium
+fi
+ok "All required packages installed (browser: $BROWSER_BIN → /usr/local/bin/chromium)"
 
 # ── step 2: dude user + groups ───────────────────────────────────────────────
 step "Step 2/9: User '$DUDE_USER' (uid $DUDE_UID)"
@@ -126,8 +154,9 @@ cat > "$DUDE_HOME/kiosk-novnc.sh" <<EOF
 # Chromium showing noVNC viewer of display :99 — only on the local screen (:0).
 # Skip when this autostart fires inside the TigerVNC :99 session (would loop).
 [ "\$DISPLAY" = ":0" ] || exit 0
-# --user-data-dir isolates from the Chromium instance relay launches for OAuth on :99
-exec chromium \\
+# /usr/local/bin/chromium is a symlink installed by install.sh — points at chromium (Debian)
+# or google-chrome-stable (Ubuntu). --user-data-dir isolates from relay's OAuth Chromium on :99.
+exec /usr/local/bin/chromium \\
   --no-sandbox \\
   --no-first-run \\
   --disable-infobars \\
@@ -269,11 +298,18 @@ else
   ok "Preserved existing $CONFIG_DIR/relay.env (RELAY_KEY untouched)"
 fi
 
-if [[ ! -f "$CONFIG_DIR/gdrive_client_secret.json" ]]; then
+# Some earlier bootstraps used the shorter name `client_secret.json`. Keep both names pointed
+# at the same content so the unit file stays canonical regardless of which name exists first.
+if [[ -f "$CONFIG_DIR/client_secret.json" && ! -e "$CONFIG_DIR/gdrive_client_secret.json" ]]; then
+  ln -s client_secret.json "$CONFIG_DIR/gdrive_client_secret.json"
+  ok "Linked legacy client_secret.json → gdrive_client_secret.json"
+elif [[ ! -f "$CONFIG_DIR/gdrive_client_secret.json" ]]; then
   echo '{"installed":{"client_id":"placeholder"}}' > "$CONFIG_DIR/gdrive_client_secret.json"
   chmod 600 "$CONFIG_DIR/gdrive_client_secret.json"
+  ok "OAuth gdrive_client_secret.json placeholder created"
+else
+  ok "OAuth gdrive_client_secret.json present"
 fi
-ok "OAuth client_secret placeholder ready"
 
 # ── step 8: systemd units (4 units) ──────────────────────────────────────────
 step "Step 8/9: systemd units (tigervnc-99, novnc, dudenest-relay, update timer)"
