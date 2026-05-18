@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.0] — 2026-05-18 — Media Processing Pipeline
+
+### Added
+- **Video thumbnails via ffmpeg** — `VideoThumbnail()` extracts first frame of any video file (mp4, mov, avi, mkv, webm, m4v, 3gp) as center-cropped 200×200 JPEG; auto-detects video by file extension from FileMap
+- **HEIC→JPEG conversion** — `ConvertHEIC()` converts HEIC/HEIF photos to JPEG before thumbnail generation (Apple device uploads)
+- **Medium preview (800px)** — `GenerateMedium()` creates an 800px longest-side aspect-preserving JPEG preview for fast fullscreen loading; stored at `<configDir>/thumbnails/<fileID>_medium.jpg`
+- **LQIP placeholder** — `LQIPBase64()` generates a 20px-wide base64 data-URI JPEG from the medium preview (not the square thumbnail); returned in `GET /files` response as `lqip` field; used by app for blurred placeholder before full image loads
+- **EXIF DateTimeOriginal** — pure-Go JPEG EXIF extraction (zero CGO, zero deps); `taken_at` returned in `GET /files` response for chronological gallery ordering
+- **Dimension sidecar (.dims)** — `width`, `height`, `taken_at` written to `<fileID>.dims` at upload time; returned in `GET /files` as `width`/`height`/`taken_at` fields
+- **ReadDims()** — reads pixel dimensions from any cached JPEG without re-generating thumbnail
+- **MediumExists / LQIPExists** — cache-hit helpers for conditional generation
+- **ffmpeg auto-install** — `EnsureFFmpeg()` installs ffmpeg via `apt-get` on Linux if not found in PATH (non-interactive)
+
+### Changed
+- **Lazy sidecar generation** — `lazyGenSidecars(fileID, name)` background goroutine: downloads original file, generates missing thumbnail + medium preview + LQIP for files uploaded before this version; deduplication via `sync.Map lazyGenMu`
+- **handleList** — when `.dims` sidecar missing, reads dims from medium preview if available; launches `lazyGenSidecars` in background for files lacking dims or LQIP
+- **handleUpload** — LQIP now generated from `_medium.jpg` (800px, aspect-preserving), not from `<fileID>.jpg` (200×200 square); fixes aspect ratio in placeholder
+- **handleThumbnail** — detects video files by extension, calls `VideoThumbnail()` instead of `Generate()`; triggers `lazyGenSidecars` after first generation
+
+### Fixed
+- **Square LQIP bug** — LQIP was generated from the 200×200 square thumbnail → placeholder always had 1:1 ratio → images appeared square in justified grid; now generated from medium preview (correct AR)
+- **Old files missing AR** — files uploaded before `.dims` sidecar was added showed as 1:1 squares in gallery; lazy gen backfills all sidecars on first access
+- **Video thumbnail failure** — `thumbnail.Generate()` (image decoder) was called for video files → always failed silently; now correctly routes to `VideoThumbnail()` via ffmpeg
+- **Ext detection bug in lazyGenSidecars** — passing `ext` (e.g. `.jpg`) instead of full `name` caused `filepath.Ext(".jpg")=""` (dotfile treatment); now passes `fm.Name` (e.g. `photo.jpg`)
+
+---
+
 ## [0.6.2] — 2026-05-15 — Standby Ping Loop Fix
 
 - 🐛 **RELAY_ID/RELAY_SECRET env fix**: `RegisterOnceWithUserID` return value was discarded (`_, err2`); now captured (`creds2, err2`) → `os.Setenv("RELAY_ID", creds2.RelayID)` executes → `backup.New()` gets valid env → ping loop starts

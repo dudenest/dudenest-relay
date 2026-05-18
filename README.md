@@ -1,6 +1,6 @@
 # dudenest-relay
 
-[![Version](https://img.shields.io/github/v/release/dudenest/dudenest-relay?color=blue&label=Version)](https://github.com/dudenest/dudenest-relay/releases/latest) [![Release Date](https://img.shields.io/github/release-date/dudenest/dudenest-relay?color=lightgrey&label=Released)](https://github.com/dudenest/dudenest-relay/releases/latest) ![Last Update](https://img.shields.io/badge/Update-2026--05--17-orange) ![Status](https://img.shields.io/badge/Status-Pre--Alpha-orange) ![Language](https://img.shields.io/badge/Language-Go-00ADD8) ![License](https://img.shields.io/badge/License-Apache%202.0-green) ![Hardware](https://img.shields.io/badge/Hardware-Raspberry%20Pi%20Zero%202W%2B-red) ![Deployment](https://img.shields.io/badge/Deployment-VM%20%2F%20RPi%20only-blue)
+[![Version](https://img.shields.io/github/v/release/dudenest/dudenest-relay?color=blue&label=Version)](https://github.com/dudenest/dudenest-relay/releases/latest) [![Release Date](https://img.shields.io/github/release-date/dudenest/dudenest-relay?color=lightgrey&label=Released)](https://github.com/dudenest/dudenest-relay/releases/latest) ![Last Update](https://img.shields.io/badge/Update-2026--05--18-orange) ![Status](https://img.shields.io/badge/Status-Pre--Alpha-orange) ![Language](https://img.shields.io/badge/Language-Go-00ADD8) ![License](https://img.shields.io/badge/License-Apache%202.0-green) ![Hardware](https://img.shields.io/badge/Hardware-Raspberry%20Pi%20Zero%202W%2B-red) ![Deployment](https://img.shields.io/badge/Deployment-VM%20%2F%20RPi%20only-blue)
 
 > ⚠️ **2026-05-16**: Swarm deployment has been **removed** — `dudenest-relay` runs only as VM or Raspberry Pi binary now. See [`docs/RELAY-OPS.md`](docs/RELAY-OPS.md) for details.
 
@@ -40,7 +40,7 @@ Your Home Network
 | **Replica Storage** | Full file stored as-is on up to 2 cloud accounts (1 per provider email) |
 | **Failover** | Download tries Main replica first; falls back to Backup replica on error |
 | **FileMap** | SQLite index: file_id → list of `scheme:email:path` locations |
-| **Thumbnail Cache** | Local thumbnails for instant gallery scrolling |
+| **Media Cache** | 200×200 thumbnail + 800 px medium preview + LQIP placeholder + `.dims` sidecar per file |
 | **Prefetch** | Smart prediction of what to pre-download while scrolling |
 | **Cloud Connectors** | Adapters for each cloud provider (Google Drive, etc.) |
 | **Tunnel** | WireGuard via Headscale for secure app connection |
@@ -149,7 +149,7 @@ internal/
 ├── pipeline/       # Replica upload/download engine (current default)
 ├── blockmap/       # SQLite FileMap index (file→provider locations)
 ├── cloudconn/      # Cloud provider connectors (Google Drive, ...)
-├── thumbnail/      # Thumbnail generation (libvips/ffmpeg)
+├── thumbnail/      # Media processing: 200px thumbnail, 800px preview, LQIP, EXIF, video thumbs via ffmpeg
 ├── prefetch/       # Smart prefetch engine
 ├── api/            # Local REST API (for app)
 ├── auth/           # JWT validation, relay token (L2/L3 security)
