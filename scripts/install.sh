@@ -68,8 +68,8 @@ export DEBIAN_FRONTEND=noninteractive
 DISTRO_ID="${ID:-unknown}"
 APT_PKGS=(
   ca-certificates curl wget openssl jq gnupg
-  xorg xserver-xorg lightdm accountsservice dbus-x11
-  xfce4 xfce4-session xfce4-settings xfwm4 xfdesktop4
+  xorg xserver-xorg lightdm accountsservice dbus-x11 dbus-user-session at-spi2-core
+  xfce4 xfce4-session xfce4-settings xfwm4 xfdesktop4 xfce4-panel
   xfce4-terminal  # satisfies xorg's `x-terminal-emulator` dep so gnome-terminal isn't pulled in
   tigervnc-standalone-server tigervnc-common tigervnc-tools
   novnc python3-websockify websockify
@@ -146,15 +146,25 @@ EOF
 # producing a "failsafe session" popup that floated above the kiosk Chromium).
 cat > /usr/local/bin/dudenest-xsession <<'EOF'
 #!/bin/bash
+# Xfce-like desktop on :0 — launch components directly (skip xfce4-session, which is
+# broken on Ubuntu 24.04 lightdm-autologin: GLib-GIO-CRITICAL dbus-proxy assertions →
+# "failsafe session" popup). xfwm4 draws decorations on every top-level window,
+# including the kiosk Chromium that dudenest-kiosk.service launches as root.
 xhost +SI:localuser:root 2>/dev/null
 xset s off -dpms 2>/dev/null
+eval "$(dbus-launch --sh-syntax --exit-with-session)"
+xfwm4 --replace &
+sleep 1
+xfsettingsd &
+xfce4-panel &
+xfdesktop &
 exec sleep infinity
 EOF
 chmod 755 /usr/local/bin/dudenest-xsession
 cat > /usr/share/xsessions/dudenest.desktop <<EOF
 [Desktop Entry]
 Name=Dudenest Relay
-Comment=Minimal X session that authorizes root for kiosk Chromium
+Comment=Xfce components (xfwm4 + xfsettingsd + xfce4-panel + xfdesktop) without xfce4-session
 Exec=/usr/local/bin/dudenest-xsession
 Type=Application
 EOF
@@ -183,14 +193,22 @@ install -d -o "$DUDE_USER" -g "$DUDE_USER" -m 755 "$DUDE_HOME/.config/chromium-n
 
 cat > "$DUDE_HOME/.vnc/xstartup" <<'EOF'
 #!/bin/bash
-# Minimal :99 X session — empty desktop until the relay binary launches Chromium for OAuth.
-# A full DE (e.g. startxfce4) is intentionally NOT started here: on Ubuntu 24.04 xfconfd's
-# D-Bus dance produces a "failsafe session" popup that ends up visible through the noVNC
-# viewer running on :0. Keeping :99 bare avoids that popup entirely.
+# Xfce-like desktop on :99 — launch components directly (skip xfce4-session, which is
+# broken on Ubuntu 24.04 lightdm-autologin: GLib-GIO-CRITICAL dbus-proxy assertions →
+# "failsafe session" popup visible through the noVNC viewer). Same visual result as
+# `startxfce4`: xfwm4 draws window decorations on every top-level window (including the
+# Chromium browser relay launches for Google OAuth).
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
 xhost +SI:localuser:root 2>/dev/null
 xset s off -dpms 2>/dev/null
+# dbus-launch creates a per-session bus so xfce4-panel/xfdesktop can publish their services
+eval "$(dbus-launch --sh-syntax --exit-with-session)"
+xfwm4 --replace &
+sleep 1
+xfsettingsd &
+xfce4-panel &
+xfdesktop &
 exec sleep infinity
 EOF
 chown "$DUDE_USER:$DUDE_USER" "$DUDE_HOME/.vnc/xstartup"
@@ -458,8 +476,13 @@ Wants=lightdm.service novnc.service
 Type=simple
 User=root
 Environment=DISPLAY=:0 XAUTHORITY=/var/run/lightdm/root/:0
-ExecStartPre=/bin/bash -c 'for i in {1..30}; do [[ -S /tmp/.X11-unix/X0 && -f /var/run/lightdm/root/:0 ]] && exit 0; sleep 2; done; exit 1'
-ExecStart=/usr/local/bin/chromium --no-sandbox --test-type --no-first-run --disable-infobars --disable-translate --user-data-dir=/var/lib/dudenest/kiosk-chrome --start-maximized http://localhost:$NOVNC_PORT/dudenest.html
+# Wait not only for the X socket but also for xfwm4 to be running — otherwise Chromium
+# starts before the window manager and ends up with no decorations.
+ExecStartPre=/bin/bash -c 'for i in {1..30}; do [[ -S /tmp/.X11-unix/X0 && -f /var/run/lightdm/root/:0 ]] && pgrep -x xfwm4 >/dev/null && exit 0; sleep 2; done; exit 1'
+# Same flags as relay-poc's /home/dude/kiosk-novnc.sh — produces a normal Chromium window
+# with xfwm4 decorations (NOT --kiosk). --test-type intentionally NOT used here because it
+# can suppress UI chrome users expect (banner is acceptable; decorations matter more).
+ExecStart=/usr/local/bin/chromium --no-sandbox --no-first-run --disable-infobars --user-data-dir=/var/lib/dudenest/kiosk-chrome --start-maximized http://localhost:$NOVNC_PORT/dudenest.html
 Restart=on-failure
 RestartSec=8
 [Install]
