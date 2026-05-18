@@ -4,12 +4,13 @@
 **Created**: 2026-05-18
 **Status**: 📐 design — ready for implementation by next agent
 **Priority**: 🔴 P0 — blocks every new relay from registering Google Drive accounts
+**Scope**: 🌍 **GLOBAL — fleet-wide infrastructure change**. This is NOT a one-off fix for relay-poc2; it is the missing piece of the Dudenest relay fleet's secret-distribution architecture. After this lands, **every relay that ever exists** (relay-poc, relay-poc2, relay-poc3, ..., relay-poc-N — and every future user's home relay) pulls the OAuth Web Client credentials from the hub at provisioning time, with zero per-machine touching. The same mechanism also gives us a single-point rotation surface: change one Docker Swarm secret in `dudenest-backup`, restart every relay, and the entire fleet is on the new OAuth app credentials within a single auto-update cycle.
 
 ---
 
 ## 1. Problem statement
 
-Today every new Dudenest Relay (e.g. relay-poc2 bootstrapped via `scripts/install.sh v0.8.0`) starts with a **placeholder** `/etc/dudenest/gdrive_client_secret.json` such as `{"type":"service_account"}` or `{"installed":{"client_id":"placeholder"}}`. When the user tries to add a Google Drive account via the Dudenest app, the relay launches Chromium with an invalid `client_id` and Google answers with:
+Today every Dudenest Relay bootstrapped via `scripts/install.sh` (v0.6.x through v0.8.2 inclusive) starts with a **placeholder** `/etc/dudenest/gdrive_client_secret.json` such as `{"type":"service_account"}` or `{"installed":{"client_id":"placeholder"}}`. When a user tries to add a Google Drive account via the Dudenest app, the relay launches Chromium with an invalid `client_id` and Google answers with:
 
 ```
 Access blocked: Authorization Error
@@ -17,11 +18,15 @@ Missing required parameter: client_id
 Error 400: invalid_request
 ```
 
-This affects relay-poc2 right now (`192.168.1.127`, Ubuntu 24.04) and will affect every future relay (relay-poc3, relay-poc4, …) unless the OAuth credentials are distributed automatically.
+This affects the entire relay fleet — every relay bootstrapped by the script is **structurally unable** to register a single cloud account. Today (2026-05-18) the impact is visible on relay-poc2; tomorrow it will affect relay-poc3, relay-poc4, and every home VM/RPi a user provisions. The only relay where OAuth works (`relay-poc`, `10.51.1.119`, Debian 12) was configured **by hand before the bootstrap existed** — it carries `client_id 932297984145-…googleusercontent.com` in a manually-installed `gdrive_client_secret.json`. That manual configuration is exactly the workflow we are eliminating.
 
-The same Google OAuth **Web Client** credentials (registered for the single Dudenest app at https://console.cloud.google.com) must end up on every relay. They are not user-specific — per-user Google Drive tokens are obtained later via the OAuth flow and stored separately under `/var/lib/dudenest/maps/providers/`.
+The same Google OAuth **Web Client** credentials (registered once for the single Dudenest app at https://console.cloud.google.com) must end up on **every** relay in the fleet. They are not user-specific and not per-relay — per-user Google Drive tokens are obtained later via the OAuth flow and stored separately under `/var/lib/dudenest/maps/providers/`. The OAuth Web Client credentials are a **fleet-wide shared secret** that lives at the application level, identical on every machine.
 
-The existing reference relay (`relay-poc`, `10.51.1.119`, Debian 12) was configured by hand before the bootstrap was automated, so it already has the right `gdrive_client_secret.json` (`932297984145-…googleusercontent.com`).
+### Why fleet-wide and not per-relay
+
+- The Dudenest app is registered as a single OAuth client at Google. Every relay opening the OAuth flow MUST present the same `client_id`/`client_secret` — that is what Google authorized for the app.
+- Treating this as a per-relay configuration is wrong by design: it would mean every user provisioning a home relay needs to register their own OAuth app at Google Cloud Console, which contradicts the Dudenest product promise of "plug in the relay, sign in to Google".
+- This is the same pattern as `JWT_SECRET` and `BACKUP_URL` — fleet-wide values already delivered by the hub at provisioning time. We are just adding one more field to the same payload.
 
 ## 2. Architecture decision
 
@@ -171,45 +176,56 @@ The deployment for `dudenest-backup` (or whichever service serves `/relay/bootst
 
 - If the backup service is not running under Swarm, mount as a file via the equivalent mechanism (systemd EnvironmentFile, Kubernetes Secret, etc.).
 
-## 4. Acceptance criteria
+## 4. Acceptance criteria — fleet-wide
 
-1. **Fresh-VM bootstrap** — provision a fresh Debian 12 or Ubuntu 24.04 VM, run `curl -sSL https://raw.githubusercontent.com/dudenest/dudenest-relay/main/scripts/install.sh | sudo bash`, wait for ZT provisioning to complete. After the run:
+These criteria apply to **every relay in the fleet**, current and future. The implementation is not done until all four pass on at least two distinct relays (one Debian, one Ubuntu) AND on a fresh-from-scratch VM.
+
+1. **Fresh-VM bootstrap (zero-touch)** — provision a brand-new Debian 12 or Ubuntu 24.04 VM (no prior dudenest state), run `curl -sSL https://raw.githubusercontent.com/dudenest/dudenest-relay/main/scripts/install.sh | sudo bash`, wait for ZT provisioning. After the run:
    - `/etc/dudenest/gdrive_client_secret.json` exists and contains `"client_id":"932297984145-…"` (or the current Dudenest OAuth Web Client ID).
    - Opening the Dudenest app → Add Cloud Account → Google OAuth flow shows the Google login screen (not "Authorization Error").
-2. **OAuth rotation** — change the Docker secret `relay_gdrive_client_secret` in production; restart `dudenest-backup`; restart any relay (e.g. `systemctl restart dudenest-relay` on relay-poc); the relay's `/etc/dudenest/gdrive_client_secret.json` updates to the new value within one bootstrap cycle.
-3. **No regression on existing relays** — relay-poc (already manually configured) re-runs `install.sh` (or upgrades to the new relay binary); its existing real credentials are NOT overwritten. Verified by `shouldReplace()` returning `false` for files that don't contain placeholder markers.
+   - No operator ever SSH'd into the VM to touch credentials.
+2. **OAuth rotation across the entire fleet** — operator changes the Docker secret `relay_gdrive_client_secret` in production once; restarts `dudenest-backup`. Then for every relay (relay-poc, relay-poc2, every future relay): a single `systemctl restart dudenest-relay` (or just waiting one `dudenest-relay-update.timer` cycle = 24 h) replaces `/etc/dudenest/gdrive_client_secret.json` with the new value. **Zero per-relay touching.**
+3. **No regression on hand-configured legacy relays** — relay-poc (originally configured by hand, now migrated to v0.8.2 paths) carries `client_id 932297984145-…` and continues to work. Re-running `install.sh` does not overwrite it. Verified by `shouldReplace()` returning `false` for files that don't contain placeholder markers (`"placeholder"`, `"service_account"`).
+4. **install.sh stops creating placeholders** — every reference to writing `{"installed":{"client_id":"placeholder"}}` or `{"type":"service_account"}` is removed from `scripts/install.sh`. After a fresh `install.sh` run before `/relay/bootstrap` returns, the file simply does not exist — there is nothing to "replace later". The bootstrap fetch is the only source of truth.
 
-## 5. Rollout sequence
+## 5. Rollout sequence — fleet-wide
 
-1. **dudenest-backup** PR → merge → CI deploys backup with the new env/secret wired in.
-2. **dudenest-infra** PR (if separate) → adds the Docker secret + secret to the stack.
-3. **dudenest-relay** PR → release as v0.9.0 (or v0.8.1 if treated as fix). CI publishes GH Release with binaries.
-4. **dudenest-relay-update.timer** on every existing relay picks up the new binary within 24 h; on next restart, relay calls `/relay/bootstrap` and receives the OAuth credentials.
+This is a 4-repo coordinated rollout. Order matters: backend must serve the new field BEFORE relay binary tries to consume it.
 
-## 6. Interim manual fix (one-time, only for relays bootstrapped before this plan lands)
+1. **`dudenest-infra`** — add Docker Swarm secret `relay_gdrive_client_secret` (populated from existing GitHub Actions secret `RELAY_GDRIVE_CLIENT_SECRET_B64` — already present per `dudenest-relay/docs/RELAY-OPS.md`), mount into `dudenest-backup` service. Deploy. Backend now has the secret available but doesn't serve it yet.
+2. **`dudenest-backup`** — implement the API change (§3.1). Tag + release. CI redeploys the backup service. Verify: `curl ".../relay/bootstrap?announce_token=<test>"` returns the new `gdrive_client_secret` field for a test announce.
+3. **`dudenest-relay`** — implement the consumer side (§3.2) + drop install.sh placeholder (§3.3). Tag v0.9.0. CI publishes binaries. **Critical**: relay code must tolerate older backends (empty `gdrive_client_secret` → no-op, keep whatever is there) so the relay binary release can land before EVERY infrastructure node finishes upgrading.
+4. **Fleet rollout — automatic** — `dudenest-relay-update.timer` (already on every relay since v0.8.0) picks up the new relay binary within 24 h. On the next `systemctl restart dudenest-relay` (also automatic via the timer's restart-if-updated logic), every relay calls `/relay/bootstrap` and receives the OAuth credentials. **No manual SSH to any relay.**
 
-Until the above is shipped, an operator with access to `relay-poc` can copy the JSON to any new relay:
+## 6. Interim manual fix (TEMPORARY — must be deleted after §5 lands)
+
+Until the four-repo rollout in §5 ships, an operator with access to `relay-poc` (the only relay with real credentials today) can seed any other relay manually:
 
 ```bash
-scp root@10.51.1.119:/root/.config/dudenest/gdrive_client_secret.json root@<new-relay-ip>:/etc/dudenest/gdrive_client_secret.json
-ssh root@<new-relay-ip> 'rm -f /etc/dudenest/client_secret.json && systemctl restart dudenest-relay'
+scp root@10.51.1.119:/etc/dudenest/gdrive_client_secret.json root@<new-relay-ip>:/etc/dudenest/gdrive_client_secret.json
+ssh root@<new-relay-ip> 'systemctl restart dudenest-relay'
 ```
 
-This is the **only manual step** that needs to exist while the auto-distribution is being implemented. Once shipped, it goes away forever.
+This is the **only** manual step that is allowed to exist in the project, and only while §5 is in progress. The day §5 ships, this section is deleted from the docs, the placeholder-creation logic is removed from install.sh, and the fleet operates fully hands-off — every new relay (relay-poc-N for N > 2, every user's home VM) bootstraps without anyone running `scp` or `systemctl restart` by hand.
 
 ## 7. Risks & mitigations
 
 | Risk | Mitigation |
 |------|-----------|
-| OAuth Web Client secret leaks via `/relay/bootstrap` (which is currently a public endpoint guarded only by a single-use `announce_token`) | The endpoint is already used to ship `jwt_secret`, which is at least as sensitive. The `announce_token` is one-time and consumed atomically. No new attack surface. |
-| Real credentials on relay-poc get overwritten with placeholder during a re-register | `shouldReplace()` guards against this by inspecting the existing file for known placeholder markers before writing. |
-| Operator forgets to populate `RELAY_GDRIVE_CLIENT_SECRET_B64` in CI secrets before merging | Backup will return an empty `gdrive_client_secret` field → relay logs `register: gdrive_client_secret empty in payload — keeping existing file` and falls back to whatever was there. No crash. |
+| OAuth Web Client secret leaks via `/relay/bootstrap` (currently a public endpoint guarded only by a single-use `announce_token`) | The endpoint is already used to ship `jwt_secret`, which is at least as sensitive. The `announce_token` is one-time and consumed atomically. No new attack surface. |
+| Real credentials on relay-poc get overwritten with placeholder during a re-register | `shouldReplace()` guards against this by inspecting the existing file for known placeholder markers before writing. Real credentials (contain `"web":{"client_id":"932297984145-..."}`) are never touched. |
+| Operator forgets to populate `RELAY_GDRIVE_CLIENT_SECRET_B64` in CI secrets before merging the backend change | Backup returns an empty `gdrive_client_secret` field → relay logs `register: gdrive_client_secret empty in payload — keeping existing file` and falls back to whatever was there. No crash, easy to spot in monitoring. |
+| Older relay binary (pre-v0.9.0) hits the new backend and ignores the unknown field | JSON unmarshal in Go silently drops unknown fields. Pre-v0.9.0 relays keep working with their placeholder (no behavior change). The transition is forward-compatible. |
+| Newer relay binary (v0.9.0+) hits an older backend that doesn't serve the field | Empty string is the zero value. `if p.GdriveClientSecret != ""` skips the write. The relay falls back to whatever was already on disk. Forward + backward compatible. |
 
-## 8. Out of scope
+## 8. Future extensions (out of scope for this PR, but built on the same mechanism)
 
-- Multi-provider OAuth (MEGA, OneDrive, pCloud, …) — same pattern can be applied with `mega_client_secret`, `onedrive_client_secret`, etc. fields. Implement when those providers are wired up.
-- Per-relay distinct OAuth clients — current design intentionally uses a single shared Dudenest OAuth Web Client across all relays. If multi-tenancy ever requires per-relay OAuth apps, that's a separate design.
+The fleet-wide credential delivery channel established here unblocks several follow-ups. Each of these is **out of scope for the v0.9.0 release** but should be filed as separate tickets so the design intent isn't lost:
+
+- **Multi-provider OAuth**: MEGA, OneDrive, pCloud, Filen, Box, Icedrive, Koofr, Backblaze B2, Storj — same pattern with `mega_client_secret`, `onedrive_client_secret`, etc. fields. Implement per-provider when each is wired into the relay's `internal/cloudconn/`.
+- **JWT_SECRET rotation visibility**: today JWT_SECRET is delivered by the same `/relay/bootstrap` payload but rotation requires a full relay reboot. Could be hot-reloaded by the same code path on subsequent fetches.
+- **Per-relay distinct OAuth clients**: current design intentionally uses a single shared Dudenest OAuth Web Client across the whole fleet. If multi-tenancy (e.g. each user gets their own Google Cloud project + OAuth app for stricter isolation) is ever required, the mechanism extends naturally — backend just looks up the per-relay OAuth client by `relay_id` instead of returning the fleet-wide one.
 
 ---
 
-**Next agent: see `~/.AI/dudenest-application/NEXT-AGENT-INSTRUCTIONS.md` for a self-contained handoff checklist.**
+**Next agent: see `~/.AI/dudenest-application/NEXT-AGENT-INSTRUCTIONS.md` for a self-contained handoff checklist. This plan is FLEET-WIDE infrastructure, not a one-off patch.**
