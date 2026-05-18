@@ -132,21 +132,38 @@ else
   ok "User $DUDE_USER exists (uid $(id -u "$DUDE_USER"))"
 fi
 
-# ── step 3: LightDM autologin → Xfce on :0 ──────────────────────────────────
-step "Step 3/9: LightDM autologin (Xfce session for '$DUDE_USER')"
+# ── step 3: LightDM autologin → minimal X session ─────────────────────────────
+step "Step 3/9: LightDM autologin (minimal 'dudenest' X session for '$DUDE_USER')"
 mkdir -p /etc/lightdm/lightdm.conf.d
 cat > /etc/lightdm/lightdm.conf.d/50-dudenest-autologin.conf <<EOF
 [Seat:*]
 autologin-user=$DUDE_USER
 autologin-user-timeout=0
-user-session=xfce
+user-session=dudenest
+EOF
+# Minimal X session: authorize root on :0 (so dudenest-kiosk can open Chromium there) and idle.
+# Full Xfce was unreliable under lightdm-autologin on Ubuntu 24.04 (xfconfd D-Bus race
+# producing a "failsafe session" popup that floated above the kiosk Chromium).
+cat > /usr/local/bin/dudenest-xsession <<'EOF'
+#!/bin/bash
+xhost +SI:localuser:root 2>/dev/null
+xset s off -dpms 2>/dev/null
+exec sleep infinity
+EOF
+chmod 755 /usr/local/bin/dudenest-xsession
+cat > /usr/share/xsessions/dudenest.desktop <<EOF
+[Desktop Entry]
+Name=Dudenest Relay
+Comment=Minimal X session that authorizes root for kiosk Chromium
+Exec=/usr/local/bin/dudenest-xsession
+Type=Application
 EOF
 systemctl set-default graphical.target >/dev/null 2>&1 || true
 systemctl enable lightdm >/dev/null 2>&1 || true
 # `systemctl enable lightdm` only sets "indirect" via display-manager.service alias — must also
 # start it explicitly here so the console is in graphical mode without rebooting the VM.
 systemctl start lightdm 2>/dev/null || warn "lightdm failed to start — check: journalctl -u lightdm"
-ok "LightDM autologin configured → $DUDE_USER (xfce), service started"
+ok "LightDM autologin configured → $DUDE_USER (dudenest minimal session), service started"
 
 # ── step 4: dude home — xstartup, kiosk script, Chromium autostart ──────────
 step "Step 4/9: Desktop files (Xfce + Chromium autostart on :0)"
