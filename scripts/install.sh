@@ -158,6 +158,15 @@ Comment=Minimal X session that authorizes root for kiosk Chromium
 Exec=/usr/local/bin/dudenest-xsession
 Type=Application
 EOF
+# /etc/X11/Xsession.d/99x11-common_start does `exec $STARTUP`, where STARTUP defaults to
+# `x-session-manager` (a Debian alternative). Without this, even when lightdm asks for our
+# dudenest session, Xsession would fall back to startxfce4 → xfce4-session which floods the
+# kiosk with "failsafe session" popups. Make dudenest-xsession the highest-priority alternative.
+update-alternatives --install /usr/bin/x-session-manager x-session-manager /usr/local/bin/dudenest-xsession 200 >/dev/null 2>&1 || true
+update-alternatives --set x-session-manager /usr/local/bin/dudenest-xsession >/dev/null 2>&1 || true
+# Belt-and-braces: mask the xfce4-session systemd user unit so dbus-launch can't dbus-activate it
+mkdir -p /etc/systemd/user
+ln -sfn /dev/null /etc/systemd/user/xfce4-session.service
 systemctl set-default graphical.target >/dev/null 2>&1 || true
 systemctl enable lightdm >/dev/null 2>&1 || true
 # `systemctl enable lightdm` only sets "indirect" via display-manager.service alias — must also
