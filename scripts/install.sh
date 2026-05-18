@@ -183,11 +183,15 @@ install -d -o "$DUDE_USER" -g "$DUDE_USER" -m 755 "$DUDE_HOME/.config/chromium-n
 
 cat > "$DUDE_HOME/.vnc/xstartup" <<'EOF'
 #!/bin/bash
+# Minimal :99 X session — empty desktop until the relay binary launches Chromium for OAuth.
+# A full DE (e.g. startxfce4) is intentionally NOT started here: on Ubuntu 24.04 xfconfd's
+# D-Bus dance produces a "failsafe session" popup that ends up visible through the noVNC
+# viewer running on :0. Keeping :99 bare avoids that popup entirely.
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
-xhost +SI:localuser:root
-xset s off -dpms
-exec startxfce4
+xhost +SI:localuser:root 2>/dev/null
+xset s off -dpms 2>/dev/null
+exec sleep infinity
 EOF
 chown "$DUDE_USER:$DUDE_USER" "$DUDE_HOME/.vnc/xstartup"
 chmod 755 "$DUDE_HOME/.vnc/xstartup"
