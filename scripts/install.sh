@@ -247,6 +247,15 @@ chmod +x "$RELAY_BIN"
 ok "Relay binary: $RELAY_BIN ($RELAY_ARCH)"
 
 mkdir -p "$CONFIG_DIR/providers" "$DATA_DIR/maps" "$DATA_DIR/thumbs"
+# Legacy migration: relay-poc (pre-bootstrap) stored config in /root/.config/dudenest/.
+# Move it into /etc/dudenest/ so RELAY_KEY, OAuth tokens and relay_creds survive.
+LEGACY_DIR="/root/.config/dudenest"
+if [[ -f "$LEGACY_DIR/relay.env" && ! -f "$CONFIG_DIR/relay.env" ]]; then
+  warn "Found legacy config at $LEGACY_DIR — migrating to $CONFIG_DIR"
+  cp -an "$LEGACY_DIR/." "$CONFIG_DIR/"  # copy everything we don't already have
+  ln -sfn "$CONFIG_DIR" "$LEGACY_DIR.new" && mv -T "$LEGACY_DIR" "$LEGACY_DIR.legacy" && mv "$LEGACY_DIR.new" "$LEGACY_DIR"
+  ok "Migrated legacy config; previous dir kept as $LEGACY_DIR.legacy, $LEGACY_DIR now symlinks to $CONFIG_DIR"
+fi
 if [[ ! -f "$CONFIG_DIR/relay.env" ]]; then
   RELAY_KEY=$(openssl rand -hex 32)
   cat > "$CONFIG_DIR/relay.env" <<EOF
@@ -257,7 +266,7 @@ EOF
   chmod 600 "$CONFIG_DIR/relay.env"
   ok "Generated $CONFIG_DIR/relay.env (new RELAY_KEY)"
 else
-  ok "Preserved existing $CONFIG_DIR/relay.env"
+  ok "Preserved existing $CONFIG_DIR/relay.env (RELAY_KEY untouched)"
 fi
 
 if [[ ! -f "$CONFIG_DIR/gdrive_client_secret.json" ]]; then
@@ -353,9 +362,13 @@ systemctl daemon-reload
 for svc in tigervnc-99 novnc dudenest-relay dudenest-relay-update.timer; do
   systemctl enable "$svc" >/dev/null 2>&1
 done
-# Stop legacy unit name if a previous install used it
-systemctl stop relay.service 2>/dev/null || true
-systemctl disable relay.service 2>/dev/null || true
+# Replace legacy relay.service (older relay-poc setup) with the new dudenest-relay.service.
+# Only swap if the new service can actually start with /etc/dudenest/relay.env present.
+if systemctl is-enabled --quiet relay.service 2>/dev/null && [[ -f "$CONFIG_DIR/relay.env" ]]; then
+  warn "Found legacy relay.service — disabling in favor of dudenest-relay.service"
+  systemctl stop relay.service 2>/dev/null || true
+  systemctl disable relay.service 2>/dev/null || true
+fi
 # (Re)start in dependency order
 systemctl restart tigervnc-99 || warn "tigervnc-99 failed to start — check: journalctl -u tigervnc-99"
 systemctl restart novnc       || warn "novnc failed to start"
