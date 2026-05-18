@@ -284,8 +284,11 @@ ok "Joined ZT $ZT_NETWORK (hub will authorize automatically)"
 # ── step 7: Relay binary + config ────────────────────────────────────────────
 step "Step 7/9: Relay binary + configuration"
 RELAY_URL="https://github.com/$RELAY_REPO/releases/latest/download/relay-$RELAY_ARCH"
-curl -fsSL "$RELAY_URL" -o "$RELAY_BIN" || fail "Failed to download relay binary"
-chmod +x "$RELAY_BIN"
+# Download to .new and atomic-rename so a currently-running relay process doesn't block the write
+RELAY_TMP="${RELAY_BIN}.new"
+curl -fsSL "$RELAY_URL" -o "$RELAY_TMP" || fail "Failed to download relay binary"
+chmod +x "$RELAY_TMP"
+mv -f "$RELAY_TMP" "$RELAY_BIN"
 ok "Relay binary: $RELAY_BIN ($RELAY_ARCH)"
 
 mkdir -p "$CONFIG_DIR/providers" "$DATA_DIR/maps" "$DATA_DIR/thumbs"
