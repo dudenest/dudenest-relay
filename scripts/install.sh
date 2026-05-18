@@ -153,9 +153,12 @@ cat > /usr/local/bin/dudenest-xsession <<'EOF'
 xhost +SI:localuser:root 2>/dev/null
 xset s off -dpms 2>/dev/null
 eval "$(dbus-launch --sh-syntax --exit-with-session)"
-xfwm4 --replace &
+# xfconfd must be running before xfce4-panel/xfdesktop so they can load default config
+/usr/lib/x86_64-linux-gnu/xfce4/xfconf/xfconfd &
 sleep 1
+xfwm4 --replace &
 xfsettingsd &
+sleep 1
 xfce4-panel &
 xfdesktop &
 exec sleep infinity
@@ -204,9 +207,12 @@ xhost +SI:localuser:root 2>/dev/null
 xset s off -dpms 2>/dev/null
 # dbus-launch creates a per-session bus so xfce4-panel/xfdesktop can publish their services
 eval "$(dbus-launch --sh-syntax --exit-with-session)"
-xfwm4 --replace &
+# xfconfd must be running before xfce4-panel/xfdesktop so they can load default config
+/usr/lib/x86_64-linux-gnu/xfce4/xfconf/xfconfd &
 sleep 1
+xfwm4 --replace &
 xfsettingsd &
+sleep 1
 xfce4-panel &
 xfdesktop &
 exec sleep infinity
@@ -466,7 +472,15 @@ EOF
 # `ExecStartPre` polls for both the X socket and lightdm's auth file — handles boot ordering
 # without coupling to graphical-session.target (which isn't reliable when no user is logged in
 # via a real greeter).
-mkdir -p /var/lib/dudenest/kiosk-chrome
+mkdir -p /var/lib/dudenest/kiosk-chrome/Default
+# Pre-seed Chrome Preferences with `custom_chrome_frame=false` so Chrome uses the
+# system (xfwm4) title bar + window decorations instead of its built-in CSD frame.
+# This is equivalent to chrome://settings → Appearance → "Use system title bar and borders".
+if [[ ! -f /var/lib/dudenest/kiosk-chrome/Default/Preferences ]]; then
+  cat > /var/lib/dudenest/kiosk-chrome/Default/Preferences <<'PREFEOF'
+{"browser":{"custom_chrome_frame":false,"window_placement":{"maximized":true}}}
+PREFEOF
+fi
 cat > /etc/systemd/system/dudenest-kiosk.service <<EOF
 [Unit]
 Description=Dudenest noVNC kiosk — Chromium on :0 showing http://localhost:$NOVNC_PORT/dudenest.html
@@ -475,13 +489,14 @@ Wants=lightdm.service novnc.service
 [Service]
 Type=simple
 User=root
-Environment=DISPLAY=:0 XAUTHORITY=/var/run/lightdm/root/:0
+# XDG_CURRENT_DESKTOP=XFCE tells Google Chrome to use server-side decorations (drawn by xfwm4)
+# instead of its built-in CSD frame. GTK_USE_PORTAL=0 disables the GTK portal that also draws CSD.
+Environment=DISPLAY=:0 XAUTHORITY=/var/run/lightdm/root/:0 XDG_CURRENT_DESKTOP=XFCE GTK_USE_PORTAL=0
 # Wait not only for the X socket but also for xfwm4 to be running — otherwise Chromium
 # starts before the window manager and ends up with no decorations.
 ExecStartPre=/bin/bash -c 'for i in {1..30}; do [[ -S /tmp/.X11-unix/X0 && -f /var/run/lightdm/root/:0 ]] && pgrep -x xfwm4 >/dev/null && exit 0; sleep 2; done; exit 1'
 # Same flags as relay-poc's /home/dude/kiosk-novnc.sh — produces a normal Chromium window
-# with xfwm4 decorations (NOT --kiosk). --test-type intentionally NOT used here because it
-# can suppress UI chrome users expect (banner is acceptable; decorations matter more).
+# with xfwm4 decorations (NOT --kiosk). --test-type intentionally NOT used (it suppresses UI).
 ExecStart=/usr/local/bin/chromium --no-sandbox --no-first-run --disable-infobars --user-data-dir=/var/lib/dudenest/kiosk-chrome --start-maximized http://localhost:$NOVNC_PORT/dudenest.html
 Restart=on-failure
 RestartSec=8
