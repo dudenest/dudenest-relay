@@ -1,6 +1,7 @@
 // client_test.go — covers fleet-wide OAuth credential persistence in WriteBootstrapCreds.
-// Critical guard: real Google Web Client JSON must NEVER be overwritten by hub-delivered placeholder
-// or by a re-register cycle. shouldReplaceOAuth() encodes that contract; these tests pin it.
+// Critical guard: real Google OAuth client JSON ("installed" or "web" format — Dudenest uses "installed"
+// today on relay-poc) must NEVER be overwritten by hub-delivered placeholder or by a re-register cycle.
+// shouldReplaceOAuth() encodes that contract; these tests pin it.
 package register
 
 import (
@@ -32,14 +33,19 @@ func TestShouldReplaceOAuth_Missing(t *testing.T) {
 }
 
 // TestShouldReplaceOAuth_RealCredentials is the most important guard: relay-poc's hand-configured
-// Web Client JSON (the only kind Dudenest actually uses) must NEVER be replaced — overwriting it
-// would log out every user paired with that relay until the operator manually restored the file.
+// real OAuth client JSON ("installed" format — what relay-poc actually carries today; or "web" — both supported
+// by oauth2.ConfigFromJSON) must NEVER be replaced; overwriting it would break OAuth for every user paired
+// with that relay until the operator manually restored the file.
 func TestShouldReplaceOAuth_RealCredentials(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "gdrive_client_secret.json")
-	real := `{"web":{"client_id":"932297984145-real.apps.googleusercontent.com","project_id":"dudenest-prod","client_secret":"GOCSPX-realsecret"}}`
-	if err := os.WriteFile(path, []byte(real), 0o600); err != nil { t.Fatal(err) }
-	if shouldReplaceOAuth(path) { t.Error("real Web Client JSON must be preserved (not contain placeholder/service_account markers)") }
+	pathWeb := filepath.Join(dir, "web.json")
+	realWeb := `{"web":{"client_id":"932297984145-real.apps.googleusercontent.com","project_id":"dudenest-prod","client_secret":"GOCSPX-realsecret"}}`
+	if err := os.WriteFile(pathWeb, []byte(realWeb), 0o600); err != nil { t.Fatal(err) }
+	if shouldReplaceOAuth(pathWeb) { t.Error("real web-format OAuth JSON must be preserved") }
+	pathInstalled := filepath.Join(dir, "installed.json")
+	realInstalled := `{"installed":{"client_id":"932297984145-real.apps.googleusercontent.com","project_id":"dudenest-prod","auth_uri":"https://accounts.google.com/o/oauth2/auth","token_uri":"https://oauth2.googleapis.com/token","client_secret":"GOCSPX-realsecret"}}`
+	if err := os.WriteFile(pathInstalled, []byte(realInstalled), 0o600); err != nil { t.Fatal(err) }
+	if shouldReplaceOAuth(pathInstalled) { t.Error("real installed-format OAuth JSON (what relay-poc carries) must be preserved") }
 }
 
 // TestWriteBootstrapCreds_WritesGDriveOnFirstBoot covers the fresh-VM path:
@@ -55,7 +61,7 @@ func TestWriteBootstrapCreds_WritesGDriveOnFirstBoot(t *testing.T) {
 }
 
 // TestWriteBootstrapCreds_PreservesRealCredentialsOnReRegister covers the legacy-relay path:
-// relay-poc already has real Web Client JSON. A re-register cycle must NOT overwrite it,
+// relay-poc already has real OAuth client JSON ("installed" format today). A re-register cycle must NOT overwrite it,
 // even if the hub returns different credentials (e.g. during rollout when the hub hasn't been seeded yet).
 func TestWriteBootstrapCreds_PreservesRealCredentialsOnReRegister(t *testing.T) {
 	dir := t.TempDir()
