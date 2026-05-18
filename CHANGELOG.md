@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.2] — 2026-05-18 — Xfce panel renders correctly (`~/.config` ownership + `dbus-run-session`)
+
+### Fixed
+- **Critical permission bug**: `install -d -o dude -g dude /home/dude/.config/autostart` only chowned the **leaf** directory — `~/.config` itself stayed `root:root` from when `install` created the missing parents. `xfconfd` running as `dude` then couldn't create `~/.config/xfce4/xfconf/` → died with `Unable to create configuration directory "(null)"` → `xfce4-panel` fell back to its built-in stub geometry (128×50 in the top-left corner) on every fresh bootstrap. Now uses `mkdir -p` + explicit `chown -R dude:dude` of `.config`, `.local`, `.vnc`, which guarantees dude owns every parent.
+- **dudenest-xsession + :99 xstartup** wrap the Xfce component launch in `dbus-run-session` so the session bus is clean and `xfconfd` activation gets the right env (HOME, XDG_CONFIG_HOME) inherited. Without this, even with the ownership fix Xfce components hit `GLib-GIO-CRITICAL: g_dbus_proxy_call_sync_internal: assertion 'G_IS_DBUS_PROXY (proxy)' failed` and panel could not bind to its config.
+- **Stale autostart files from v0.8.0** (`chromium-novnc.desktop`, `xhost-allow-root.desktop`, `xfwm4-nocomp.desktop` and the matching helper shell scripts) are now explicitly removed by every install.sh run. They were launching a SECOND Chromium under `dude` that fought the `dudenest-kiosk.service` Chromium for the same `--user-data-dir`.
+
+### Added
+- `dudenest-xsession` (the lightdm autologin script) and `~/.vnc/xstartup` (TigerVNC `:99`) now create `~/.config/xfce4/xfconf/xfce-perchannel-xml` and export `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` before invoking `dbus-run-session -- xfwm4 + xfsettingsd + xfce4-panel + xfdesktop`.
+
+### Result
+End-to-end visual parity with the reference `relay-poc` (Debian 12):
+- Xfce panel at the top of the screen (Applications menu, system tray, clock, user)
+- `xfdesktop` wallpaper + desktop icons (Home, …)
+- Chromium kiosk maximized below the panel with proper xfwm4 window decorations (min / max / close), no `--no-sandbox` banner
+- `localhost:6080/dudenest.html` loaded, green VNC connection indicator in the bottom-right
+- Same result on Debian 12 (`relay-poc`) and Ubuntu 24.04 (`relay-poc2`); install.sh stays idempotent and safe to re-run
+
+---
+
 ## [0.8.1] — 2026-05-18 — Kiosk visuals match relay-poc (Xfce panel + xfwm4 + maximize)
 
 ### Added

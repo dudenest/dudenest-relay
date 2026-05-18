@@ -147,22 +147,27 @@ EOF
 # producing a "failsafe session" popup that floated above the kiosk Chromium).
 cat > /usr/local/bin/dudenest-xsession <<'EOF'
 #!/bin/bash
-# Xfce-like desktop on :0 — launch components directly (skip xfce4-session, which is
-# broken on Ubuntu 24.04 lightdm-autologin: GLib-GIO-CRITICAL dbus-proxy assertions →
-# "failsafe session" popup). xfwm4 draws decorations on every top-level window,
-# including the kiosk Chromium that dudenest-kiosk.service launches as root.
+# Xfce-like desktop on :0. We wrap everything in `dbus-run-session` so xfconfd's
+# dbus-activation gets a clean session bus with HOME/XDG_CONFIG_HOME inherited correctly —
+# on Ubuntu 24.04 the lightdm-autologin path strips that env and xfconfd dies with
+# "Unable to create configuration directory '(null)'", leaving xfce4-panel rendered as a
+# tiny 128×50 stub. dbus-run-session inside a normal user shell fixes both problems.
+export HOME="${HOME:-/home/$USER}"
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+mkdir -p "$XDG_CONFIG_HOME/xfce4/xfconf/xfce-perchannel-xml" "$XDG_DATA_HOME"
 xhost +SI:localuser:root 2>/dev/null
 xset s off -dpms 2>/dev/null
-eval "$(dbus-launch --sh-syntax --exit-with-session)"
-# xfconfd must be running before xfce4-panel/xfdesktop so they can load default config
-/usr/lib/x86_64-linux-gnu/xfce4/xfconf/xfconfd &
-sleep 1
-xfwm4 --replace &
-xfsettingsd &
-sleep 1
-xfce4-panel &
-xfdesktop &
-exec sleep infinity
+exec dbus-run-session -- bash -c '
+  /usr/lib/x86_64-linux-gnu/xfce4/xfconf/xfconfd &
+  sleep 1
+  xfwm4 --replace &
+  xfsettingsd &
+  sleep 1
+  xfce4-panel &
+  xfdesktop &
+  exec sleep infinity
+'
 EOF
 chmod 755 /usr/local/bin/dudenest-xsession
 cat > /usr/share/xsessions/dudenest.desktop <<EOF
@@ -191,88 +196,57 @@ ok "LightDM autologin configured → $DUDE_USER (dudenest minimal session), serv
 # ── step 4: dude home — xstartup, kiosk script, Chromium autostart ──────────
 step "Step 4/9: Desktop files (Xfce + Chromium autostart on :0)"
 DUDE_HOME="/home/$DUDE_USER"
-install -d -o "$DUDE_USER" -g "$DUDE_USER" -m 700 "$DUDE_HOME/.vnc"
-install -d -o "$DUDE_USER" -g "$DUDE_USER" -m 755 "$DUDE_HOME/.config/autostart"
-install -d -o "$DUDE_USER" -g "$DUDE_USER" -m 755 "$DUDE_HOME/.config/chromium-novnc"
+# Create parent dirs FIRST as dude (install -d only chowns the leaf, leaving parents as root).
+# This bug bit us before: ~/.config became root:root → xfconfd couldn't write its xml config
+# → xfce4-panel fell back to a tiny 128×50 stub. Always run mkdir-then-chown to be safe.
+mkdir -p "$DUDE_HOME/.vnc" "$DUDE_HOME/.config/autostart" "$DUDE_HOME/.config/chromium-novnc" \
+         "$DUDE_HOME/.config/xfce4/xfconf/xfce-perchannel-xml" "$DUDE_HOME/.local/share"
+chown -R "$DUDE_USER:$DUDE_USER" "$DUDE_HOME/.vnc" "$DUDE_HOME/.config" "$DUDE_HOME/.local"
+chmod 700 "$DUDE_HOME/.vnc"
+# Clean up obsolete files from earlier bootstrap versions. These were Xfce autostart
+# entries / helper scripts that launched a SECOND Chromium under `dude` — the new
+# `dudenest-kiosk.service` runs Chromium as root, so the dude-side launchers must go
+# (otherwise we end up with two Chromium instances fighting for the same user-data-dir).
+for stale in chromium-novnc.desktop xhost-allow-root.desktop xfwm4-nocomp.desktop; do
+  rm -f "$DUDE_HOME/.config/autostart/$stale"
+done
+rm -f "$DUDE_HOME/kiosk-novnc.sh" "$DUDE_HOME/xfwm4_nocomp.sh"
 
 cat > "$DUDE_HOME/.vnc/xstartup" <<'EOF'
 #!/bin/bash
-# Xfce-like desktop on :99 — launch components directly (skip xfce4-session, which is
-# broken on Ubuntu 24.04 lightdm-autologin: GLib-GIO-CRITICAL dbus-proxy assertions →
-# "failsafe session" popup visible through the noVNC viewer). Same visual result as
-# `startxfce4`: xfwm4 draws window decorations on every top-level window (including the
-# Chromium browser relay launches for Google OAuth).
+# Xfce-like desktop on :99 — same dbus-run-session wrapper as the :0 dudenest-xsession.
 unset SESSION_MANAGER
-unset DBUS_SESSION_BUS_ADDRESS
+export HOME="${HOME:-/home/$USER}"
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+mkdir -p "$XDG_CONFIG_HOME/xfce4/xfconf/xfce-perchannel-xml" "$XDG_DATA_HOME"
 xhost +SI:localuser:root 2>/dev/null
 xset s off -dpms 2>/dev/null
-# dbus-launch creates a per-session bus so xfce4-panel/xfdesktop can publish their services
-eval "$(dbus-launch --sh-syntax --exit-with-session)"
-# xfconfd must be running before xfce4-panel/xfdesktop so they can load default config
-/usr/lib/x86_64-linux-gnu/xfce4/xfconf/xfconfd &
-sleep 1
-xfwm4 --replace &
-xfsettingsd &
-sleep 1
-xfce4-panel &
-xfdesktop &
-exec sleep infinity
+exec dbus-run-session -- bash -c '
+  /usr/lib/x86_64-linux-gnu/xfce4/xfconf/xfconfd &
+  sleep 1
+  xfwm4 --replace &
+  xfsettingsd &
+  sleep 1
+  xfce4-panel &
+  xfdesktop &
+  exec sleep infinity
+'
 EOF
 chown "$DUDE_USER:$DUDE_USER" "$DUDE_HOME/.vnc/xstartup"
 chmod 755 "$DUDE_HOME/.vnc/xstartup"
 
-# Kiosk Chromium runs as ROOT via dudenest-kiosk.service (see Step 8) instead of via dude's
-# Xfce autostart. Google Chrome on Ubuntu 24.04 hits a trap-int3 self-abort when launched
-# under an unprivileged user (independent of --no-sandbox / userns settings) but works fine
-# under root. Lightdm autologin → Xfce on :0 still happens — it brings up the Xorg server
-# and authorizes root via xhost; the kiosk service then opens Chromium on the same display.
-cat > "$DUDE_HOME/.config/autostart/xhost-allow-root.desktop" <<'EOF'
-[Desktop Entry]
-Type=Application
-Name=Allow root to draw on :0 (for kiosk Chromium)
-Exec=/usr/bin/xhost +SI:localuser:root
-X-GNOME-Autostart-enabled=true
-EOF
-chown "$DUDE_USER:$DUDE_USER" "$DUDE_HOME/.config/autostart/xhost-allow-root.desktop"
-# Keep the helper script around for documentation / debugging — service launches Chromium directly.
-cat > "$DUDE_HOME/kiosk-novnc.sh" <<EOF
-#!/bin/bash
-# Manual kiosk launcher (debug). dudenest-kiosk.service uses these flags too.
-exec /usr/local/bin/chromium \\
-  --no-sandbox --no-first-run --disable-infobars \\
-  --user-data-dir=/var/lib/dudenest/kiosk-chrome \\
-  --start-maximized \\
-  http://localhost:$NOVNC_PORT/dudenest.html
-EOF
-chown "$DUDE_USER:$DUDE_USER" "$DUDE_HOME/kiosk-novnc.sh"
-chmod 755 "$DUDE_HOME/kiosk-novnc.sh"
-
-# Disable xfwm4 compositing on :99 (smoother Chromium-in-VNC rendering)
-cat > "$DUDE_HOME/xfwm4_nocomp.sh" <<'EOF'
-#!/bin/bash
-sleep 5
-DISPLAY=:99 XAUTHORITY=/home/dude/.Xauthority xfconf-query -c xfwm4 -p /general/use_compositing -s false 2>/dev/null || \
-  DISPLAY=:99 XAUTHORITY=/home/dude/.Xauthority xfwm4 --compositor=off --replace &
-EOF
-chown "$DUDE_USER:$DUDE_USER" "$DUDE_HOME/xfwm4_nocomp.sh"
-chmod 755 "$DUDE_HOME/xfwm4_nocomp.sh"
-
-cat > "$DUDE_HOME/.config/autostart/xfwm4-nocomp.desktop" <<EOF
-[Desktop Entry]
-Type=Application
-Name=xfwm4 no-compositing (:99)
-Exec=$DUDE_HOME/xfwm4_nocomp.sh
-X-GNOME-Autostart-enabled=true
-EOF
-chown "$DUDE_USER:$DUDE_USER" "$DUDE_HOME/.config/autostart/xfwm4-nocomp.desktop"
-
-# Hide light-locker (would interfere with kiosk)
+# Kiosk Chromium runs as ROOT via dudenest-kiosk.service (see Step 8). The dudenest-xsession
+# script (registered as `x-session-manager`) handles xhost + xfwm4 + xfce4-panel + xfdesktop,
+# so dude's ~/.config/autostart/ stays empty of helper launchers — keeps the X session
+# deterministic and avoids spawning a second Chromium under dude that fights for user-data-dir.
+# Light-locker is hidden so it can't interfere with the kiosk Chromium.
 cat > "$DUDE_HOME/.config/autostart/light-locker.desktop" <<'EOF'
 [Desktop Entry]
 Hidden=true
 EOF
 chown "$DUDE_USER:$DUDE_USER" "$DUDE_HOME/.config/autostart/light-locker.desktop"
-ok "Xfce autostart files installed for $DUDE_USER"
+ok "Xfce autostart minimal (light-locker hidden, no second-Chromium launchers)"
 
 # ── step 5: dudenest.html (custom noVNC viewer) ─────────────────────────────
 step "Step 5/9: dudenest.html (cropped noVNC viewer)"
