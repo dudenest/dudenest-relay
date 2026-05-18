@@ -69,10 +69,12 @@ APT_PKGS=(
   ca-certificates curl wget openssl jq gnupg
   xorg xserver-xorg lightdm
   xfce4 xfce4-session xfce4-settings xfwm4 xfdesktop4
+  xfce4-terminal  # satisfies xorg's `x-terminal-emulator` dep so gnome-terminal isn't pulled in
   tigervnc-standalone-server tigervnc-common tigervnc-tools
   novnc python3-websockify websockify
   unattended-upgrades apt-listchanges
 )
+APT_OPTS=(-y --no-install-recommends -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confnew)
 # Chromium handling differs per distro: on Debian use the deb `chromium`; on Ubuntu the
 # `chromium` deb is empty and `chromium-browser` is a snap (breaks --user-data-dir + --no-sandbox).
 # Install Google Chrome from Google's apt repo on Ubuntu, then symlink to /usr/local/bin/chromium
@@ -95,7 +97,10 @@ for p in "${APT_PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 || MISSING+=("$p"); d
 if [[ ${#MISSING[@]} -gt 0 ]]; then
   echo "  Installing ${#MISSING[@]} package(s): ${MISSING[*]}"
   apt-get update -qq
-  apt-get install -y --no-install-recommends "${MISSING[@]}" >/dev/null
+  # Recover any half-configured packages from a previous interrupted run before installing new ones
+  dpkg --configure -a 2>/dev/null || true
+  apt-get install --fix-broken "${APT_OPTS[@]}" 2>/dev/null || true
+  apt-get install "${APT_OPTS[@]}" "${MISSING[@]}"
 fi
 # Pick the browser binary the relay can use (chromedp.ExecPath("chromium") relies on $PATH lookup
 # of `chromium`, so we expose Google Chrome under that name on Ubuntu).
