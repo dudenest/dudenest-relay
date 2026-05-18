@@ -6,6 +6,22 @@
 
 ---
 
+## 🧭 Architecture boundary — what runs where in Dudenest
+
+This is the most common source of confusion when reading the dudenest sources. Be explicit:
+
+| Component | Deployment | Why |
+|-----------|-----------|-----|
+| **`dudenest-relay`** (this repo) | **VM or Raspberry Pi binary** — NEVER a container, NEVER on Docker, NEVER on Swarm | The relay launches Chromium for Google OAuth on a real X server. Containers without an attached display can't do that. Swarm-hosted relay was tried (until 2026-05-16) and removed for exactly this reason. |
+| `dudenest-backup` (hub for `/relay/announce`, `/relay/bootstrap`, etc.) | **Docker Swarm service** on NETOL | Standard SaaS — `deploy/backup-stack.yml` + `docker stack deploy` in CI. Secrets via Docker Swarm secrets (`relay_jwt_secret`, etc.). |
+| `dudenest-backend` (Flutter app API) | **Docker Swarm service** on NETOL | Same pattern. |
+| `dudenest` (Flutter SaaS web/mobile) | **Docker Swarm service** for the web bundle | Same pattern. |
+| Everything else in NETOL (HAProxy, Headscale, CRDB, runners, monitoring, …) | **Docker Swarm** | NETOL is a Swarm-first infrastructure. |
+
+**Implication for design docs in this repo**: when a plan mentions "Docker secret" or "Swarm secret", it almost always refers to the **backup side** (or another SaaS component the relay talks to), not the relay itself. The relay only ever speaks HTTP to those services. If you see a design suggesting the relay runs in a container, that's a mistake — the explicit decision (with full rationale in §"DEPRECATED: Swarm deployment" below) is that it does not.
+
+---
+
 ## 🧩 Architecture: Full-Stack Relay (v0.8.0+)
 
 A fully-functional relay needs more than the Go binary. To register a Google Drive (or any OAuth-based) cloud account the relay launches a real Chromium window — there's no headless API for Google's web sign-in. That Chromium has to draw somewhere, and an operator needs to be able to see it on the VM console.

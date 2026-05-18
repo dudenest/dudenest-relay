@@ -153,28 +153,50 @@ Also document in CHANGELOG.md (v0.8.1 or v0.9.0) that OAuth credentials no longe
 
 The deployment for `dudenest-backup` (or whichever service serves `/relay/bootstrap`) needs to mount the OAuth JSON.
 
-- Add Docker Swarm secret `relay_gdrive_client_secret` populated from GitHub Actions secret `RELAY_GDRIVE_CLIENT_SECRET_B64` (already exists per old `docs/RELAY-OPS.md` — it was used for the Swarm relay before Swarm was removed). Decode at deploy time:
+**Architecture boundary** (important — easy to misread):
+- `dudenest-relay` is a VM/RPi binary; **it never touches Docker, never runs as a container, never knows about Swarm**. Removed from Swarm on 2026-05-16 specifically because it needs Chromium + X server (see §RELAY-OPS for full reasoning).
+- `dudenest-backup` (the hub that serves `/relay/bootstrap`) **runs on Docker Swarm** as a normal NETOL SaaS service. See `dudenest-backup/deploy/backup-stack.yml`. The OAuth credentials need to be available to that container as a file or env var — using a Docker Swarm secret is the natural mechanism because that's how every other secret in the backup deployment is wired (`CRDB_DSN`, `JWT_SECRET`, `HUB_INTERNAL_TOKEN` per `deploy/backup-stack.yml`).
+- So when this section talks about "Docker secret" it means **on the backup side only**. The relay binary fetches the credentials via plain HTTP — it doesn't care how the backend stored them.
+
+Concrete change for backup:
+
+- Add a Docker Swarm secret `relay_gdrive_client_secret` populated from GitHub Actions secret `RELAY_GDRIVE_CLIENT_SECRET_B64` (already present per legacy `docs/RELAY-OPS.md` — it was originally created for the now-removed Swarm-hosted relay, but the GH secret can be reused 1:1). The CI workflow base64-decodes and creates the Swarm secret at deploy time, the backup container reads it via a mounted file.
 
   ```yaml
-  # deploy/backup-stack.yml (or equivalent)
+  # dudenest-backup/deploy/backup-stack.yml
   services:
     backup:
       environment:
-        - GDRIVE_CLIENT_SECRET_JSON_FILE=/run/secrets/relay_gdrive_client_secret
-      secrets:
-        - relay_gdrive_client_secret
-  secrets:
-    relay_gdrive_client_secret:
-      external: true
+        - CRDB_DSN=${CRDB_DSN}
+        - JWT_SECRET=${JWT_SECRET}
+        - HUB_INTERNAL_TOKEN=${HUB_INTERNAL_TOKEN}
+        - GDRIVE_CLIENT_SECRET_JSON_FILE=/run/secrets/relay_gdrive_client_secret   # NEW
+      secrets:                                                                       # NEW
+        - relay_gdrive_client_secret                                                 # NEW
+  secrets:                                                                           # NEW
+    relay_gdrive_client_secret:                                                      # NEW
+      external: true                                                                 # NEW
   ```
-
-- CI job to create the secret (similar to the existing `relay_jwt_secret` creation):
 
   ```bash
-  echo "$RELAY_GDRIVE_CLIENT_SECRET_B64" | base64 -d | docker secret create relay_gdrive_client_secret -
+  # dudenest-backup/.github/workflows/build.yml — Deploy stack step
+  echo "${{ secrets.RELAY_GDRIVE_CLIENT_SECRET_B64 }}" | base64 -d | \
+    docker secret create relay_gdrive_client_secret - || true   # idempotent
   ```
 
-- If the backup service is not running under Swarm, mount as a file via the equivalent mechanism (systemd EnvironmentFile, Kubernetes Secret, etc.).
+- The backup Go service then loads it at startup. From `cmd/backup/main.go`, before constructing `Server`:
+
+  ```go
+  oauthJSON := os.Getenv("GDRIVE_CLIENT_SECRET_JSON")
+  if path := os.Getenv("GDRIVE_CLIENT_SECRET_JSON_FILE"); path != "" {
+      b, err := os.ReadFile(path)
+      if err != nil { log.Fatalf("read GDRIVE_CLIENT_SECRET_JSON_FILE: %v", err) }
+      oauthJSON = string(b)
+  }
+  // pass oauthJSON into NewServer(...)
+  ```
+
+  Supporting both env var and file lets the same code run under Docker Swarm (file from `/run/secrets/...`) AND in local dev (just set the env var). No other deployment path is needed today — the entire Dudenest SaaS surface runs on the NETOL Swarm.
 
 ## 4. Acceptance criteria — fleet-wide
 
