@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.1] — 2026-05-19 — Standby auto-recovers after first OAuth (no manual restart)
+
+### Fixed
+- **`/files` stayed 503 forever after first cloud account added** (`cmd/relay/serve.go`): when the relay started without any cloud providers it correctly entered standby mode, but the pipeline was never re-initialized after the user completed OAuth via the Flutter app. The standby HTTP server kept returning 503 from `/files`/`/files/upload` indefinitely, forcing a manual `systemctl restart dudenest-relay` to recover. Symptom in user logs: `noVNC auth done — <email>` followed by `STANDBY (pipeline init: no cloud providers available)` every 5 min, with `HTTP 503` on every `/files/upload` attempt.
+- **Root cause**: `runServe` called `getPipeline()` exactly once. On `isCredentialError` it handed the listen address to `degradedServerWithAuth` and blocked there forever — there was no path back to pipeline init. The `auth_done` WebSocket broadcast (sent by `handleSession` after `SaveToken`) had no effect on the standby server.
+- **Fix**: wrapped pipeline init in a standby loop. `ws.Hub` gained `SetOnAuthDone(func())` which `runServe` uses to send to a buffered `reload` channel BEFORE the first `getPipeline()` call (so a token saved during the tiny window between that call and callback registration still triggers reload — the channel is drained on every standby cycle). `degradedServerWithAuth` now runs `http.Server` in a goroutine and selects on `reload`: a `Shutdown(5s)` is issued and the function returns `nil` so the outer loop retries `getPipeline()`. On success, the loop breaks, the callback is detached (full-mode does not act on `auth_done` — provider hot-add for *additional* providers is out of scope), and the normal full server starts.
+- **Result**: a fresh relay can now go zero-touch from `install.sh` → ZT bootstrap → user adds first cloud account in the Flutter app → relay exits standby within ~3 seconds (graceful HTTP shutdown + pipeline init) → `/files` serves 200 and uploads work — **with no operator SSH and no systemd restart at any point**.
+
+### Compatibility
+- Wire protocol unchanged. Older Flutter clients still receive the same `auth_done` WebSocket message; new behavior is server-side only.
+- The auth_done callback is automatically cleared when the relay reaches full mode, so subsequent provider additions behave exactly as in v0.9.0 (no spurious reloads, no race with file traffic).
+
+---
+
 ## [0.9.0] — 2026-05-18 — Fleet-wide OAuth credentials auto-distribution
 
 ### Added

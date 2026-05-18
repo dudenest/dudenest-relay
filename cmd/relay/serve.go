@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ import (
 	"github.com/dudenest/dudenest-relay/internal/blockmap"
 	"github.com/dudenest/dudenest-relay/internal/browser"
 	"github.com/dudenest/dudenest-relay/internal/config"
+	"github.com/dudenest/dudenest-relay/internal/pipeline"
 	"github.com/dudenest/dudenest-relay/internal/register"
 	"github.com/dudenest/dudenest-relay/internal/relaytoken"
 	"github.com/dudenest/dudenest-relay/internal/thumbnail"
@@ -53,13 +55,24 @@ func serveCmd() *cobra.Command {
 // so users can re-authorize cloud providers without restarting the relay.
 // /health returns 200 (degraded) so HAProxy keeps the node in rotation.
 // tryReg is called on /files requests even in standby so JWT-based registration fires regardless of cloud auth state.
-func degradedServerWithAuth(listen, reason, configDir string, authSrv interface{ RegisterRoutes(*http.ServeMux) }, wsHub http.Handler, tryReg func(string)) error {
+//
+// When reload receives a value (set by wsHub.SetOnAuthDone in runServe), the HTTP server is
+// gracefully shut down and the function returns nil — the outer loop then retries getPipeline()
+// and upgrades to the full server WITHOUT a process restart (no systemd cycle, no Flutter disconnect storm).
+// If ListenAndServe fails for any other reason, that error is returned instead.
+func degradedServerWithAuth(listen, reason, configDir string, authSrv interface{ RegisterRoutes(*http.ServeMux) }, wsHub http.Handler, tryReg func(string), reload <-chan struct{}) error {
 	log.Printf("⚠️  relay: entering standby mode — %s", reason)
 	log.Printf("⚠️  relay: /files=503, /auth active — re-authorize via Flutter app")
-	ticker := time.NewTicker(5 * time.Minute)
-	go func() { // periodic reminder, no cloud retries
-		for range ticker.C {
-			log.Printf("⚠️  relay: STANDBY (%s) — use /auth/url to re-authorize", reason)
+	tickerCtx, tickerCancel := context.WithCancel(context.Background())
+	defer tickerCancel()
+	go func() { // periodic reminder, stops when the standby server exits
+		t := time.NewTicker(5 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-tickerCtx.Done(): return
+			case <-t.C: log.Printf("⚠️  relay: STANDBY (%s) — use /auth/url to re-authorize", reason)
+			}
 		}
 	}()
 	standbyFile := func(w http.ResponseWriter, r *http.Request) { // validate JWT + trigger registration even in standby
@@ -77,8 +90,21 @@ func degradedServerWithAuth(listen, reason, configDir string, authSrv interface{
 	mux.HandleFunc("/files", standbyFile)
 	mux.HandleFunc("/files/", standbyFile)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { jsonErr(w, "relay in standby: "+reason, http.StatusServiceUnavailable) })
+	srv := &http.Server{Addr: listen, Handler: corsMiddleware(mux)}
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ListenAndServe() }()
 	log.Printf("⚠️  relay: standby server with auth listening on %s", listen)
-	return http.ListenAndServe(listen, corsMiddleware(mux))
+	select {
+	case err := <-errCh:
+		if err == http.ErrServerClosed { return nil }
+		return err
+	case <-reload:
+		log.Printf("✅ relay: standby reload triggered (auth_done event) — shutting down to re-init pipeline")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx) //nolint:errcheck
+		return nil // signal to caller: retry getPipeline()
+	}
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
@@ -130,13 +156,27 @@ func runServe(cmd *cobra.Command, args []string) error {
 			}
 		})
 	}
-	p, err := getPipeline()
-	if err != nil {
-		if isCredentialError(err) { // OAuth expired/revoked or no providers yet → standby with auth routes active
-			return degradedServerWithAuth(cfg.Server.Listen, fmt.Sprintf("pipeline init: %v", err), authConfigDir, authSrv, wsHub, tryReg)
+	// Standby loop: if pipeline init fails because no/expired cloud providers, run standby HTTP server
+	// (which keeps /auth/* live for the user to add a provider via the Flutter app). When the auth_done
+	// WebSocket event fires (wsHub.SetOnAuthDone callback registered BEFORE getPipeline to avoid a tiny
+	// race where a token is saved between getPipeline failure and callback registration), the standby
+	// server shuts down and we retry getPipeline(). Successful init falls through to the full server
+	// below — no process restart, no Flutter disconnect storm. Pre-v0.9.1 behavior required a manual
+	// systemctl restart at this point.
+	reload := make(chan struct{}, 1)
+	wsHub.SetOnAuthDone(func() { select { case reload <- struct{}{}: default: } })
+	var p *pipeline.Pipeline
+	for {
+		p, err = getPipeline()
+		if err == nil { break }
+		if !isCredentialError(err) { return fmt.Errorf("pipeline init: %w", err) }
+		select { case <-reload: default: } // drain stale signal so we wait fresh on the next standby cycle
+		if serr := degradedServerWithAuth(cfg.Server.Listen, fmt.Sprintf("pipeline init: %v", err), authConfigDir, authSrv, wsHub, tryReg, reload); serr != nil {
+			return serr
 		}
-		return fmt.Errorf("pipeline init: %w", err)
+		log.Printf("✅ relay: exiting standby — re-initializing pipeline with newly authorized provider")
 	}
+	wsHub.SetOnAuthDone(nil) // entering full-server mode: callback dropped (hot-add for additional providers is out of scope for this fix)
 	tc, err := thumbnail.NewCache(authConfigDir)
 	if err != nil {
 		return fmt.Errorf("thumbnail cache: %w", err)
