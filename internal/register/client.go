@@ -155,11 +155,12 @@ const announceTokenFile = "announce_token.tmp"
 
 // BootstrapPayload is delivered by relay-provisioner via POST /relay/bootstrap (ZT-only endpoint).
 type BootstrapPayload struct {
-	JWTSecret   string `json:"jwt_secret"`   // delivered once — write to relay.env
-	RelayID     string `json:"relay_id"`     // permanent relay identity
-	RelaySecret string `json:"relay_secret"` // HMAC key for relay→backup auth
-	RelayURL    string `json:"relay_url"`    // assigned subdomain (relay-XXXX.dudenest.com)
-	BackupURL   string `json:"backup_url"`   // dudenest-backup base URL
+	JWTSecret          string `json:"jwt_secret"`            // delivered once — write to relay.env
+	RelayID            string `json:"relay_id"`              // permanent relay identity
+	RelaySecret        string `json:"relay_secret"`          // HMAC key for relay→backup auth
+	RelayURL           string `json:"relay_url"`             // assigned subdomain (relay-XXXX.dudenest.com)
+	BackupURL          string `json:"backup_url"`            // dudenest-backup base URL
+	GdriveClientSecret string `json:"gdrive_client_secret"`  // fleet-wide Google OAuth Web Client JSON; written to <configDir>/gdrive_client_secret.json if file missing or contains placeholder
 }
 
 // Announce generates a one-time token, POSTs to hub /relay/announce, and saves token to disk.
@@ -196,9 +197,12 @@ func LoadAnnounceToken(configDir string) (string, error) {
 func ClearAnnounceToken(configDir string) { os.Remove(filepath.Join(configDir, announceTokenFile)) } //nolint:errcheck
 
 const jwtSecretFile = "jwt_secret.txt"
+const gdriveClientSecretFile = "gdrive_client_secret.json"
 
-// WriteBootstrapCreds writes relay_creds.json and jwt_secret.txt from bootstrap payload.
+// WriteBootstrapCreds writes relay_creds.json, jwt_secret.txt, and gdrive_client_secret.json from bootstrap payload.
 // jwt_secret.txt is read at startup via LoadJWTSecret to restore the signing key across restarts.
+// gdrive_client_secret.json is written ONLY when the on-disk file is missing OR contains a placeholder
+// — never overwrites real Google OAuth Web Client credentials that an operator may have configured by hand.
 func WriteBootstrapCreds(configDir string, p *BootstrapPayload) (*Credentials, error) {
 	creds := &Credentials{RelayID: p.RelayID, RelaySecret: p.RelaySecret}
 	data, _ := json.Marshal(creds)
@@ -211,8 +215,31 @@ func WriteBootstrapCreds(configDir string, p *BootstrapPayload) (*Credentials, e
 			log.Printf("register: ⚠️  failed to write jwt_secret.txt: %v", err)
 		}
 	}
+	if p.GdriveClientSecret != "" { // fleet-wide OAuth credentials delivered by hub
+		gdrivePath := filepath.Join(configDir, gdriveClientSecretFile)
+		if shouldReplaceOAuth(gdrivePath) {
+			if err := os.WriteFile(gdrivePath, []byte(p.GdriveClientSecret), 0o600); err != nil {
+				log.Printf("register: ⚠️  failed to write %s: %v", gdriveClientSecretFile, err)
+			} else {
+				log.Printf("register: ✅ %s updated from hub", gdriveClientSecretFile)
+			}
+		} else {
+			log.Printf("register: %s contains real credentials — kept on-disk file, ignored hub value", gdriveClientSecretFile)
+		}
+	}
 	log.Printf("register: ✅ bootstrap complete (relay_id=%s relay_url=%s)", p.RelayID, p.RelayURL)
 	return creds, nil
+}
+
+// shouldReplaceOAuth returns true if gdrive_client_secret.json is missing or contains a known placeholder marker.
+// Markers: `"placeholder"` from install.sh v0.8.x, `"service_account"` from older bootstraps.
+// Real Web Client JSON (the only kind Dudenest uses) carries `"web":{"client_id":"..."}` and contains neither
+// marker, so this guard preserves hand-configured credentials on legacy relays (e.g. relay-poc).
+func shouldReplaceOAuth(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil { return true } // missing or unreadable — safe to write
+	s := string(data)
+	return strings.Contains(s, `"placeholder"`) || strings.Contains(s, `"service_account"`)
 }
 
 // LoadJWTSecret reads jwt_secret.txt and updates the auth package signing key.

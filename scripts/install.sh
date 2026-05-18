@@ -346,17 +346,17 @@ else
   ok "Preserved existing $CONFIG_DIR/relay.env (RELAY_KEY untouched)"
 fi
 
-# Some earlier bootstraps used the shorter name `client_secret.json`. Keep both names pointed
+# Legacy compat: earlier bootstraps used the shorter name `client_secret.json` — keep both names pointed
 # at the same content so the unit file stays canonical regardless of which name exists first.
+# No placeholder is created here anymore: relay binary v0.9.0+ pulls real OAuth credentials from the hub
+# during /relay/bootstrap (fleet-wide auto-distribution); on-disk real credentials are preserved by shouldReplaceOAuth().
 if [[ -f "$CONFIG_DIR/client_secret.json" && ! -e "$CONFIG_DIR/gdrive_client_secret.json" ]]; then
   ln -s client_secret.json "$CONFIG_DIR/gdrive_client_secret.json"
   ok "Linked legacy client_secret.json → gdrive_client_secret.json"
-elif [[ ! -f "$CONFIG_DIR/gdrive_client_secret.json" ]]; then
-  echo '{"installed":{"client_id":"placeholder"}}' > "$CONFIG_DIR/gdrive_client_secret.json"
-  chmod 600 "$CONFIG_DIR/gdrive_client_secret.json"
-  ok "OAuth gdrive_client_secret.json placeholder created"
+elif [[ -f "$CONFIG_DIR/gdrive_client_secret.json" ]]; then
+  ok "OAuth gdrive_client_secret.json present (kept as-is; relay will refresh from hub only if it's a placeholder)"
 else
-  ok "OAuth gdrive_client_secret.json present"
+  ok "OAuth gdrive_client_secret.json will be delivered by hub on first /relay/bootstrap"
 fi
 
 # ── step 8: systemd units (4 units) ──────────────────────────────────────────
