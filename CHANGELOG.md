@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.1] — 2026-05-18 — Kiosk visuals match relay-poc (Xfce panel + xfwm4 + maximize)
+
+### Added
+- **`xfce4-panel`, `xfdesktop4`, `xfsettingsd`** plus `xfconfd` launched explicitly from the autologin X session — gives the relay console a normal Xfce desktop (panel, wallpaper, taskbar) instead of a bare X server.
+- **`/usr/local/bin/dudenest-maximize-kiosk`** — helper script invoked from `dudenest-kiosk.service` `ExecStartPost`. Polls `wmctrl -l` for the Chromium window and forces `add,maximized_vert,maximized_horz`. Fixes the case where Chromium ignores `--start-maximized` because it has a saved (non-maximized) window state in `Preferences`.
+- **`wmctrl`** added to APT_PKGS (required by `dudenest-maximize-kiosk`).
+- **`dbus-user-session`, `at-spi2-core`, `xfce4-panel`** explicitly in APT_PKGS — needed by the Xfce components when launched outside of `xfce4-session`.
+- **`XDG_CURRENT_DESKTOP=XFCE` + `GTK_USE_PORTAL=0`** set in `dudenest-kiosk.service` `Environment=`. Tells Google Chrome (Ubuntu) to use server-side decorations drawn by xfwm4 instead of its built-in CSD frame.
+- **Pre-seeded Chrome `Preferences`** at `/var/lib/dudenest/kiosk-chrome/Default/Preferences` with `{"browser":{"custom_chrome_frame":false,"window_placement":{"maximized":true}}}` — second line of defense for the maximize state.
+
+### Changed
+- **`dudenest-xsession`** now launches Xfce components directly (`xfconfd`, `xfwm4`, `xfsettingsd`, `xfce4-panel`, `xfdesktop`) rather than running as a sleep-infinity stub. On Ubuntu 24.04 this avoids the `xfce4-session` "Unable to load a failsafe session" popup while still giving the user a familiar Xfce-style desktop with panel + window decorations.
+- **`~/.vnc/xstartup`** (display `:99`) launches the same Xfce component set as `:0`, so the Chromium window the relay opens for Google OAuth gets proper decorations inside the noVNC viewer.
+- **`dudenest-kiosk.service`** `ExecStartPre` waits for `xfwm4` to be running (not just the X socket) — otherwise Chromium starts before the window manager and ends up undecorated.
+- **`--test-type`** re-added to the kiosk Chromium flags to suppress the yellow `--no-sandbox` warning banner.
+
+### Fixed
+- **Kiosk Chromium did not auto-start after VM reboot on relay-poc-style installs** — historical setup relied on Xfce `~/.config/autostart/chromium-novnc.desktop`, which is only fired on the first lightdm-autologin session and not on subsequent reboots. New installs use the systemd-managed `dudenest-kiosk.service` which is unconditionally started on boot. Re-running `install.sh` on the legacy relay-poc migrates it to the systemd-based kiosk.
+- **Kiosk Chromium window was not maximized after reboot on Ubuntu 24.04** — `--start-maximized` only applies on first launch; after Chrome saves window state the saved geometry wins. `dudenest-maximize-kiosk` enforces the maximize state via `wmctrl` after every launch.
+- **`--no-sandbox` warning banner ate the top of the kiosk viewport** — `--test-type` suppresses it (the banner is informational, not a security control we change with the flag).
+
+---
+
 ## [0.8.0] — 2026-05-18 — Full-Stack Bootstrap (Chromium + X11 + noVNC)
 
 ### Added

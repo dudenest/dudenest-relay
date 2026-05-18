@@ -71,6 +71,7 @@ APT_PKGS=(
   xorg xserver-xorg lightdm accountsservice dbus-x11 dbus-user-session at-spi2-core
   xfce4 xfce4-session xfce4-settings xfwm4 xfdesktop4 xfce4-panel
   xfce4-terminal  # satisfies xorg's `x-terminal-emulator` dep so gnome-terminal isn't pulled in
+  wmctrl  # enforces maximized window state after Chromium launch (saved state overrides --start-maximized)
   tigervnc-standalone-server tigervnc-common tigervnc-tools
   novnc python3-websockify websockify
   unattended-upgrades apt-listchanges
@@ -472,6 +473,23 @@ EOF
 # `ExecStartPre` polls for both the X socket and lightdm's auth file — handles boot ordering
 # without coupling to graphical-session.target (which isn't reliable when no user is logged in
 # via a real greeter).
+# Helper script that polls for the kiosk Chromium window via wmctrl and forces maximize.
+# Called from dudenest-kiosk.service ExecStartPost. Keeps inline systemd quoting sane.
+cat > /usr/local/bin/dudenest-maximize-kiosk <<'EOF'
+#!/bin/bash
+export DISPLAY=:0
+export XAUTHORITY=/var/run/lightdm/root/:0
+for i in $(seq 1 20); do
+  WID=$(wmctrl -l 2>/dev/null | grep -iE 'dudenest|chromium|google chrome' | head -1 | awk '{print $1}')
+  if [[ -n "$WID" ]]; then
+    wmctrl -i -r "$WID" -b add,maximized_vert,maximized_horz
+    exit 0
+  fi
+  sleep 1
+done
+exit 1
+EOF
+chmod 755 /usr/local/bin/dudenest-maximize-kiosk
 mkdir -p /var/lib/dudenest/kiosk-chrome/Default
 # Pre-seed Chrome Preferences with `custom_chrome_frame=false` so Chrome uses the
 # system (xfwm4) title bar + window decorations instead of its built-in CSD frame.
@@ -495,9 +513,12 @@ Environment=DISPLAY=:0 XAUTHORITY=/var/run/lightdm/root/:0 XDG_CURRENT_DESKTOP=X
 # Wait not only for the X socket but also for xfwm4 to be running — otherwise Chromium
 # starts before the window manager and ends up with no decorations.
 ExecStartPre=/bin/bash -c 'for i in {1..30}; do [[ -S /tmp/.X11-unix/X0 && -f /var/run/lightdm/root/:0 ]] && pgrep -x xfwm4 >/dev/null && exit 0; sleep 2; done; exit 1'
-# Same flags as relay-poc's /home/dude/kiosk-novnc.sh — produces a normal Chromium window
-# with xfwm4 decorations (NOT --kiosk). --test-type intentionally NOT used (it suppresses UI).
-ExecStart=/usr/local/bin/chromium --no-sandbox --no-first-run --disable-infobars --user-data-dir=/var/lib/dudenest/kiosk-chrome --start-maximized http://localhost:$NOVNC_PORT/dudenest.html
+# --test-type suppresses the --no-sandbox warning banner. Other flags match relay-poc reference.
+ExecStart=/usr/local/bin/chromium --no-sandbox --test-type --no-first-run --disable-infobars --user-data-dir=/var/lib/dudenest/kiosk-chrome --start-maximized http://localhost:$NOVNC_PORT/dudenest.html
+# Chromium's `--start-maximized` is only honored on first launch; after Chrome saves window
+# state, subsequent launches restore the saved (often non-maximized) geometry. wmctrl forces
+# the maximize state every boot, regardless of saved Preferences.
+ExecStartPost=/usr/local/bin/dudenest-maximize-kiosk
 Restart=on-failure
 RestartSec=8
 [Install]
