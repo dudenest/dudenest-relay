@@ -17,6 +17,8 @@ import (
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
+
+	"github.com/dudenest/dudenest-relay/pkg/types"
 )
 
 // tokenFile mirrors the JSON structure written by browser.SaveToken.
@@ -131,6 +133,48 @@ func (p *Provider) Available() bool {
 	_, err := p.svc.About.Get().Fields("user").Do()
 	return err == nil
 }
+
+// List implements types.CloudLister — enumerates first-level children of `prefix` under the base folder.
+// prefix=="" lists the base folder itself. Caller walks recursively by re-invoking List on each
+// returned Entry where IsDir==true. Pagination across Drive API's nextPageToken is handled
+// internally; the returned slice contains every entry under prefix (up to several thousand).
+//
+// Folder vs file distinction: Drive marks folders with mimeType=='application/vnd.google-apps.folder'.
+// Returned Entry.Size is 0 for folders and parsed from drive.File.Size for files.
+// Entry.MTime sources from drive.File.ModifiedTime (RFC3339).
+// Entry.Path is `<prefix>/<name>` (or just `<name>` for prefix=="").
+//
+// Drive API rate limit is 1000 queries/100s default; a typical first-level listing is 1-2 calls
+// even for thousands of files because PageSize=1000. Recursive walking is the caller's responsibility
+// and must throttle (P6 user-aware scan-engine throttling).
+func (p *Provider) List(prefix string) ([]types.Entry, error) {
+	parentID, err := p.findPath(prefix)
+	if err != nil { return nil, fmt.Errorf("find prefix %q: %w", prefix, err) }
+	q := fmt.Sprintf("%q in parents and trashed=false", parentID)
+	out := make([]types.Entry, 0, 64)
+	pageToken := ""
+	for {
+		call := p.svc.Files.List().Q(q).PageSize(1000).Fields("nextPageToken, files(id, name, mimeType, size, modifiedTime)")
+		if pageToken != "" { call = call.PageToken(pageToken) }
+		resp, lerr := call.Do()
+		if lerr != nil { return nil, fmt.Errorf("list under %q: %w", prefix, lerr) }
+		for _, f := range resp.Files {
+			isDir := f.MimeType == "application/vnd.google-apps.folder"
+			childPath := f.Name
+			if prefix != "" && prefix != "." { childPath = strings.TrimRight(prefix, "/") + "/" + f.Name }
+			mt, _ := time.Parse(time.RFC3339, f.ModifiedTime) // empty/parse-failure → zero time, callers treat as "unknown"
+			out = append(out, types.Entry{
+				Path: childPath, Name: f.Name, Size: f.Size, MTime: mt, IsDir: isDir,
+			})
+		}
+		if resp.NextPageToken == "" { break }
+		pageToken = resp.NextPageToken
+	}
+	return out, nil
+}
+
+// Compile-time assertion that Provider satisfies types.CloudLister.
+var _ types.CloudLister = (*Provider)(nil)
 
 // ensurePath resolves dir (relative to base folder), creating folders as needed.
 // Used by Upload only — Download/Delete go through findPath (read-only).

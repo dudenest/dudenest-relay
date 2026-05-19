@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.14.0] — 2026-05-19 — P4: CloudLister sub-interface + gdrive Provider.List for scan engine foundation
+
+### Added
+- **`pkg/types.CloudLister`** — new sub-interface (NOT a change to `CloudProvider`):
+  ```go
+  type CloudLister interface {
+      List(prefix string) ([]Entry, error)
+  }
+  ```
+  Optional capability — scan engine (P5) type-asserts (`l, ok := provider.(CloudLister)`) and skips providers that don't implement it. Backward compatible: existing `CloudProvider` implementers compile unchanged. Go-idiomatic pattern (like `io.ReadSeeker` on top of `io.Reader`).
+- **`pkg/types.Entry`** — single child of a folder returned by `List`:
+  - `Path` (relative to provider base, `<prefix>/<name>`)
+  - `Name` (leaf name)
+  - `Size` (bytes; 0 for folders)
+  - `MTime` (`time.Time` from provider's modified-time)
+  - `IsDir` (true for folders; caller recurses with `List(entry.Path)`)
+- **`gdrive.Provider.List(prefix)`** — implements `CloudLister`:
+  - Resolves `prefix` to a folder ID via existing read-only `findPath`. Returns an error if any intermediate folder is missing — clean miss, no side effects.
+  - Queries Drive API with `"<parentID>" in parents and trashed=false`, `PageSize=1000`, fields `nextPageToken, files(id, name, mimeType, size, modifiedTime)`.
+  - Internally paginates via `NextPageToken` until exhausted; returned slice contains all entries under `prefix` (typical first-level: 1-2 API calls even for thousands of files).
+  - Maps Drive's `mimeType=='application/vnd.google-apps.folder'` → `IsDir=true` (`Size=0`); files use Drive's `size` directly and `modifiedTime` parsed as RFC3339.
+- Compile-time assertion `var _ types.CloudLister = (*Provider)(nil)` in `gdrive.go` so removal of `List` becomes a build error in CI.
+
+### Scope decisions
+- **First-level only** — `List` does NOT recurse. Caller (P5 scan engine) walks the tree by re-invoking `List(entry.Path)` for each `IsDir==true` entry, with throttling layered on top (P6 user-aware scan throttle).
+- **No pagination knob in V1 interface** — provider handles `NextPageToken` internally; caller sees a single slice. If a single folder ever has >10k entries (rare in practice), V2 can add `ListOptions{PageToken string}` and `(entries, nextToken, err)` without breaking V1 callers (different method signature, both can coexist).
+- **No legacy `/dudenest-relay/` fallback in List** — per user decision (2026-05-19, drop legacy). List operates only on the primary base folder. relay-poc's legacy tree is invisible to the scanner.
+
+### Other providers
+- `mega` and `local` do NOT implement `CloudLister` (per design — scan engine skips them via type assertion). To add MEGA listing later, implement `Provider.List(prefix string) ([]types.Entry, error)` on `internal/cloudconn/mega/mega.Provider`; for local, wrap `os.ReadDir`.
+
+### Migration & fleet rollout
+- Interface addition is purely additive — no existing code paths change. v0.13.0 binaries keep running fine.
+- Fleet pulls v0.14.0 within 24h via timer; maintainer pushes immediate update to test relays per session-end protocol (s306).
+
+### Tests
+- No unit tests in this release — Drive API is awkward to mock cleanly without a full `httptest.Server` Drive emulator. P5 (scan engine) will exercise `List` end-to-end against the real GDrive on relay-poc, which is sufficient regression coverage given the simplicity of the query construction and pagination loop. If a regression slips in, it'll be visible as an empty scan or a 404 in the engine; the failure mode is loud.
+
+---
+
+## [0.13.0] — 2026-05-19 — Add `folder` field to GET /files response
+
+### Added
+- **`fileSummary.Folder`** field in `GET /files` response — `"photos"` or `"files"` derived from the first Shard's Location path prefix (matches the cloud-side folder picked at upload by P2's `mediaFolder()` helper).
+- **`folderFromFileMap(fm)` helper** — single source of truth for classifying a `FileMap` into the right Flutter tab. Defaults to `"files"` for legacy entries with no recognizable prefix.
+- Powers the Flutter Photos / Files tab filter introduced in P3 (s306).
+
+---
+
 ## [0.12.0] — 2026-05-19 — Drop legacy /dudenest-relay/ alias + admin endpoints (version + update) for Flutter Update screen
 
 ### Removed

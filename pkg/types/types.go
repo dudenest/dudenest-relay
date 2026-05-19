@@ -72,6 +72,27 @@ type CloudProvider interface {
 	Available() bool // checks quota and connectivity
 }
 
+// CloudLister is an OPTIONAL sub-interface for providers that can enumerate their contents.
+// Go-idiomatic pattern (like io.ReadSeeker on top of io.Reader): scan engine type-asserts
+// (`l, ok := provider.(CloudLister)`) and skips providers that don't support it.
+// Implemented by gdrive (P4); mega + local are not implementers today.
+// First-level listing only — caller walks recursively by calling List on each IsDir==true Entry.
+// The provider handles Drive-API/MEGA-API pagination internally; the returned slice contains all entries under prefix.
+type CloudLister interface {
+	List(prefix string) ([]Entry, error)
+}
+
+// Entry describes a single child of a folder returned by CloudLister.List.
+// Path is relative to the provider's base folder (e.g. "photos/abc123" or "photos/abc123/photo.jpg").
+// Empty prefix lists the base folder itself; entries returned then have Path == "<name>".
+type Entry struct {
+	Path  string    `json:"path"`   // relative to provider base; folder children appear as "<prefix>/<name>"
+	Name  string    `json:"name"`   // leaf name (the part after the last "/")
+	Size  int64     `json:"size"`   // bytes; 0 for folders
+	MTime time.Time `json:"mtime"`  // last-modified at the provider
+	IsDir bool      `json:"is_dir"` // true for folders (recurse with List(entry.Path))
+}
+
 // EncryptedBlock is the wire format stored on the cloud provider.
 // Layout: [12B nonce][ciphertext][16B GCM tag]
 type EncryptedBlock struct {
