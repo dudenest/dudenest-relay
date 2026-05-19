@@ -26,6 +26,7 @@ import (
 	"github.com/dudenest/dudenest-relay/internal/config"
 	"github.com/dudenest/dudenest-relay/internal/pipeline"
 	"github.com/dudenest/dudenest-relay/internal/register"
+	"github.com/dudenest/dudenest-relay/internal/scan"
 	"github.com/dudenest/dudenest-relay/internal/relaytoken"
 	"github.com/dudenest/dudenest-relay/internal/thumbnail"
 	"github.com/dudenest/dudenest-relay/internal/ws"
@@ -179,7 +180,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}
 		log.Printf("✅ relay: exiting standby — re-initializing pipeline with newly authorized provider")
 	}
-	wsHub.SetOnAuthDone(nil) // entering full-server mode: callback dropped (hot-add for additional providers is out of scope for this fix)
+	wsHub.SetOnAuthDone(nil) // entering full-server mode — full server below re-sets a different callback (scan-engine trigger), so this clears the standby loop callback first
 	// P5a proactive backfill: walk blockmap, fill in missing CloudIDs from path → Drive file ID.
 	// Background goroutine so it doesn't block server start. Idempotent — safe even if run while
 	// users are uploading. Per user decision 2026-05-20: proactive (not lazy) so all legacy
@@ -242,6 +243,27 @@ func runServe(cmd *cobra.Command, args []string) error {
 	mux.HandleFunc("/files/", requireAuthWithReg(lr, fs.handleFile))
 	mux.HandleFunc("/admin/version", requireAuthWithReg(lr, fs.handleAdminVersion)) // Flutter Update screen — read current + latest release info
 	mux.HandleFunc("/admin/update", requireAuthWithReg(lr, fs.handleAdminUpdate))   // Flutter Update screen — trigger immediate self-update + restart
+	// P5c scan engine — Flutter Settings → Sync Status surface
+	getCloudsLive := func() []types.CloudProvider { cs, _ := getClouds(); return cs }
+	scanner, scErr := scan.New(p, getCloudsLive, filepath.Join(authConfigDir, "scan"))
+	if scErr != nil { log.Printf("⚠️  scan engine init: %v", scErr) }
+	if scanner != nil {
+		sh := &scanHandlers{scanner: scanner}
+		mux.HandleFunc("/admin/scan/status", requireAuthWithReg(lr, sh.handleStatus))
+		mux.HandleFunc("/admin/scan/start",  requireAuthWithReg(lr, sh.handleStart))
+		mux.HandleFunc("/admin/scan/pause",  requireAuthWithReg(lr, sh.handlePause))
+		mux.HandleFunc("/admin/scan/config", requireAuthWithReg(lr, sh.handleConfig))
+		// auth_done → kick scan for every currently-loaded provider (newly authorized one is among them)
+		wsHub.SetOnAuthDone(func() {
+			for _, cp := range getCloudsLive() {
+				go func(pid string) {
+					if _, err := scanner.Start(pid); err != nil { log.Printf("scan auto-start %s: %v", pid, err) }
+				}(cp.ID())
+			}
+		})
+		// 24h auto-rescan loop (configurable in <configDir>/scan/config.json — default enabled)
+		go scanner.AutoRescanLoop(make(chan struct{}))
+	}
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }) //nolint:errcheck
 	fmt.Printf("relay serve listening on %s (provider: %s, ws: /ws)\n", cfg.Server.Listen, provider)
 	return http.ListenAndServe(cfg.Server.Listen, corsMiddleware(mux))
@@ -255,6 +277,7 @@ type fileServer struct {
 		ListFiles() ([]*types.FileMap, error)
 		GetFileMap(fileID string) (*types.FileMap, error)
 		DeleteFile(fileID string) error
+		MoveFile(fileID, newDir string) error // P5b: re-bucket a file when its TakenAtOverride changes; no data transfer
 	}
 	thumbCache     *thumbnail.Cache
 	backupMu       sync.RWMutex
@@ -263,12 +286,17 @@ type fileServer struct {
 	metaDir        string         // directory for per-file meta.json (favorites, albums, captions)
 }
 
-// fileMeta stores user-editable metadata per file (favorites, albums, location, caption).
+// fileMeta stores user-editable metadata per file (favorites, albums, location, caption, date override).
 type fileMeta struct {
 	Favorite bool     `json:"favorite,omitempty"`
 	Albums   []string `json:"albums,omitempty"`
 	Location string   `json:"location,omitempty"`
 	Caption  string   `json:"caption,omitempty"`
+	// P5b: user-overridable effective date for date-bucketing. When set, the scan/upload code
+	// uses this instead of EXIF/mtime. On PATCH, handleMeta triggers an automatic MoveByID to
+	// re-bucket the file into the new YYYY/MM folder. CloudID stays the same after the move.
+	// ISO-8601 UTC format; "" means "use derived date" (EXIF → mtime → upload-time fallback).
+	TakenAtOverride string `json:"taken_at_override,omitempty"`
 }
 
 func (fs *fileServer) backup() *backup.Client {
@@ -828,7 +856,31 @@ func (fs *fileServer) handleMeta(w http.ResponseWriter, r *http.Request, fileID 
 	case http.MethodPatch:
 		var patch fileMeta
 		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil { jsonErr(w, "bad json: "+err.Error(), 400); return }
+		prev := fs.readMeta(fileID)
 		if err := fs.writeMeta(fileID, patch); err != nil { jsonErr(w, "write meta: "+err.Error(), 500); return }
+		// P5b: TakenAtOverride changed → re-bucket file into new YYYY/MM folder via MoveByID.
+		// CloudID stays the same; only path changes. Best-effort — failure here doesn't fail the PATCH
+		// (meta is persisted regardless; user can retry move via re-PATCH same value or admin endpoint).
+		if patch.TakenAtOverride != prev.TakenAtOverride && patch.TakenAtOverride != "" {
+			if t, perr := time.Parse(time.RFC3339, patch.TakenAtOverride); perr == nil {
+				fm, gerr := fs.p.GetFileMap(fileID)
+				if gerr == nil && len(fm.Chunks) > 0 && len(fm.Chunks[0].Shards) > 0 {
+					// Derive top folder (photos|files) from existing Location: "provider:topFolder/.../filename"
+					parts := strings.SplitN(fm.Chunks[0].Shards[0].Location, ":", 2)
+					top := types.FilesFolder
+					if len(parts) == 2 {
+						segs := strings.SplitN(parts[1], "/", 2)
+						if len(segs) > 0 && segs[0] != "" { top = segs[0] }
+					}
+					newDir := fmt.Sprintf("%s/%04d/%02d", top, t.Year(), int(t.Month()))
+					if mErr := fs.p.MoveFile(fileID, newDir); mErr != nil {
+						log.Printf("⚠️  meta-PATCH MoveFile %s → %s: %v", fileID, newDir, mErr)
+					} else {
+						log.Printf("✅ meta-PATCH moved file %s to bucket %s (TakenAtOverride=%s)", fileID, newDir, patch.TakenAtOverride)
+					}
+				}
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(patch) //nolint:errcheck
 	}

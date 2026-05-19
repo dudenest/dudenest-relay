@@ -266,8 +266,9 @@ func (p *Pipeline) downloadReplica(meta types.ChunkMeta) ([]byte, error) {
 		if cloud == nil { continue }
 		if block.CloudID != "" {
 			if idd, ok := cloud.(types.CloudIDDownloader); ok {
-				if data, dlErr := idd.DownloadByID(block.CloudID); dlErr == nil { return data, nil }
-				else { lastErr = dlErr; /* fall through to path-based as last resort */ }
+				data, dlErr := idd.DownloadByID(block.CloudID)
+				if dlErr == nil { return data, nil }
+				lastErr = dlErr // fall through to path-based as last resort
 			}
 		}
 		data, dlErr := cloud.Download(parseCloudPath(block.Location))
@@ -302,6 +303,82 @@ func (p *Pipeline) DeleteFile(fileID string) error {
 			}
 			if dErr != nil && firstErr == nil { firstErr = fmt.Errorf("delete block %s: %w", block.ID, dErr) }
 		}
+	}
+	return firstErr
+}
+
+// RegisterForeign creates a new FileMap with Strategy=Foreign pointing at an existing file
+// in a cloud provider (discovered by the scan engine). The cloud file is NOT touched — we
+// just record its existence in our index so it shows up in /files. Download uses CloudID,
+// no decryption happens (Foreign means user-uploaded, not encrypted by us).
+//
+// fileID is generated from CloudID (deterministic dedup — re-registering the same CloudID
+// twice produces the same FileMap entry, idempotent for repeated scans).
+func (p *Pipeline) RegisterForeign(providerID, cloudID, name, path string, size int64, mtime time.Time) error {
+	if cloudID == "" { return fmt.Errorf("cloudID required") }
+	fileID := "foreign-" + cloudID // deterministic; safe across re-scans
+	fm := &types.FileMap{
+		Version:  1,
+		FileID:   fileID,
+		Strategy: types.StrategyForeign,
+		Name:     name,
+		Size:     size,
+		Created:  mtime,
+		Modified: mtime,
+		Chunks: []types.ChunkMeta{{
+			Index: 0, Offset: 0, Size: size,
+			Shards: []types.Block{{
+				ID: fileID + ".0", ShardIdx: 0, Size: size,
+				Location: providerID + ":" + path,
+				CloudID:  cloudID,
+				Created:  time.Now().UTC(),
+			}},
+		}},
+	}
+	return p.bm.Save(fm)
+}
+
+// MoveFile relocates every replica of a file to a new folder on its cloud provider, using
+// CloudMover.MoveByID (one Drive API call per shard, no data transfer). Block.CloudID stays
+// the same after the move — Drive's file ID is permanent. Block.Location is rewritten to
+// reflect the new path so legacy path-based access still works.
+//
+// newDir is the folder path RELATIVE to the provider's base folder, e.g. "photos/2026/05".
+// The leaf filename is preserved from the existing Location.
+//
+// Skips shards where: (a) Block.CloudID is empty (path-only legacy entry — needs backfill
+// first), or (b) the matching provider doesn't implement CloudMover. Returns the first
+// error encountered but continues attempting the rest; FileMap is saved only if at least
+// one shard moved successfully (atomicity isn't guaranteed across multi-replica moves —
+// out-of-sync replicas are recovered on next download attempt).
+func (p *Pipeline) MoveFile(fileID, newDir string) error {
+	fm, err := p.bm.Load(fileID)
+	if err != nil { return fmt.Errorf("load: %w", err) }
+	var firstErr error
+	anyMoved := false
+	for ci, meta := range fm.Chunks {
+		for si, block := range meta.Shards {
+			cloud := p.getCloudByName(block.Location)
+			if cloud == nil { continue }
+			if block.CloudID == "" { continue }
+			mover, ok := cloud.(types.CloudMover)
+			if !ok { continue }
+			if mErr := mover.MoveByID(block.CloudID, newDir); mErr != nil {
+				if firstErr == nil { firstErr = fmt.Errorf("move shard %d/%d: %w", ci, si, mErr) }
+				continue
+			}
+			// Rewrite Location: "<provider>:<newDir>/<filename>"
+			parts := strings.SplitN(block.Location, ":", 2)
+			if len(parts) == 2 {
+				oldPath := parts[1]
+				leaf := filepath.Base(oldPath)
+				fm.Chunks[ci].Shards[si].Location = parts[0] + ":" + newDir + "/" + leaf
+				anyMoved = true
+			}
+		}
+	}
+	if anyMoved {
+		if sErr := p.bm.Save(fm); sErr != nil && firstErr == nil { firstErr = fmt.Errorf("save filemap after move: %w", sErr) }
 	}
 	return firstErr
 }
