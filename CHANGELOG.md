@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.17.0] — 2026-05-20 — P5 (P5a + P5b + P5c bundled): CloudID-as-index + date-bucketed uploads + scan engine
+
+### P5a — CloudID-as-index (replaces path as primary addressing)
+
+Per user decision 2026-05-20: Drive's permanent file ID (`1o_qJz-ItwQzmp4rUCyygaZsrRjlBNDa0`) becomes the primary identifier in our blockmap, replacing path-based addressing. User renames/moves files on Drive directly → our index keeps working. One API call per Download (was 2).
+
+**`pkg/types`** additions (all additive, no breaking changes):
+- `Entry.CloudID string` — populated by `gdrive.Provider.List` from Drive's `files.id` field.
+- `Block.CloudID string` — set by `pipeline.uploadReplica` from `UploadAndReturnID`; backfilled at relay startup for legacy entries.
+- `CloudIDDownloader` interface (`DownloadByID` + `DeleteByID`) — one-call ID-stable ops.
+- `CloudIDUploader` interface (`UploadAndReturnID`) — Upload returning the new file's ID.
+- `CloudIDResolver` interface (`ResolvePathToID`) — for backfill.
+- `CloudMover` interface (`MoveByID`) — re-bucket without re-upload (P5b auto-move).
+- `StrategyForeign = "Foreign"` — files indexed but not uploaded by us (P5c scan engine).
+
+**`gdrive.Provider`** implements all 4 new sub-interfaces (compile-time `var _ = ...` assertions). `Upload` keeps its CloudProvider-required signature but internally delegates to `UploadAndReturnID`.
+
+**`pipeline`** addressing priority per Block: `CloudID → DownloadByID/DeleteByID` first, falls back to path-based `Download/Delete` only when CloudID is empty (pre-P5a entries) or the ID-based call fails. Pre-existing FileMaps load fine — `CloudID` is `omitempty`.
+
+**Proactive backfill at relay startup**: `Pipeline.BackfillCloudIDs` walks every FileMap, resolves missing CloudIDs via `CloudIDResolver`, persists. Runs in background goroutine — doesn't block server start. For relay-poc with ~hundreds of legacy entries, completes in a few minutes; on the order of one Drive API call per file.
+
+### P5b — Date-bucketed uploads + editable date with auto-move
+
+**`pipeline.uploadReplica`** path template changed from `<folder>/<hash[:8]>/<name>` to `<folder>/<YYYY>/<MM>/<name>` where date comes from `fm.Created` (server time for now; full EXIF wiring in this codebase happens inside the thumbnail pipeline — see P5b open follow-up). Name collisions are OK: each upload gets a new Drive file ID even when name+parent match (per Drive's create-not-update semantics for replicated user data).
+
+**`fileMeta.TakenAtOverride`** (new field in `/files/{id}/meta` JSON) — when user sets/changes via PATCH, `handleMeta` recomputes the date-bucket path and calls `Pipeline.MoveFile(fileID, newDir)`. CloudID is preserved (Drive `files.update(addParents, removeParents)`). Best-effort — failure logs `⚠️` but doesn't fail the PATCH (meta is persisted regardless).
+
+`Pipeline.MoveFile` walks all replicas, calls `CloudMover.MoveByID` per shard, rewrites `Block.Location` to the new path. Atomicity not guaranteed across multi-replica moves; partial state self-heals on next download.
+
+### P5c — Background scan engine (`internal/scan/`)
+
+Discovers files already on cloud providers and registers them as `Strategy=Foreign` FileMaps (CloudID-addressed, no re-upload). User immediately sees their existing Drive content in Photos/Files tabs after authorizing the account.
+
+**Triggers**:
+1. `auth_done` WebSocket event from browser auth flow — newly authorized provider kicks off scan automatically.
+2. `Scanner.AutoRescanLoop` — relay-wide goroutine checks every 5 min, starts scans when `now - last_finished ≥ interval`. Configurable per `<configDir>/scan/config.json`:
+   ```json
+   {"auto_rescan_enabled": true, "auto_rescan_interval_hours": 24, "skip_files_above_bytes": 0}
+   ```
+   Defaults: enabled, 24h, no size limit (per user decisions 2026-05-20).
+3. Manual: `POST /admin/scan/start?provider=<id>` — Flutter Settings button.
+
+**State machine per provider** (`<configDir>/scan/<provider_id>.json`): `idle | running | pausing | paused | error`. Counters: `files_discovered, files_newly_indexed, files_skipped, errors`. Resume from `current_folder` after pause.
+
+**Pause = per-file immediate** (per user decision 2026-05-20): `cancel chan struct{}` checked between each `List` call and each entry iteration. Per-folder checkpoint persisted so resume is clean.
+
+**Dedup**: at scan start, walker builds an in-memory set of all CloudIDs present in any existing FileMap. Re-scans are idempotent (already-known CloudIDs skipped).
+
+**Admin endpoints** (same `requireAuthWithReg` auth as `/files`):
+- `GET /admin/scan/status` — full JSON map of all providers' states.
+- `POST /admin/scan/start?provider=<id>` — start/resume.
+- `POST /admin/scan/pause?provider=<id>` — request pause (settles in seconds).
+- `GET|POST /admin/scan/config` — read/write global config.
+
+### Migration & fleet rollout
+
+- Pre-P5a FileMaps: load fine (CloudID is `omitempty`). Backfill goroutine handles migration in the background; old Download paths keep working via Location fallback during the transition.
+- Pre-P5b uploaded files (in `<folder>/<hash[:8]>/<name>`): keep their existing Location and CloudID; new uploads go to `<folder>/<YYYY>/<MM>/<name>`. Both schemes coexist indefinitely — no forced migration.
+- Pre-P5c blockmaps: scan engine ignores existing entries by CloudID dedup. First scan after deploy discovers any files the user already had on Drive but never indexed (i.e. files on relay-poc's Drive that pre-date this relay). Background; user can monitor via `/admin/scan/status`.
+- Fleet auto-update timer pulls v0.17.0 within 24 h; maintainer also pushes immediate update per session-end protocol so relay-poc/relay-poc2 get it in minutes, not hours.
+
+### Known limitations (deferred to P6/P7)
+
+- **No throttle (P6)** — scan walker calls `provider.List` as fast as the API allows. Drive's 1000 req/100s default is plenty for thousands of folders but a 50k-folder drive could brush against limits. User-aware throttling (slow when Flutter is hitting `/files`, full speed when idle) lands in P6.
+- **No thumbnail generation for foreign files** — `lazyGenSidecars` handles it on first preview request (download-once-then-cache). Foreign files show generic icon until first view.
+- **No Flutter scan UI yet (P7)** — endpoints are wired but no Settings → Sync Status screen yet. User can `curl` endpoints to inspect. P7 ships the visual progress bar + monogram provenance icons per user's earlier 2026-05-18 spec.
+- **EXIF DateTimeOriginal not yet read in uploadReplica** — date-bucket source is currently `fm.Created` (≈ server upload time). When EXIF is read at upload time (existing thumbnail pipeline reads it for `taken_at` sidecar), the date-bucket path will start matching the photo's actual capture date. Until then, user can manually correct via `TakenAtOverride` in meta PATCH (which DOES trigger MoveFile).
+
+---
+
 ## [0.14.0] — 2026-05-19 — P4: CloudLister sub-interface + gdrive Provider.List for scan engine foundation
 
 ### Added
