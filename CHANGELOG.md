@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.12.0] — 2026-05-19 — Drop legacy /dudenest-relay/ alias + admin endpoints (version + update) for Flutter Update screen
+
+### Removed
+- **`/dudenest-relay/` legacy base folder support** in gdrive provider (per user decision 2026-05-19 — "zapominamy o legacy" / "drop it entirely"). All read-alias plumbing introduced in v0.10.0 is gone:
+  - `legacyBasePath` constant — deleted
+  - `Provider.legacyBaseFolderID` field — deleted
+  - `Provider.resolveFile` method (primary→legacy fallback) — deleted
+  - Folder cache key prefixing (`"P:"`/`"L:"`) — reverted to plain dir keys (single base, no collision possible)
+  - Startup `findFolder("dudenest-relay", "root")` probe — gone
+- **Consequence for relay-poc** (only relay with legacy data): existing FileMap entries that point at files which live ONLY under `/dudenest-relay/` are now unresolvable. Download will 404; Flutter shows a broken-thumbnail placeholder. User can delete those entries through the Flutter UI or `rm -rf` the `/dudenest-relay/` folder directly on Google Drive (relay no longer touches it).
+
+### Added
+- **`GET /admin/version`** (auth: JWT + X-Relay-Token, same as /files) — returns the running relay version, the latest GitHub release tag, and canonical links (repo, release, changelog, latest). Drives the Flutter "Update" screen header.
+- **`POST /admin/update`** (same auth) — downloads the matching binary from GitHub release assets for the current `runtime.GOOS/GOARCH`, atomically replaces the relay executable, sends `{status: "updating", from_version, to_version}` back to the caller, then SIGTERMs the process after 2 seconds so systemd (`Restart=always`) brings the new version up. Lets the user one-click upgrade from the Flutter app without waiting for the 24-hour auto-update timer.
+- **`cmd/relay/admin.go`** — new file housing both handlers. Reuses `fetchLatestRelease`, `archSuffix`, and `downloadReplace` from the existing `relay update` CLI command (single source of truth for the update mechanics).
+
+### Kept (from v0.10.0 read-alias work)
+- **`Provider.findPath` / `findFolder`** — read-only path resolution (NEVER creates folders on miss). This was the right side-effect-free fix for the pre-v0.10.0 bug where Download/Delete silently provisioned empty trees for every missing FileMap. The legacy fallback piece is gone; the read-only walk remains.
+
+### Migration / fleet rollout
+- Fleet auto-update timer pulls v0.12.0 within 24 h on every relay. Per the session protocol updated 2026-05-19, the maintainer also pushes `relay update && systemctl restart` to each test relay at session end so the new version is live immediately (no 24 h wait for manual testing).
+- After v0.12.0 deploy, any relay that still has legacy `/dudenest-relay/...` files indexed will start returning 404s for them — that's the intended behavior; the index is allowed to drift until the user cleans it via the Flutter delete flow.
+
+---
+
 ## [0.11.0] — 2026-05-19 — Content-type routing: media → /dudenest/photos/, non-media → /dudenest/files/
 
 ### Changed

@@ -230,6 +230,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 	mux.HandleFunc("/relay/bootstrap", makeBootstrapHandler(authConfigDir)) // ZT provisioner delivers creds via ZT network
 	mux.HandleFunc("/files", requireAuthWithReg(lr, fs.handleList))
 	mux.HandleFunc("/files/", requireAuthWithReg(lr, fs.handleFile))
+	mux.HandleFunc("/admin/version", requireAuthWithReg(lr, fs.handleAdminVersion)) // Flutter Update screen — read current + latest release info
+	mux.HandleFunc("/admin/update", requireAuthWithReg(lr, fs.handleAdminUpdate))   // Flutter Update screen — trigger immediate self-update + restart
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }) //nolint:errcheck
 	fmt.Printf("relay serve listening on %s (provider: %s, ws: /ws)\n", cfg.Server.Listen, provider)
 	return http.ListenAndServe(cfg.Server.Listen, corsMiddleware(mux))
