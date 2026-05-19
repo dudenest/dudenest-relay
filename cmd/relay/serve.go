@@ -114,6 +114,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 	if serveListen != "" { cfg.Server.Listen = serveListen }         // --listen overrides config
 	if authDisplay != "" { cfg.Server.Display = authDisplay }        // --display overrides config
+	// --client-secret (browser auth flow) and --gdrive-secret (provider token refresh in getClouds()) refer to the SAME OAuth client_secret.json file.
+	// Historically declared as two separate flags with different defaults; systemd units only pass --client-secret, so getClouds() was reading the stale --gdrive-secret default (/root/.config/dudenest/...) which doesn't exist on installs that use /etc/dudenest. Sync them here so provider init can find the file.
+	if gdriveSecretPath != authClientSecret { gdriveSecretPath = authClientSecret }
 	cs, err := browser.LoadClientSecret(authClientSecret) // load auth config before pipeline — needed for standby mode too
 	if err != nil {
 		return fmt.Errorf("load client_secret: %w", err)

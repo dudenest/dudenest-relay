@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.2] — 2026-05-19 — Fix --client-secret / --gdrive-secret flag mismatch (relay-poc2 503 root cause)
+
+### Fixed
+- **`factory: failed to init gdrive:<email>: read client_secret: open /root/.config/dudenest/gdrive_client_secret.json: no such file or directory`** — root cause of the persistent `/files=503` on relay-poc2 even after auth_done.
+- Two separate flags refer to the SAME OAuth client_secret.json file:
+  - `--client-secret` (in `serveCmd`, default `~/.config/dudenest/gdrive_client_secret.json`) — used by the browser auth flow.
+  - `--gdrive-secret` (root persistent flag, default `/root/.config/dudenest/gdrive_client_secret.json`) — used by `getClouds()` → `pipeline.LoadAllProviders` → `gdrive.New`.
+- The systemd unit shipped by `scripts/install.sh` only passes `--client-secret /etc/dudenest/gdrive_client_secret.json` (the canonical config-dir location). `--gdrive-secret` was never set, so `getClouds()` looked at the stale legacy default which doesn't exist on standard `install.sh` deployments. Result: provider init failed → standby → 503 forever (with v0.9.1 the standby loop is in place, but it has nothing to do because the file isn't where the factory looks for it).
+- **Fix**: in `runServe`, if `gdriveSecretPath` is unchanged from its default (or simply differs from `authClientSecret`), set `gdriveSecretPath = authClientSecret` before any pipeline init. The two flags now point at the same file in serve mode, which is the only mode where both matter.
+
+### Compatibility
+- No flag, config, or systemd-unit changes required. Existing deployments pick up the fix transparently on next `dudenest-relay-update.timer` cycle.
+
+---
+
 ## [0.9.1] — 2026-05-19 — Standby auto-recovers after first OAuth (no manual restart)
 
 ### Fixed
