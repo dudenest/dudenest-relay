@@ -11,6 +11,7 @@ const (
 
 	StrategyChunking = "Chunking"
 	StrategyReplica  = "Replica"
+	StrategyForeign  = "Foreign" // P5c: file is indexed but lives on the cloud where the user (or another relay) put it; we never uploaded it, we just point at it via CloudID and stream-on-demand
 
 	// Cloud-side folder names under the provider's base folder (default base "dudenest" since v0.10.0).
 	// P2 of Photos/Files redesign: replica uploads route media → PhotosFolder, everything else → FilesFolder.
@@ -21,10 +22,11 @@ const (
 
 // Block represents a single encrypted+erasure-coded chunk stored in the cloud.
 type Block struct {
-	ID       string    `json:"id"`       // SHA-256 of original plaintext chunk
-	ShardIdx int       `json:"shard"`    // 0-8 (0-5 data, 6-8 parity) or 0-2 for Replica
-	Size     int64     `json:"size"`     // encrypted shard size in bytes
-	Location string    `json:"location"` // cloud provider + path (e.g. "gdrive:/blocks/abc123.0")
+	ID       string    `json:"id"`                  // SHA-256 of original plaintext chunk
+	ShardIdx int       `json:"shard"`               // 0-8 (0-5 data, 6-8 parity) or 0-2 for Replica
+	Size     int64     `json:"size"`                // encrypted shard size in bytes
+	Location string    `json:"location"`            // cloud provider + path (e.g. "gdrive:abc@gmail.com:photos/2026/05/IMG.jpg") — kept for back-compat + UI display; with CloudID set, addressing prefers the ID and Location is informational
+	CloudID  string    `json:"cloud_id,omitempty"`  // P5a: provider's permanent file ID; primary addressing key for Download/Delete/Move when available
 	Created  time.Time `json:"created"`
 }
 
@@ -82,15 +84,47 @@ type CloudLister interface {
 	List(prefix string) ([]Entry, error)
 }
 
+// CloudIDDownloader is an OPTIONAL sub-interface for providers that can address files by a
+// permanent provider-side ID instead of mutable path. Download/Delete via CloudID survives
+// user renames/moves on the cloud side (the same Drive file ID stays valid even if the user
+// moves the file in Drive UI). gdrive implements this in P5; other providers add later.
+type CloudIDDownloader interface {
+	DownloadByID(cloudID string) ([]byte, error)
+	DeleteByID(cloudID string) error
+}
+
+// CloudIDUploader is an OPTIONAL sub-interface — same as Upload but returns the provider's
+// permanent file ID so the pipeline can persist it in the FileMap immediately (no extra path
+// lookup later). gdrive returns Drive's file.id from files.create.
+type CloudIDUploader interface {
+	UploadAndReturnID(path string, data []byte) (cloudID string, err error)
+}
+
+// CloudIDResolver is an OPTIONAL sub-interface for lazy/proactive backfill: given a relative
+// path, return the provider's permanent file ID. Used to migrate pre-CloudID FileMaps without
+// re-uploading data — the file already lives on the cloud, we just need to record its ID.
+type CloudIDResolver interface {
+	ResolvePathToID(path string) (cloudID string, err error)
+}
+
+// CloudMover is an OPTIONAL sub-interface for providers that can move a file between folders
+// by ID without re-uploading the data. Used by P5b editable-date logic: when user changes a
+// file's date in the meta sheet, dudenest-relay moves the file to the new YYYY/MM date bucket
+// without touching the file contents. Drive supports this via files.update(addParents, removeParents).
+type CloudMover interface {
+	MoveByID(cloudID, newPath string) error
+}
+
 // Entry describes a single child of a folder returned by CloudLister.List.
 // Path is relative to the provider's base folder (e.g. "photos/abc123" or "photos/abc123/photo.jpg").
 // Empty prefix lists the base folder itself; entries returned then have Path == "<name>".
 type Entry struct {
-	Path  string    `json:"path"`   // relative to provider base; folder children appear as "<prefix>/<name>"
-	Name  string    `json:"name"`   // leaf name (the part after the last "/")
-	Size  int64     `json:"size"`   // bytes; 0 for folders
-	MTime time.Time `json:"mtime"`  // last-modified at the provider
-	IsDir bool      `json:"is_dir"` // true for folders (recurse with List(entry.Path))
+	Path    string    `json:"path"`               // relative to provider base; folder children appear as "<prefix>/<name>"
+	Name    string    `json:"name"`               // leaf name (the part after the last "/")
+	Size    int64     `json:"size"`               // bytes; 0 for folders
+	MTime   time.Time `json:"mtime"`              // last-modified at the provider
+	IsDir   bool      `json:"is_dir"`             // true for folders (recurse with List(entry.Path))
+	CloudID string    `json:"cloud_id,omitempty"` // P5: provider's permanent file ID; Drive uses 28-44 char alphanum; empty for providers that don't expose IDs
 }
 
 // EncryptedBlock is the wire format stored on the cloud provider.

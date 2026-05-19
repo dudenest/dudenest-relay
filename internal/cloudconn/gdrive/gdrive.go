@@ -71,24 +71,43 @@ func New(id, tokenPath, clientSecretPath, basePath string) (*Provider, error) {
 
 func (p *Provider) ID() string { return p.id }
 
-// Upload creates or overwrites a file at path under the base folder.
+// Upload creates or overwrites a file at path under the base folder. CloudProvider interface
+// requirement — for new code that wants the CloudID, use UploadAndReturnID (P5a additive).
 func (p *Provider) Upload(path string, data []byte) error {
+	_, err := p.UploadAndReturnID(path, data)
+	return err
+}
+
+// UploadAndReturnID is the CloudIDUploader sub-interface: same as Upload but returns the
+// permanent Drive file ID so the pipeline can persist it in the FileMap (no extra
+// path-to-ID lookup at Download time).
+//
+// Behavior with name collisions: when a file with the same name already exists at the same
+// parent folder, we UPDATE in place (preserves the existing CloudID — same ID before/after).
+// This matches Drive's "overwrite" semantics and avoids creating duplicate entries for
+// re-uploads of the same logical file. For date-bucketed uploads (P5b) two different photos
+// named IMG_0001.JPG taken in the same month will land in the same folder; the second
+// upload would overwrite the first if names collide. The pipeline-side caller is responsible
+// for ensuring filenames are unique within their bucket if it wants both kept (e.g. by
+// prefixing with a short content hash) — gdrive doesn't second-guess the caller's intent.
+func (p *Provider) UploadAndReturnID(path string, data []byte) (string, error) {
 	dir, name := filepath.Dir(path), filepath.Base(path)
 	parentID, err := p.ensurePath(dir)
 	if err != nil {
-		return fmt.Errorf("ensure dir %s: %w", dir, err)
+		return "", fmt.Errorf("ensure dir %s: %w", dir, err)
 	}
-	// Check if file already exists — update instead of create (avoid duplicates).
 	existingID, _ := p.findFile(name, parentID)
 	meta := &drive.File{Name: name}
 	body := bytes.NewReader(data)
 	if existingID != "" {
-		_, err = p.svc.Files.Update(existingID, meta).Media(body).Do()
-	} else {
-		meta.Parents = []string{parentID}
-		_, err = p.svc.Files.Create(meta).Media(body).Do()
+		f, err := p.svc.Files.Update(existingID, meta).Media(body).Fields("id").Do()
+		if err != nil { return "", err }
+		return f.Id, nil
 	}
-	return err
+	meta.Parents = []string{parentID}
+	f, err := p.svc.Files.Create(meta).Media(body).Fields("id").Do()
+	if err != nil { return "", err }
+	return f.Id, nil
 }
 
 // Download retrieves file content at path. Uses read-only findPath (does not create folders on miss
@@ -128,6 +147,72 @@ func (p *Provider) Delete(path string) error {
 	return p.svc.Files.Delete(fileID).Do()
 }
 
+// ---- P5a CloudID-based ops (implements CloudIDDownloader / CloudIDUploader / CloudIDResolver / CloudMover) ----
+
+// DownloadByID is one Drive API call (no path → ID lookup needed). Preferred path for FileMaps
+// that already have CloudID populated. Survives user-side renames/moves in Drive UI — the ID
+// stays valid even if the path our blockmap remembers is stale.
+func (p *Provider) DownloadByID(cloudID string) ([]byte, error) {
+	resp, err := p.svc.Files.Get(cloudID).Download()
+	if err != nil { return nil, fmt.Errorf("download id %s: %w", cloudID, err) }
+	defer resp.Body.Close()
+	buf := new(bytes.Buffer)
+	_, err = buf.ReadFrom(resp.Body)
+	return buf.Bytes(), err
+}
+
+// DeleteByID is one Drive API call. Same robustness benefit as DownloadByID.
+func (p *Provider) DeleteByID(cloudID string) error {
+	return p.svc.Files.Delete(cloudID).Do()
+}
+
+// ResolvePathToID is used by the proactive backfill loop at relay startup to migrate
+// pre-CloudID FileMaps. Performs the same path walk as findPath + findFile but returns
+// the Drive file ID without touching content. Cheap (1-2 Drive API calls per file).
+func (p *Provider) ResolvePathToID(path string) (string, error) {
+	dir, name := filepath.Dir(path), filepath.Base(path)
+	parentID, err := p.findPath(dir)
+	if err != nil { return "", fmt.Errorf("find dir %s: %w", dir, err) }
+	id, err := p.findFile(name, parentID)
+	if err != nil { return "", fmt.Errorf("find file %s: %w", name, err) }
+	return id, nil
+}
+
+// MoveByID moves a file from its current parent(s) to the folder identified by newPath
+// (creating intermediate folders if missing). The file's CloudID stays the same — only its
+// addressable path changes. Used by P5b editable-date logic: when user changes a file's
+// effective date, we re-bucket it into <folder>/<YYYY>/<MM>/ without re-uploading content.
+//
+// Drive's files.update natively supports parent reparenting via addParents + removeParents.
+// We:
+//   1. ensurePath(newPath) → resolves/creates target folder, returns its ID
+//   2. Get current file metadata (specifically the parents field)
+//   3. files.update(id, addParents=newParent, removeParents=oldParents)
+// All in 3 API calls. No data transfer.
+func (p *Provider) MoveByID(cloudID, newPath string) error {
+	newParentID, err := p.ensurePath(newPath)
+	if err != nil { return fmt.Errorf("ensure dest %s: %w", newPath, err) }
+	cur, err := p.svc.Files.Get(cloudID).Fields("parents").Do()
+	if err != nil { return fmt.Errorf("get parents %s: %w", cloudID, err) }
+	addParents := newParentID
+	removeParents := strings.Join(cur.Parents, ",")
+	if removeParents == newParentID { return nil } // already there — no-op
+	_, err = p.svc.Files.Update(cloudID, &drive.File{}).
+		AddParents(addParents).
+		RemoveParents(removeParents).
+		Fields("id, parents").Do()
+	return err
+}
+
+// Compile-time assertions: Provider implements all four CloudID sub-interfaces in P5a.
+var (
+	_ types.CloudLister       = (*Provider)(nil)
+	_ types.CloudIDDownloader = (*Provider)(nil)
+	_ types.CloudIDUploader   = (*Provider)(nil)
+	_ types.CloudIDResolver   = (*Provider)(nil)
+	_ types.CloudMover        = (*Provider)(nil)
+)
+
 // Available checks Drive connectivity by calling About.Get.
 func (p *Provider) Available() bool {
 	_, err := p.svc.About.Get().Fields("user").Do()
@@ -165,6 +250,7 @@ func (p *Provider) List(prefix string) ([]types.Entry, error) {
 			mt, _ := time.Parse(time.RFC3339, f.ModifiedTime) // empty/parse-failure → zero time, callers treat as "unknown"
 			out = append(out, types.Entry{
 				Path: childPath, Name: f.Name, Size: f.Size, MTime: mt, IsDir: isDir,
+				CloudID: f.Id, // P5a: capture permanent Drive file ID for scan engine + backfill use
 			})
 		}
 		if resp.NextPageToken == "" { break }
@@ -173,8 +259,7 @@ func (p *Provider) List(prefix string) ([]types.Entry, error) {
 	return out, nil
 }
 
-// Compile-time assertion that Provider satisfies types.CloudLister.
-var _ types.CloudLister = (*Provider)(nil)
+// (CloudLister + other compile-time assertions consolidated in P5a `var ( … )` block above.)
 
 // ensurePath resolves dir (relative to base folder), creating folders as needed.
 // Used by Upload only — Download/Delete go through findPath (read-only).

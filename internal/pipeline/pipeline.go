@@ -159,14 +159,29 @@ func (p *Pipeline) uploadReplica(fm *types.FileMap, filePath string) (*types.Fil
 		go func(j int) {
 			defer wg.Done()
 			cloud := p.clouds[j]
-			cloudPath := fmt.Sprintf("%s/%s/%s", folder, fm.Hash[:8], fm.Name) // full file path under chosen folder
-			if upErr := cloud.Upload(cloudPath, data); upErr != nil {
+			// P5b: date-bucketed path (was hash-based pre-P5b). Date source priority: EXIF DateTimeOriginal
+			// (P5b-future when exif extraction wired in here — currently the EXIF write happens later in
+			// thumbnail pipeline, so for now we use server upload time. Editable-date logic in
+			// /files/{id}/meta will MoveByID into the correct bucket once EXIF gets read.)
+			when := time.Now().UTC()
+			if fm.Created.IsZero() == false { when = fm.Created.UTC() }
+			cloudPath := fmt.Sprintf("%s/%04d/%02d/%s", folder, when.Year(), int(when.Month()), fm.Name)
+			var cloudID string
+			var upErr error
+			if u, ok := cloud.(types.CloudIDUploader); ok {
+				cloudID, upErr = u.UploadAndReturnID(cloudPath, data)
+			} else {
+				upErr = cloud.Upload(cloudPath, data)
+			}
+			if upErr != nil {
 				errs[j] = upErr
 				return
 			}
 			blocks[j] = types.Block{
 				ID: fmt.Sprintf("%s.r%d", fm.FileID, j), ShardIdx: j, Size: int64(len(data)),
-				Location: fmt.Sprintf("%s:%s", cloud.ID(), cloudPath), Created: time.Now().UTC(),
+				Location: fmt.Sprintf("%s:%s", cloud.ID(), cloudPath),
+				CloudID:  cloudID, // P5a: empty when provider doesn't implement CloudIDUploader; pipeline.Download then uses Location lookup
+				Created:  time.Now().UTC(),
 			}
 		}(j)
 	}
@@ -241,18 +256,22 @@ func (p *Pipeline) downloadChunking(meta types.ChunkMeta) ([]byte, error) {
 }
 
 // downloadReplica downloads the first available unencrypted replica.
+// P5a addressing priority per block: (1) Block.CloudID via DownloadByID — one Drive API call,
+// survives user-side renames. (2) fallback to Location-based Download (parseCloudPath +
+// Provider.Download) for pre-P5a entries without CloudID.
 func (p *Pipeline) downloadReplica(meta types.ChunkMeta) ([]byte, error) {
 	var lastErr error
 	for _, block := range meta.Shards {
 		cloud := p.getCloudByName(block.Location)
-		if cloud == nil {
-			continue
+		if cloud == nil { continue }
+		if block.CloudID != "" {
+			if idd, ok := cloud.(types.CloudIDDownloader); ok {
+				if data, dlErr := idd.DownloadByID(block.CloudID); dlErr == nil { return data, nil }
+				else { lastErr = dlErr; /* fall through to path-based as last resort */ }
+			}
 		}
 		data, dlErr := cloud.Download(parseCloudPath(block.Location))
-		if dlErr != nil {
-			lastErr = dlErr
-			continue
-		}
+		if dlErr != nil { lastErr = dlErr; continue }
 		return data, nil // raw bytes, no decryption
 	}
 	return nil, fmt.Errorf("all replicas unavailable: %v", lastErr)
@@ -265,24 +284,63 @@ func (p *Pipeline) GetFileMap(fileID string) (*types.FileMap, error) { return p.
 func (p *Pipeline) ListFiles() ([]*types.FileMap, error) { return p.bm.List() }
 
 // DeleteFile removes all cloud blocks for a file and its local FileMap.
+// P5a addressing priority per block: DeleteByID first (one API call, ID-stable), Location fallback.
 func (p *Pipeline) DeleteFile(fileID string) error {
 	fm, err := p.bm.Load(fileID)
-	if err != nil {
-		return fmt.Errorf("load filemap: %w", err)
-	}
+	if err != nil { return fmt.Errorf("load filemap: %w", err) }
 	var firstErr error
 	for _, meta := range fm.Chunks {
 		for _, block := range meta.Shards {
 			cloud := p.getCloudByName(block.Location)
-			if cloud == nil {
-				continue
+			if cloud == nil { continue }
+			var dErr error
+			if block.CloudID != "" {
+				if idd, ok := cloud.(types.CloudIDDownloader); ok { dErr = idd.DeleteByID(block.CloudID) }
 			}
-			if err := cloud.Delete(parseCloudPath(block.Location)); err != nil && firstErr == nil {
-				firstErr = fmt.Errorf("delete block %s: %w", block.ID, err)
+			if block.CloudID == "" || dErr != nil { // path-based fallback
+				if e := cloud.Delete(parseCloudPath(block.Location)); e != nil { dErr = e }
 			}
+			if dErr != nil && firstErr == nil { firstErr = fmt.Errorf("delete block %s: %w", block.ID, dErr) }
 		}
 	}
 	return firstErr
+}
+
+// BackfillCloudIDs walks every FileMap in the blockmap and, for each Block missing CloudID,
+// asks the corresponding provider's CloudIDResolver to translate the Block.Location path
+// into the permanent file ID, then persists the FileMap. Idempotent; safe to run repeatedly.
+// Called at relay startup (proactive backfill, user decision 2026-05-20) so legacy entries get
+// migrated to ID-based addressing within minutes of v0.17.0 deploy.
+//
+// Returns counts so the caller can log a summary. Errors per FileMap are logged but don't abort
+// the whole pass — one missing/renamed file shouldn't stop migration of the rest.
+type BackfillStats struct{ Scanned, Backfilled, Skipped, Errors int }
+func (p *Pipeline) BackfillCloudIDs() (BackfillStats, error) {
+	var stats BackfillStats
+	maps, err := p.bm.List()
+	if err != nil { return stats, fmt.Errorf("list filemaps: %w", err) }
+	for _, fm := range maps {
+		stats.Scanned++
+		changed := false
+		for ci, meta := range fm.Chunks {
+			for si, block := range meta.Shards {
+				if block.CloudID != "" { continue }
+				cloud := p.getCloudByName(block.Location)
+				if cloud == nil { stats.Skipped++; continue }
+				resolver, ok := cloud.(types.CloudIDResolver)
+				if !ok { stats.Skipped++; continue }
+				id, rErr := resolver.ResolvePathToID(parseCloudPath(block.Location))
+				if rErr != nil { stats.Errors++; continue }
+				fm.Chunks[ci].Shards[si].CloudID = id
+				changed = true
+			}
+		}
+		if changed {
+			if sErr := p.bm.Save(fm); sErr != nil { stats.Errors++; continue }
+			stats.Backfilled++
+		}
+	}
+	return stats, nil
 }
 
 // getCloudByName resolves a block location to its cloud provider.

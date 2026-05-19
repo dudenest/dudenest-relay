@@ -180,6 +180,16 @@ func runServe(cmd *cobra.Command, args []string) error {
 		log.Printf("✅ relay: exiting standby — re-initializing pipeline with newly authorized provider")
 	}
 	wsHub.SetOnAuthDone(nil) // entering full-server mode: callback dropped (hot-add for additional providers is out of scope for this fix)
+	// P5a proactive backfill: walk blockmap, fill in missing CloudIDs from path → Drive file ID.
+	// Background goroutine so it doesn't block server start. Idempotent — safe even if run while
+	// users are uploading. Per user decision 2026-05-20: proactive (not lazy) so all legacy
+	// FileMaps migrate within a few minutes of v0.17.0 deploy, not over weeks of natural access.
+	go func() {
+		log.Printf("✅ P5a: starting CloudID backfill pass over blockmap…")
+		stats, bfErr := p.BackfillCloudIDs()
+		if bfErr != nil { log.Printf("⚠️  P5a backfill: %v", bfErr); return }
+		log.Printf("✅ P5a backfill done: scanned=%d backfilled=%d skipped=%d errors=%d", stats.Scanned, stats.Backfilled, stats.Skipped, stats.Errors)
+	}()
 	tc, err := thumbnail.NewCache(authConfigDir)
 	if err != nil {
 		return fmt.Errorf("thumbnail cache: %w", err)
