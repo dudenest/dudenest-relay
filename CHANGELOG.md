@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.11.0] — 2026-05-19 — Content-type routing: media → /dudenest/photos/, non-media → /dudenest/files/
+
+### Changed
+- **`pipeline.uploadReplica` cloud path template**: was `files/<hash>/<name>` regardless of content type, now `<folder>/<hash>/<name>` where `<folder>` is decided by a single call to `mediaFolder(name, data)` before the parallel replica goroutines spawn. P2 of `docs/PHOTOS-FILES-REDESIGN.md`.
+- **`pkg/types`**: added public constants `PhotosFolder = "photos"` and `FilesFolder = "files"` so future scan engine (P5) and Flutter UI (P3) can reference the same canonical folder names instead of hard-coded strings.
+
+### Added
+- **`internal/pipeline.mediaFolder(name, data)`** (private helper): chooses `PhotosFolder` vs `FilesFolder`.
+  - Primary: `net/http.DetectContentType` magic-byte sniff (first 512 bytes). Top-level MIME `image/*` or `video/*` → `PhotosFolder`.
+  - Fallback: when sniff returns `application/octet-stream` (no signature recognized), file extension routing for formats Go stdlib can't sniff confidently:
+    - **HEIC/HEIF** (Apple iPhone photos — critical, every iPhone photo would otherwise be misrouted), **RAW** family (.raw, .arw, .nef, .cr2, .cr3, .dng, .rw2, .orf, .pef, .rwl, .srw — camera photographers), **video** containers (.mov, .mkv, .m4v, .3gp, .mts, .m2ts, .avi).
+  - Everything else → `FilesFolder`.
+  - Sniff takes precedence over extension when conclusive — a PDF renamed `disguised.jpg` still routes to `FilesFolder`.
+- **`internal/pipeline/media_folder_test.go`** (10+ test cases): pins JPEG/PNG/GIF/WEBP/MP4 magic-byte detection, PDF/ZIP/text non-media routing, HEIC and RAW extension fallback (case-insensitive), short-data safety, and the sniff-overrides-extension contract.
+- **`TestReplicaRoutesByContentType`** in `replica_test.go`: end-to-end via `MockCloud` — uploads a PNG and a text file, asserts that `MockCloud.storage` keys start with `photos/` and `files/` respectively, then downloads the PNG to confirm `FileMap.Location` round-trips correctly under the new path layout.
+
+### Migration & compatibility
+- **`uploadChunking` is UNCHANGED** — Reed-Solomon shard uploads keep using `blocks/<hash>/<chunk>/<shard>` regardless of content type. Splitting blocks by media-vs-non-media adds no user value (they're encrypted opaque chunks).
+- **`FileMap.Location` schema unchanged** — Locations stored before v0.11.0 (`gdrive:<email>:files/<hash>/<name>`) keep working unmodified: gdrive provider downloads from whatever path is stored.
+- **Existing files in `/dudenest/files/`** (uploaded between v0.10.0 and v0.11.0) — small window where media also landed there. They keep resolving via Location lookup. No migration needed.
+- **`/dudenest-relay/files/` legacy** — still served via the v0.10.0 read-alias fallback in `gdrive.Provider.resolveFile`.
+- Fleet auto-update timer pulls v0.11.0 within 24 h on every relay. Restart picks up new routing. **No operator action**.
+
+### Result
+After v0.11.0 deploy, a fresh upload of `IMG_0123.HEIC` (iPhone photo) lands at `/dudenest/photos/<hash>/IMG_0123.HEIC` on Google Drive (verifiable via Drive web UI). A fresh upload of `invoice.pdf` lands at `/dudenest/files/<hash>/invoice.pdf`. Old files (chunked Reed-Solomon and legacy replicas under `/files/`) remain readable.
+
+---
+
 ## [0.10.0] — 2026-05-19 — Cloud folder rename: dudenest-relay → dudenest (read-aliased legacy)
 
 ### Changed

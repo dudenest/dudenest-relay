@@ -76,6 +76,50 @@ func TestReplicaStrategy(t *testing.T) {
 	fmt.Println("✅ Replica failover test passed (2 replicas, c1 fail → c2 ok)")
 }
 
+// TestReplicaRoutesByContentType pins the P2 behavior: image content lands under PhotosFolder,
+// non-media under FilesFolder. Both uploads should round-trip via Download (path resolution from
+// FileMap.Location must match what Upload wrote). Regression net: if uploadReplica ever stops
+// calling mediaFolder() or hard-codes "files/" again, this test fails on the Photos assertion.
+func TestReplicaRoutesByContentType(t *testing.T) {
+	tmp := t.TempDir()
+	c := NewMockCloud("c1")
+	key := make([]byte, 32)
+	p, _ := New(key, []types.CloudProvider{c}, t.TempDir())
+	// Image upload — PNG magic bytes — must land under "photos/<hash>/..." in MockCloud.storage
+	imgPath := tmp + "/photo.png"
+	os.WriteFile(imgPath, append(pngHeader, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05), 0o600) //nolint:errcheck
+	imgFM, err := p.Upload(imgPath, types.StrategyReplica)
+	if err != nil { t.Fatalf("image Upload: %v", err) }
+	foundImgPath := ""
+	for k := range c.storage {
+		if bytes.HasPrefix([]byte(k), []byte("photos/")) { foundImgPath = k; break }
+	}
+	if foundImgPath == "" {
+		t.Errorf("image was not stored under photos/ — got keys: %v", keysOf(c.storage))
+	}
+	// And Download must resolve via the stored Location
+	outImg := tmp + "/photo-out.png"
+	if err := p.Download(imgFM.FileID, outImg); err != nil { t.Fatalf("image Download: %v", err) }
+	// Non-media upload — text — must land under "files/<hash>/..."
+	docPath := tmp + "/note.txt"
+	os.WriteFile(docPath, []byte("just text"), 0o600) //nolint:errcheck
+	if _, err := p.Upload(docPath, types.StrategyReplica); err != nil { t.Fatalf("text Upload: %v", err) }
+	foundDocPath := ""
+	for k := range c.storage {
+		if bytes.HasPrefix([]byte(k), []byte("files/")) { foundDocPath = k; break }
+	}
+	if foundDocPath == "" {
+		t.Errorf("text was not stored under files/ — got keys: %v", keysOf(c.storage))
+	}
+}
+
+// keysOf is a small helper used by TestReplicaRoutesByContentType for error messages.
+func keysOf(m map[string][]byte) []string {
+	out := make([]string, 0, len(m))
+	for k := range m { out = append(out, k) }
+	return out
+}
+
 func TestReplicaSingleProvider(t *testing.T) {
 	// Edge case: only 1 provider available — should still work
 	c1 := NewMockCloud("cloud1")

@@ -3,7 +3,9 @@ package pipeline
 
 import (
 	"fmt"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +16,30 @@ import (
 	"github.com/dudenest/dudenest-relay/internal/erasure"
 	"github.com/dudenest/dudenest-relay/pkg/types"
 )
+
+// mediaFolder picks the cloud-side folder for a replica upload based on content type.
+// Primary detection: net/http.DetectContentType (magic-byte sniff of first 512B).
+// Fallback: file extension when DetectContentType returns the generic "application/octet-stream"
+// — covers HEIC/HEIF (Apple iPhone photos), MOV (legacy QuickTime), MKV, and common RAW formats
+// that Go's stdlib doesn't have signatures for. Anything not media goes to FilesFolder.
+// Decoupled from uploadReplica so it can be unit-tested in isolation.
+func mediaFolder(name string, data []byte) string {
+	n := 512
+	if len(data) < n { n = len(data) }
+	mime := http.DetectContentType(data[:n])
+	if strings.HasPrefix(mime, "image/") || strings.HasPrefix(mime, "video/") {
+		return types.PhotosFolder
+	}
+	if mime == "application/octet-stream" { // sniff inconclusive — fall back to extension for known-but-unsniffable media
+		switch strings.ToLower(filepath.Ext(name)) {
+		case ".heic", ".heif", ".raw", ".arw", ".nef", ".cr2", ".cr3", ".dng", ".rw2", ".orf", ".pef", ".rwl", ".srw":
+			return types.PhotosFolder
+		case ".mov", ".mkv", ".m4v", ".3gp", ".mts", ".m2ts", ".avi":
+			return types.PhotosFolder
+		}
+	}
+	return types.FilesFolder
+}
 
 // Pipeline ties together all relay components.
 type Pipeline struct {
@@ -124,6 +150,7 @@ func (p *Pipeline) uploadReplica(fm *types.FileMap, filePath string) (*types.Fil
 		limit = len(p.clouds)
 	}
 	chunk := types.ChunkMeta{Index: 0, Offset: 0, Size: int64(len(data)), Hash: fm.Hash}
+	folder := mediaFolder(fm.Name, data) // P2: photos/ for media, files/ for everything else — computed once before parallel replica upload
 	blocks := make([]types.Block, limit)
 	errs := make([]error, limit)
 	var wg sync.WaitGroup
@@ -132,7 +159,7 @@ func (p *Pipeline) uploadReplica(fm *types.FileMap, filePath string) (*types.Fil
 		go func(j int) {
 			defer wg.Done()
 			cloud := p.clouds[j]
-			cloudPath := fmt.Sprintf("files/%s/%s", fm.Hash[:8], fm.Name) // full file path
+			cloudPath := fmt.Sprintf("%s/%s/%s", folder, fm.Hash[:8], fm.Name) // full file path under chosen folder
 			if upErr := cloud.Upload(cloudPath, data); upErr != nil {
 				errs[j] = upErr
 				return

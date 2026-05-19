@@ -11,6 +11,12 @@ const (
 
 	StrategyChunking = "Chunking"
 	StrategyReplica  = "Replica"
+
+	// Cloud-side folder names under the provider's base folder (default base "dudenest" since v0.10.0).
+	// P2 of Photos/Files redesign: replica uploads route media → PhotosFolder, everything else → FilesFolder.
+	// Chunked uploads (legacy) keep using "blocks/..." regardless of content type (see uploadChunking).
+	PhotosFolder = "photos" // image/* + video/* MIME types (and ext-fallback for HEIC/MOV/RAW)
+	FilesFolder  = "files"  // PDF, archives, documents, anything DetectContentType doesn't classify as media
 )
 
 // Block represents a single encrypted+erasure-coded chunk stored in the cloud.
