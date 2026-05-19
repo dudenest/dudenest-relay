@@ -367,6 +367,17 @@ func (fs *fileServer) writeDims(fileID string, d thumbnail.Dims) {
 	os.WriteFile(fs.dimsPath(fileID), []byte(content), 0o644) //nolint:errcheck
 }
 
+// folderFromFileMap returns "photos" or "files" for the Flutter Photos/Files tab filter, derived from
+// the first Shard's Location ("gdrive:<email>:photos/<hash>/..." vs "gdrive:<email>:files/<hash>/...").
+// Defaults to "files" for legacy entries without a recognizable prefix (pre-v0.11.0 replicas all used
+// "files/" regardless of content — the Flutter side can re-classify by extension as a secondary signal).
+func folderFromFileMap(fm *types.FileMap) string {
+	if len(fm.Chunks) == 0 || len(fm.Chunks[0].Shards) == 0 { return types.FilesFolder }
+	loc := fm.Chunks[0].Shards[0].Location // "provider_id:<relative_path>"
+	if strings.Contains(loc, ":"+types.PhotosFolder+"/") { return types.PhotosFolder }
+	return types.FilesFolder
+}
+
 // handleList handles GET /files — returns list of uploaded FileMaps.
 func (fs *fileServer) handleList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -384,6 +395,7 @@ func (fs *fileServer) handleList(w http.ResponseWriter, r *http.Request) {
 		Size    int64      `json:"size"`
 		Hash    string     `json:"hash"`
 		Created time.Time  `json:"created"`
+		Folder  string     `json:"folder"`             // P2/P3 redesign: "photos" (media) or "files" (non-media) — sourced from Shard.Location path prefix; Flutter Photos vs Files tabs filter on this
 		Width   int        `json:"width,omitempty"`    // original image width (0 = unknown/non-image)
 		Height  int        `json:"height,omitempty"`   // original image height
 		TakenAt *time.Time `json:"taken_at,omitempty"` // EXIF DateTimeOriginal; null if absent
@@ -406,6 +418,7 @@ func (fs *fileServer) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 		summaries = append(summaries, fileSummary{
 			FileID: fm.FileID, Name: fm.Name, Size: fm.Size, Hash: fm.Hash, Created: fm.Created,
+			Folder: folderFromFileMap(fm),
 			Width: d.Width, Height: d.Height, TakenAt: d.TakenAt, LQIP: string(lqipData),
 		})
 	}
