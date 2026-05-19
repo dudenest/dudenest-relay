@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.10.0] — 2026-05-19 — Cloud folder rename: dudenest-relay → dudenest (read-aliased legacy)
+
+### Changed
+- **`--gdrive-path` default**: `dudenest-relay` → `dudenest` (`cmd/relay/main.go`). All new GDrive uploads on every relay land under `/dudenest/files/<hash>/<name>` instead of the legacy `/dudenest-relay/files/...`. First step of the redesign in `docs/PHOTOS-FILES-REDESIGN.md` — P2 (next release) splits `/files/` into `/photos/` for media and `/files/` for non-media.
+- **`--mega-path` default**: same rename (`dudenest-relay` → `dudenest`). MEGA legacy read-alias deferred to a follow-up — `internal/cloudconn/mega` does not yet support fallback lookup (no user has legacy MEGA data per current fleet).
+
+### Added
+- **`gdrive.Provider.legacyBaseFolderID`** — at provider startup, if a `dudenest-relay` folder already exists at Drive root (pre-v0.10.0 install), its ID is captured for read-only fallback. New folder is NEVER created at the legacy name. Empty string means no legacy content — `Download`/`Delete` skip the fallback path.
+- **`gdrive.Provider.resolveFile(path)`** — internal helper that tries the primary base first, then the legacy base. Returns `(fileID, "primary"|"legacy", err)` so logging can surface where the file came from. Used by `Download` and `Delete`.
+- **`gdrive.Provider.findPath` / `findFolder`** — read-only counterparts of `ensurePath`/`ensureFolder`. They never create folders, so a Download/Delete miss is fast and side-effect-free (previously every miss provisioned an empty folder tree on Drive).
+- **Folder cache key prefixing** (`P:` for primary, `L:` for legacy) — both bases coexist in the same `folderCache` map without collisions (e.g. `dudenest/files/abc` and `dudenest-relay/files/abc` would otherwise overwrite each other's IDs).
+
+### Migration & compatibility
+- **Read-alias forever** (per `PHOTOS-FILES-REDESIGN.md` §3.1 option B): existing files on relay-poc and any other pre-v0.10.0 deployment STAY where they are. The relay reads them transparently from the legacy base. Over time the legacy tree drains naturally (when users delete files or replace them with new uploads that go to the new base).
+- **Forward-only writes**: `Upload` ALWAYS lands in the primary base. The legacy tree is read-only from v0.10.0 onward.
+- **Blockmap untouched**: `FileMap.Chunks[].Shards[].Location` (`gdrive:<email>:files/<hash>/<name>`) is unchanged — same relative path stored, the provider resolves it.
+- **No operator action**: fleet auto-update timer pulls v0.10.0 within 24 h. Restart picks up new default. Existing uploads remain readable.
+
+### Result on relay-poc (Debian 12, real test target with legacy `/dudenest-relay/files/` content)
+After v0.10.0 deploy:
+1. New uploads go to `/dudenest/files/<hash>/<name>` (verifiable via Drive web UI).
+2. Old uploads downloaded via `/files/{id}` resolve transparently — relay logs `download path X resolved=legacy`.
+3. Delete of an old file removes it from the legacy tree.
+4. `/dudenest-relay/` shrinks over time as users replace photos.
+
+---
+
 ## [0.9.2] — 2026-05-19 — Fix --client-secret / --gdrive-secret flag mismatch (relay-poc2 503 root cause)
 
 ### Fixed

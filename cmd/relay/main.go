@@ -49,11 +49,11 @@ func main() {
 	// MEGA flags
 	root.PersistentFlags().StringVar(&megaEmail, "mega-email", "", "MEGA.nz account email")
 	root.PersistentFlags().StringVar(&megaPassword, "mega-password", "", "MEGA.nz account password")
-	root.PersistentFlags().StringVar(&megaBasePath, "mega-path", "dudenest-relay", "MEGA.nz base folder path")
+	root.PersistentFlags().StringVar(&megaBasePath, "mega-path", "dudenest", "MEGA.nz base folder path (v0.10.0+ default; legacy 'dudenest-relay' folders are read-aliased — see PHOTOS-FILES-REDESIGN.md §1.2)")
 	// GDrive flags
 	root.PersistentFlags().StringVar(&gdriveTokenPath, "gdrive-token", "", "path to gdrive_<id>.json token file")
 	root.PersistentFlags().StringVar(&gdriveSecretPath, "gdrive-secret", "/root/.config/dudenest/gdrive_client_secret.json", "path to client_secret.json")
-	root.PersistentFlags().StringVar(&gdriveBasePath, "gdrive-path", "dudenest-relay", "Google Drive base folder name")
+	root.PersistentFlags().StringVar(&gdriveBasePath, "gdrive-path", "dudenest", "Google Drive base folder name (v0.10.0+ default; legacy 'dudenest-relay' folders are read-aliased — see PHOTOS-FILES-REDESIGN.md §1.2)")
 	root.PersistentFlags().StringVar(&uploadStrategy, "strategy", types.StrategyChunking, "upload strategy: Chunking, Replica")
 
 	root.Version = Version
