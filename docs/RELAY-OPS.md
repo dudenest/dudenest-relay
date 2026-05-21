@@ -93,6 +93,59 @@ Re-running on an existing relay (e.g. one bootstrapped before v0.8.0):
 
 ---
 
+## 🌐 Public URL lifecycle (`RELAY_PUBLIC_URL` semantics)
+
+**Critical**: how a relay learns and publishes its public URL determines whether Flutter can reach it.
+
+### Two URL sources (mutually exclusive)
+
+| Source | Used by | Value | Set by |
+|--------|---------|-------|--------|
+| **Auto (default for new relays)** | All relays bootstrapped via ZT `/relay/announce` flow | `https://relay-<8hex>.dudenest.com` | Hub: `dudenest-backup` `RegisterProvisionedRelay` (`uuid.New()[:8]`) |
+| **Legacy hardcoded** | Only `relay-poc1` (historical) | `https://relay.dudenest.com` | `build.yml` job `deploy-relay-poc` writes `RELAY_PUBLIC_URL` to `relay.env` |
+
+For **all new relays**, `install.sh` deliberately does **NOT** write `RELAY_PUBLIC_URL` to `relay.env`. The relay binary reads `cfg.Backup.PublicURL` (from env), and if empty, **trusts the URL the hub provided in `/relay/bootstrap` response** (persisted in `relay_creds.json`).
+
+### Anti-regression guard (s313, 2026-05-21)
+
+In `cmd/relay/serve.go:219`:
+
+```go
+if cfg.Backup.PublicURL != "" {
+    if err2 := bc.UpdateURL(cfg.Backup.PublicURL); err2 != nil {
+        log.Printf("⚠️  backup: update-url: %v", err2)
+    }
+}
+```
+
+**Why**: prior to s313, every relay restart unconditionally called `bc.UpdateURL(cfg.Backup.PublicURL)` → POST `/relay/update-url` to the hub. If an operator manually set `RELAY_PUBLIC_URL=https://relay2.dudenest.com` in `relay.env` (per an obsolete documentation plan), every restart re-asserted that manual URL to CRDB, **overwriting the auto-URL** generated at bootstrap. Flutter then routed to a non-existent URL.
+
+Pair this with the **hub-side guard** in `dudenest-backup/internal/api/server.go` (`autoURLPattern` regex) which refuses 409 Conflict for any `/relay/update-url` request that downgrades an auto-URL to a manual URL. Defense in depth.
+
+### When you DO need to set `RELAY_PUBLIC_URL`
+
+Only on a legacy single-relay deployment that pre-dates ZT auto-provisioning (i.e., `relay-poc1`). For any new relay, leave it unset.
+
+### Diagnosing URL mismatches
+
+```bash
+# Inspect what the relay believes its URL is:
+ssh root@<relay> 'cat /etc/dudenest/relay_creds.json | python3 -m json.tool'
+
+# Inspect what the hub has in CRDB:
+ssh root@<swarm-node> 'docker exec dudenest-backup_backup wget -qO- http://localhost:8087/internal/relay/routes' \
+  | python3 -m json.tool
+
+# Inspect what Flutter receives:
+curl -H "Authorization: Bearer <JWT>" "https://api.dudenest.com/api/v1/relays" | python3 -m json.tool
+```
+
+All three should agree on `https://relay-<8hex>.dudenest.com`. If `/etc/dudenest/relay.env` contains `RELAY_PUBLIC_URL=...` for a non-poc1 relay, **that's the bug** — remove it, restart relay, verify CRDB updated (or re-bootstrap).
+
+Full recovery procedure: `~/.AI/dudenest-application/INCIDENT-RUNBOOK.md` "Relay-VM w CRDB ma zły relay_url".
+
+---
+
 ## 🔄 Auto-update
 
 Two complementary mechanisms:
