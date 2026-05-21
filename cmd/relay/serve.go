@@ -215,9 +215,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 	bc := backup.New(key, authConfigDir, cfg.Backup.URL, cfg.Debounce(), Version) // nil if URL/RELAY_ID/RELAY_SECRET not set
 	if bc != nil {
-		bc.StartPingLoop(5 * time.Minute)                          // keep last_seen_at current
-		if err2 := bc.UpdateURL(cfg.Backup.PublicURL); err2 != nil { // sync relay_url in CRDB at every startup
-			log.Printf("⚠️  backup: update-url: %v", err2)
+		bc.StartPingLoop(5 * time.Minute) // keep last_seen_at current
+		// Guard (s313): empty RELAY_PUBLIC_URL means "trust the hub" — auto-provisioned relays (relay-<8hex>.dudenest.com)
+		// must not have their CRDB relay_url overwritten on every restart. Only legacy relay-poc1 sets this env explicitly.
+		if cfg.Backup.PublicURL != "" {
+			if err2 := bc.UpdateURL(cfg.Backup.PublicURL); err2 != nil { // sync relay_url in CRDB at every startup
+				log.Printf("⚠️  backup: update-url: %v", err2)
+			}
 		}
 		if ownerFromCreds != "" { // sync user_id in CRDB — fixes old relays that had user_id in file but not CRDB
 			if err2 := bc.UpdateUserID(ownerFromCreds); err2 != nil {
