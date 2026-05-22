@@ -3,6 +3,7 @@ package pipeline
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dudenest/dudenest-relay/internal/account"
 	"github.com/dudenest/dudenest-relay/internal/blockmap"
 	"github.com/dudenest/dudenest-relay/internal/blockstore"
 	"github.com/dudenest/dudenest-relay/internal/crypto"
@@ -47,11 +49,14 @@ type Pipeline struct {
 	rs      *erasure.Encoder
 	bm      *blockmap.Manager
 	clouds  []types.CloudProvider // multiple providers for Replica strategy
+	accts   *account.Manager      // Phase α: nil → legacy first-2 selection; non-nil → SelectReplicas + policy.PathFor
 	chunkSz int
 }
 
-// New creates a pipeline with a master key and cloud providers.
-func New(masterKey []byte, clouds []types.CloudProvider, mapStorePath string) (*Pipeline, error) {
+// New creates a pipeline with a master key and cloud providers. accts may be nil — when nil,
+// uploads fall back to the legacy "first 2 providers in slice" behavior (kept for tests +
+// migration period). Production startup (cmd/relay/serve.go) always passes a real Manager.
+func New(masterKey []byte, clouds []types.CloudProvider, mapStorePath string, accts *account.Manager) (*Pipeline, error) {
 	enc, err := crypto.New(masterKey)
 	if err != nil {
 		return nil, fmt.Errorf("crypto init: %w", err)
@@ -65,8 +70,37 @@ func New(masterKey []byte, clouds []types.CloudProvider, mapStorePath string) (*
 		rs:      rs,
 		bm:      blockmap.New(mapStorePath),
 		clouds:  clouds,
+		accts:   accts,
 		chunkSz: types.ChunkSize,
 	}, nil
+}
+
+// SetAccountManager attaches/replaces the account.Manager used for replica selection.
+// Idempotent — safe to call multiple times. nil = revert to legacy "first 2 in slice" path.
+// Used by cmd/relay/serve.go to wire the long-lived Manager after pipeline construction.
+func (p *Pipeline) SetAccountManager(m *account.Manager) {
+	p.accts = m
+}
+
+// AccountManager returns the currently-attached Manager (may be nil). Exposed so admin
+// endpoints can mutate account policy + accounts without going through serve.go.
+func (p *Pipeline) AccountManager() *account.Manager {
+	return p.accts
+}
+
+// findProviderByAccount maps a CloudAccount → the CloudProvider that handles its uploads.
+// Match is on CloudProvider.ID() == "<provider>:<email>" (the format factory.go uses).
+// Returns nil if no provider is loaded for that account (e.g. account exists but its
+// gdrive_<email>.json was removed) — SelectReplicas already filtered for Active so this
+// should be rare; we log and skip the upload to that account.
+func (p *Pipeline) findProviderByAccount(a *types.CloudAccount) types.CloudProvider {
+	want := a.Provider + ":" + a.Email
+	for _, c := range p.clouds {
+		if c.ID() == want {
+			return c
+		}
+	}
+	return nil
 }
 
 // Upload stores a file using the selected strategy.
@@ -135,7 +169,9 @@ func (p *Pipeline) uploadChunking(fm *types.FileMap, filePath string) (*types.Fi
 	return fm, nil
 }
 
-// uploadReplica stores the full file (unencrypted) on up to 2 available providers.
+// uploadReplica stores the full file (unencrypted) on the providers chosen by
+// account.SelectReplicas. Phase α (s313): replaces the previous hardcoded "first 2 in slice"
+// behavior with a policy-driven choice (Priority / FreeBytes / Diversity / quota gates).
 // No chunking, no erasure coding — files are stored as-is for direct streaming.
 func (p *Pipeline) uploadReplica(fm *types.FileMap, filePath string) (*types.FileMap, error) {
 	if len(p.clouds) == 0 {
@@ -145,45 +181,86 @@ func (p *Pipeline) uploadReplica(fm *types.FileMap, filePath string) (*types.Fil
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
 	}
-	limit := 2 // max 2 replicas
-	if len(p.clouds) < limit {
-		limit = len(p.clouds)
+	folder := mediaFolder(fm.Name, data) // P2: photos/ for media, files/ for everything else
+	when := time.Now().UTC()
+	if !fm.Created.IsZero() {
+		when = fm.Created.UTC()
 	}
+
+	// Resolve which providers to write to.
+	// Phase α path: account.Manager + SelectReplicas drives the choice (policy-aware).
+	// Legacy fallback (accts==nil): keep the historical "first 2 in slice" behavior so
+	// existing tests don't break and so we can deploy the package incrementally.
+	type pick struct {
+		cloud   types.CloudProvider
+		accID   int64 // 0 in legacy mode
+		path    string
+	}
+	var picks []pick
+	if p.accts != nil {
+		cfg := p.accts.Policy()
+		all := p.accts.ActiveAccounts()
+		chosen, err := account.SelectReplicas(account.FileMeta{Size: int64(len(data)), ContentType: folder}, all, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("select replicas: %w", err)
+		}
+		// Translate cloud path via the configured PathScheme.
+		path := cfg.PathFor(folder, fm.Name, when)
+		for _, a := range chosen {
+			cloud := p.findProviderByAccount(a)
+			if cloud == nil {
+				log.Printf("uploadReplica: no provider loaded for account %s (provider=%s email=%s) — skip", a.DisplayID(), a.Provider, a.Email)
+				continue
+			}
+			picks = append(picks, pick{cloud: cloud, accID: a.ID, path: path})
+		}
+		if len(picks) == 0 {
+			return nil, fmt.Errorf("select replicas returned %d accounts but none have a loaded provider", len(chosen))
+		}
+		// Inform caller if policy chose fewer than requested (e.g. only 1 account exists + AllowSingleReplicaWithWarning).
+		if len(picks) < cfg.ReplicationFactor {
+			log.Printf("uploadReplica: degraded redundancy — picked %d of %d requested replicas (policy.AllowSingleReplicaWithWarning may be true)", len(picks), cfg.ReplicationFactor)
+		}
+	} else {
+		// Legacy fallback for tests / cmd/relay paths that haven't been wired with account.Manager yet.
+		limit := 2
+		if len(p.clouds) < limit {
+			limit = len(p.clouds)
+		}
+		legacyPath := fmt.Sprintf("%s/%04d/%02d/%s", folder, when.Year(), int(when.Month()), fm.Name)
+		for j := 0; j < limit; j++ {
+			picks = append(picks, pick{cloud: p.clouds[j], path: legacyPath})
+		}
+	}
+
 	chunk := types.ChunkMeta{Index: 0, Offset: 0, Size: int64(len(data)), Hash: fm.Hash}
-	folder := mediaFolder(fm.Name, data) // P2: photos/ for media, files/ for everything else — computed once before parallel replica upload
-	blocks := make([]types.Block, limit)
-	errs := make([]error, limit)
+	blocks := make([]types.Block, len(picks))
+	errs := make([]error, len(picks))
 	var wg sync.WaitGroup
-	for j := 0; j < limit; j++ {
+	for j, pk := range picks {
 		wg.Add(1)
-		go func(j int) {
+		go func(j int, pk pick) {
 			defer wg.Done()
-			cloud := p.clouds[j]
-			// P5b: date-bucketed path (was hash-based pre-P5b). Date source priority: EXIF DateTimeOriginal
-			// (P5b-future when exif extraction wired in here — currently the EXIF write happens later in
-			// thumbnail pipeline, so for now we use server upload time. Editable-date logic in
-			// /files/{id}/meta will MoveByID into the correct bucket once EXIF gets read.)
-			when := time.Now().UTC()
-			if fm.Created.IsZero() == false { when = fm.Created.UTC() }
-			cloudPath := fmt.Sprintf("%s/%04d/%02d/%s", folder, when.Year(), int(when.Month()), fm.Name)
 			var cloudID string
 			var upErr error
-			if u, ok := cloud.(types.CloudIDUploader); ok {
-				cloudID, upErr = u.UploadAndReturnID(cloudPath, data)
+			if u, ok := pk.cloud.(types.CloudIDUploader); ok {
+				cloudID, upErr = u.UploadAndReturnID(pk.path, data)
 			} else {
-				upErr = cloud.Upload(cloudPath, data)
+				upErr = pk.cloud.Upload(pk.path, data)
 			}
 			if upErr != nil {
 				errs[j] = upErr
 				return
 			}
 			blocks[j] = types.Block{
-				ID: fmt.Sprintf("%s.r%d", fm.FileID, j), ShardIdx: j, Size: int64(len(data)),
-				Location: fmt.Sprintf("%s:%s", cloud.ID(), cloudPath),
+				ID:       fmt.Sprintf("%s.r%d", fm.FileID, j),
+				ShardIdx: j,
+				Size:     int64(len(data)),
+				Location: fmt.Sprintf("%s:%s", pk.cloud.ID(), pk.path),
 				CloudID:  cloudID, // P5a: empty when provider doesn't implement CloudIDUploader; pipeline.Download then uses Location lookup
 				Created:  time.Now().UTC(),
 			}
-		}(j)
+		}(j, pk)
 	}
 	wg.Wait()
 	var goodBlocks []types.Block

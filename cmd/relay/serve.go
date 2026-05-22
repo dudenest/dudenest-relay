@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/oauth2"
 
+	"github.com/dudenest/dudenest-relay/internal/account"
 	"github.com/dudenest/dudenest-relay/internal/auth"
 	"github.com/dudenest/dudenest-relay/internal/backup"
 	"github.com/dudenest/dudenest-relay/internal/blockmap"
@@ -181,6 +182,35 @@ func runServe(cmd *cobra.Command, args []string) error {
 		log.Printf("✅ relay: exiting standby — re-initializing pipeline with newly authorized provider")
 	}
 	wsHub.SetOnAuthDone(nil) // entering full-server mode — full server below re-sets a different callback (scan-engine trigger), so this clears the standby loop callback first
+
+	// Phase α (s313+): attach account.Manager so uploadReplica picks targets via SelectReplicas
+	// (policy-driven Priority/FreeBytes/Diversity) instead of the legacy "first 2 in slice".
+	// First-time bootstrap: if accounts.json is empty but providers/ has entries, auto-create
+	// CloudAccount records (first → PrimaryWrite, rest → ReplicaWrite, Priority = filesystem order).
+	// User can then drag-reorder priorities in the UI (Phase β: admin endpoints + Flutter).
+	if accMgr, err := account.New(authConfigDir); err != nil {
+		log.Printf("⚠️  account.Manager init failed (falling back to legacy upload selection): %v", err)
+	} else {
+		if len(accMgr.Accounts()) == 0 {
+			// Bootstrap from currently-loaded providers. p.clouds is set inside the pipeline;
+			// we rebuild the ID list here via getClouds() (same source) to avoid exposing internals.
+			if clouds, cErr := getClouds(); cErr == nil {
+				ids := make([]string, 0, len(clouds))
+				for _, c := range clouds {
+					ids = append(ids, c.ID())
+				}
+				if n, bErr := accMgr.BootstrapFromProviders(ids); bErr != nil {
+					log.Printf("⚠️  account bootstrap: %v", bErr)
+				} else if n > 0 {
+					log.Printf("✅ account bootstrap: created %d CloudAccount records from existing providers (edit priorities in Settings → Cloud Accounts)", n)
+				}
+			}
+		}
+		p.SetAccountManager(accMgr)
+		log.Printf("✅ account.Manager attached: %d accounts, replication_factor=%d, diversity=%v",
+			len(accMgr.ActiveAccounts()), accMgr.Policy().ReplicationFactor, accMgr.Policy().DiversityRequired)
+	}
+
 	// P5a proactive backfill: walk blockmap, fill in missing CloudIDs from path → Drive file ID.
 	// Background goroutine so it doesn't block server start. Idempotent — safe even if run while
 	// users are uploading. Per user decision 2026-05-20: proactive (not lazy) so all legacy

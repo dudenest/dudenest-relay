@@ -124,7 +124,10 @@ func getPipeline() (*pipeline.Pipeline, error) {
 	if len(clouds) == 0 {
 		return nil, fmt.Errorf("no cloud providers available")
 	}
-	return pipeline.New(key, clouds, storePath)
+	// CLI commands (upload/download/recover) use the legacy "first 2 in slice" path —
+	// they're one-shot operations not meant to interact with the long-lived account.Manager
+	// state owned by the running `relay serve`. Pass nil to opt into legacy uploadReplica path.
+	return pipeline.New(key, clouds, storePath, nil)
 }
 func uploadCmd() *cobra.Command {
 	return &cobra.Command{

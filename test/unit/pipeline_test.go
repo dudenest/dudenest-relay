@@ -77,7 +77,7 @@ func TestPipeline(t *testing.T) {
 	}
 	key := crypto.DeriveKeyFromPassword("test-password", "test-salt")
 	cloud := local.New(filepath.Join(tmp, "cloud"))
-	p, err := pipeline.New(key, []types.CloudProvider{cloud}, filepath.Join(tmp, "maps"))
+	p, err := pipeline.New(key, []types.CloudProvider{cloud}, filepath.Join(tmp, "maps"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
