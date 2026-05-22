@@ -43,7 +43,7 @@ func TestReplicaStrategy(t *testing.T) {
 	clouds := []types.CloudProvider{c1, c2, c3}
 
 	key := make([]byte, 32)
-	p, _ := New(key, clouds, t.TempDir())
+	p, _ := New(key, clouds, t.TempDir(), nil)
 
 	content := []byte("secret dudenest data for replica test")
 	tmpFile := t.TempDir() + "/test-replica.txt"
@@ -84,7 +84,7 @@ func TestReplicaRoutesByContentType(t *testing.T) {
 	tmp := t.TempDir()
 	c := NewMockCloud("c1")
 	key := make([]byte, 32)
-	p, _ := New(key, []types.CloudProvider{c}, t.TempDir())
+	p, _ := New(key, []types.CloudProvider{c}, t.TempDir(), nil)
 	// Image upload — PNG magic bytes — must land under "photos/<hash>/..." in MockCloud.storage
 	imgPath := tmp + "/photo.png"
 	os.WriteFile(imgPath, append(pngHeader, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05), 0o600) //nolint:errcheck
@@ -124,7 +124,7 @@ func TestReplicaSingleProvider(t *testing.T) {
 	// Edge case: only 1 provider available — should still work
 	c1 := NewMockCloud("cloud1")
 	key := make([]byte, 32)
-	p, _ := New(key, []types.CloudProvider{c1}, t.TempDir())
+	p, _ := New(key, []types.CloudProvider{c1}, t.TempDir(), nil)
 
 	content := []byte("single provider test")
 	tmpFile := t.TempDir() + "/single.txt"
