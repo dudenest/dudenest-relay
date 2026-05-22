@@ -406,6 +406,57 @@ func TestReplaceAll_Persistence(t *testing.T) {
 	if accs[0].Priority != 99 || !accs[1].Pinned { t.Errorf("changes did not persist: %+v %+v", accs[0], accs[1]) }
 }
 
+// ----- Phase γ drain: minimal test (rest exercised end-to-end on production) -----
+
+// γ-1: NewDrainState returns nil snapshot for unknown account.
+// Defensive — UI should treat nil as "drain not in progress" and render normally.
+func TestDrainState_NilSnapshotForUnknown(t *testing.T) {
+	st := NewDrainState()
+	if st.Snapshot(999) != nil { t.Error("expected nil snapshot for unknown id, got non-nil") }
+}
+
+// γ-2: drainOnePass with no Drain accounts is a no-op and returns 0.
+// Validates the early-exit + ensures we don't accidentally drain ReplicaWrite/PrimaryWrite accounts.
+func TestDrain_NoOpWhenNoDrainAccounts(t *testing.T) {
+	m, _ := mkManager(t)
+	_, _ = m.AddAccount("gdrive", "a@x.com")
+	_, _ = m.AddAccount("gdrive", "b@x.com")
+	st := NewDrainState()
+	n := m.drainOnePass(&noopDrainer{}, st)
+	if n != 0 { t.Errorf("expected 0 (no drain accounts), got %d", n) }
+}
+
+// γ-3: when a Drain account exists but no other accounts are available, drainOneAccount
+// logs warning + leaves account untouched (NOT marked Removed). This is the "user removed
+// their only account" edge case — safe behavior is to refuse rather than data-loss.
+func TestDrain_RefusesWhenNoOtherAccounts(t *testing.T) {
+	m, _ := mkManager(t)
+	only, _ := m.AddAccount("gdrive", "only@x.com")
+	// Manually transition to Drain (in production happens via DELETE /admin/accounts/{id})
+	live := m.Accounts()
+	for _, a := range live { if a.ID == only.ID { a.Role = types.RoleDrain } }
+	_ = m.ReplaceAll(live)
+	st := NewDrainState()
+	n := m.drainOnePass(&noopDrainer{}, st)
+	if n != 1 { t.Errorf("expected 1 (one account touched), got %d", n) }
+	// Account must still be present, Status not Removed.
+	for _, a := range m.Accounts() {
+		if a.ID == only.ID {
+			if a.Status == types.StatusRemoved { t.Error("account incorrectly marked Removed despite no migration target") }
+		}
+	}
+	prog := st.Snapshot(only.ID)
+	if prog == nil || prog.LastErr == "" { t.Error("expected LastErr to record 'no migration target'") }
+}
+
+// noopDrainer is a stub PipelineDrainer for unit tests — no files, no providers.
+type noopDrainer struct{}
+
+func (*noopDrainer) ListFiles() ([]*types.FileMap, error)              { return nil, nil }
+func (*noopDrainer) GetFileMap(string) (*types.FileMap, error)         { return nil, nil }
+func (*noopDrainer) SaveFileMap(*types.FileMap) error                  { return nil }
+func (*noopDrainer) CloudByID(string) types.CloudProvider              { return nil }
+
 // ----- test helpers -----
 
 func mkAccount(id int64, provider, email string, role types.Role, priority int) *types.CloudAccount {

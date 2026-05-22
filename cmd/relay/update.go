@@ -75,7 +75,22 @@ func updateCmd() *cobra.Command {
 }
 
 func fetchLatestRelease() (*githubRelease, error) {
-	resp, err := http.Get(githubReleaseAPI) //nolint:noctx
+	req, err := http.NewRequest(http.MethodGet, githubReleaseAPI, nil)
+	if err != nil {
+		return nil, err
+	}
+	// Authenticate when GITHUB_TOKEN is available. Without auth GitHub gives 60 req/h per IP,
+	// which is exceeded fleet-wide when the hub already polls /releases/latest every minute
+	// (60/h baseline) and the auto-update.timer fires at the same time. With auth the budget
+	// climbs to 5000/h, well above anything a single relay would consume.
+	// The token is searched in env first (12-factor friendly), then in /etc/dudenest/relay.env
+	// (where install.sh writes RELAY_KEY and friends), then /root/.config/dudenest/relay.env.
+	// Empty result = unauthenticated request, same as before — preserves backward compat.
+	if tok := githubToken(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -85,6 +100,28 @@ func fetchLatestRelease() (*githubRelease, error) {
 	}
 	var r githubRelease
 	return &r, json.NewDecoder(resp.Body).Decode(&r)
+}
+
+// githubToken returns the first non-empty value among GITHUB_TOKEN env and either of the two
+// relay.env locations install.sh writes to. Returns "" if not configured anywhere — caller
+// falls back to unauthenticated request (still works for low-frequency operations).
+func githubToken() string {
+	if v := os.Getenv("GITHUB_TOKEN"); v != "" {
+		return v
+	}
+	for _, envFile := range []string{"/etc/dudenest/relay.env", os.ExpandEnv("$HOME/.config/dudenest/relay.env")} {
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "GITHUB_TOKEN=") {
+				return strings.Trim(strings.TrimPrefix(line, "GITHUB_TOKEN="), `"`)
+			}
+		}
+	}
+	return ""
 }
 
 func archSuffix() string {

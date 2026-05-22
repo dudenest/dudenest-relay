@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.19.0] — 2026-05-23 — Phase γ drain workflow + ops fixes (GITHUB_TOKEN, dual-service cleanup)
+
+Non-breaking. Three independent items in one release:
+
+### Phase γ — Drain workflow (`internal/account/drain.go`)
+
+Implements the file migration that closes the loop on DELETE /admin/accounts/{id}. Before v0.19.0, deleting an account just flipped its Role to Drain and stopped new uploads to it — historical pliki stayed on the (now-orphan) cloud account indefinitely. Phase γ adds the background worker that actually moves the data.
+
+**Worker semantics:**
+- `Manager.StartDrainLoop(ctx, drainer, state, 2*time.Minute)` — sweep every 2 minutes (initial delay 1 min after relay start).
+- For each Role=Drain account: walk every FileMap, find shards whose Location starts with that account's `<provider>:<email>:` prefix, download each shard, pick a new home via `SelectReplicas` (with the draining account excluded), upload, rewrite `Shard.Location` + `Shard.CloudID`, persist FileMap, best-effort delete from source.
+- Concurrent migrations capped by `cfg.DrainMaxConcurrentMigrations` (default 4) via semaphore.
+- Bandwidth throttle: `cfg.DrainBandwidthLimitMBPerSec` > 0 sleeps proportional to bytes after each transfer.
+- Idempotent: a partial drain that gets interrupted (relay restart, network blip) picks up exactly where it left off on the next sweep — each shard is checked individually via the Location prefix, already-migrated ones simply have a different prefix now and are skipped.
+- Safety: if a Drain account has zero other active accounts available as targets, the worker logs a warning and refuses to proceed (avoids data loss). User must add another account first.
+- On zero shards remaining: account transitions to `Status=Removed` + `RemovedAt=now`. The record stays in `accounts.json` for audit; no UI selection or new uploads touch it.
+
+**Pipeline contract** (`internal/pipeline/pipeline.go`):
+- `Pipeline.SaveFileMap(fm)` — atomic persist after Location rewrite. Used by drain worker.
+- `Pipeline.CloudByID(providerID)` — look up CloudProvider by its ID() string. Used for both source download and target upload.
+- `Pipeline` satisfies `account.PipelineDrainer` interface (defined in drain.go to avoid import cycle).
+
+**Drain state tracking** (`account.DrainState`):
+- In-memory only (per relay start). Holds per-account `{FileMapsScanned, ShardsToMigrate, ShardsMigrated, ShardsFailed, LastErr, StartedAt}`.
+- Exposed via `globalDrainState` package var so future admin endpoint `/admin/accounts/{id}/drain-progress` can read it (UI side — pending Flutter implementation).
+- Restart resumes from where `Location` pointers stand; the lost in-memory state just resets counters.
+
+**Tests** (`internal/account/manager_test.go`): 3 new γ-* tests covering nil-snapshot defense, no-op when no Drain accounts, and refuse-when-no-targets edge case. End-to-end migration test deferred to live production exercise (requires real provider credentials).
+
+### Ops — `relay update` GitHub auth (`cmd/relay/update.go`)
+
+The unauthenticated GitHub API gives 60 req/h per IP — easy to exceed when the hub polls /releases/latest every minute baseline + the auto-update timer fires across multiple relays from the same NAT. `relay update` now reads a `GITHUB_TOKEN` value from (in order): env var, `/etc/dudenest/relay.env`, `$HOME/.config/dudenest/relay.env`. When found, the API call uses `Authorization: Bearer <token>` and the rate limit jumps to 5000 req/h. Empty value = unauthenticated (same as before — backward compat). Helper: `githubToken()` — clean fallback chain.
+
+### Ops — relay-poc1 dual-service consolidation
+
+Documented for ops record: relay-poc1 had **two competing systemd units** for the same binary:
+- `relay.service` — legacy from manual setup, config dir `/root/.config/dudenest/`, `ExecStartPre=relay update`
+- `dudenest-relay.service` — Phase 0 install.sh standard, config dir `/etc/dudenest/`
+
+Both directories were symlink-linked (`/root/.config/dudenest → /etc/dudenest`) so they shared the same files; the conflict was strictly at the systemd level (both tried bind 0.0.0.0:8086 → "address already in use" on whichever started second). Resolution: `systemctl stop+disable relay`, move unit file aside (`relay.service.disabled-2026-05-23`), `systemctl enable --now dudenest-relay`. Other relays (poc2 and any new bootstrap from install.sh) already use only `dudenest-relay.service` — poc1 is now consistent with the fleet.
+
+### Upgrade
+
+Standard relay update; the drain worker idle if no Role=Drain accounts exist. After deploy, DELETE /admin/accounts/{id} (Phase β) becomes a real Drain workflow rather than a stub — files migrate within minutes.
+
+---
+
 ## [0.18.0] — 2026-05-23 — Phase β: quota polling + ReconcileRoles + admin REST endpoints
 
 Non-breaking. Builds on Phase α (v0.17.2). Brings the multi-account orchestration to production-grade: per-account capacity is now tracked, role transitions happen automatically when accounts fill up, and the entire state is mutable via REST.

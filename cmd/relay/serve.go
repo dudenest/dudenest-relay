@@ -227,8 +227,15 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}
 		accMgr.StartQuotaPollLoop(bgCtx, provLookup)
 		accMgr.StartReconcileLoop(bgCtx)
-		log.Printf("✅ account.Manager: quota poll + reconcile loops started (interval=%dm, soft_cap=%d%%, hard_cap=%d%%)",
-			accMgr.Policy().QuotaCheckIntervalMin, accMgr.Policy().SoftCapDefaultPct, accMgr.Policy().HardCapDefaultPct)
+		// Phase γ drain worker: scans for Role=Drain accounts and migrates their shards to other
+		// active accounts. 2-min sweep cadence. Honors cfg.DrainMaxConcurrentMigrations and
+		// cfg.DrainBandwidthLimitMBPerSec. Pipeline implements PipelineDrainer interface via
+		// ListFiles + GetFileMap + SaveFileMap + CloudByID — all methods that already existed
+		// or were added in this commit for exactly this purpose.
+		globalDrainState = account.NewDrainState()
+		accMgr.StartDrainLoop(bgCtx, p, globalDrainState, 2*time.Minute)
+		log.Printf("✅ account.Manager: quota poll + reconcile + drain loops started (interval=%dm, soft_cap=%d%%, hard_cap=%d%%, drain_max_concurrent=%d)",
+			accMgr.Policy().QuotaCheckIntervalMin, accMgr.Policy().SoftCapDefaultPct, accMgr.Policy().HardCapDefaultPct, accMgr.Policy().DrainMaxConcurrentMigrations)
 
 		// Phase β admin REST endpoints (wired in full-server section below via mux registration).
 		// Stashed in package var so the route registration in full-server picks them up.

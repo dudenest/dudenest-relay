@@ -358,6 +358,21 @@ func (p *Pipeline) downloadReplica(meta types.ChunkMeta) ([]byte, error) {
 // GetFileMap returns a specific FileMap by ID from local storage.
 func (p *Pipeline) GetFileMap(fileID string) (*types.FileMap, error) { return p.bm.Load(fileID) }
 
+// SaveFileMap persists an externally-mutated FileMap. Used by the drain worker to rewrite
+// Shard.Location after migrating data to a different account. Atomic via the underlying
+// blockmap.Manager (tmp+rename).
+func (p *Pipeline) SaveFileMap(fm *types.FileMap) error { return p.bm.Save(fm) }
+
+// CloudByID looks up a CloudProvider by its ID() string ("gdrive:user@x.com"). Returns nil
+// if no provider with that ID is loaded. Used by the drain worker so it can act on arbitrary
+// accounts without holding a *account.CloudAccount → *types.CloudProvider map of its own.
+func (p *Pipeline) CloudByID(providerID string) types.CloudProvider {
+	for _, c := range p.clouds {
+		if c.ID() == providerID { return c }
+	}
+	return nil
+}
+
 // ListFiles returns all uploaded FileMaps from local storage.
 func (p *Pipeline) ListFiles() ([]*types.FileMap, error) { return p.bm.List() }
 

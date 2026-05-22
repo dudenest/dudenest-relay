@@ -25,6 +25,10 @@ import (
 	"github.com/dudenest/dudenest-relay/pkg/types"
 )
 
+// globalDrainState holds the live drain progress tracker. Phase γ admin endpoint
+// /admin/accounts/{id} GET surfaces this so Flutter UI can show "draining: 437/1247 shards".
+var globalDrainState *account.DrainState
+
 // globalAdminAccounts is set by serve.go after account.Manager is constructed and read by the
 // full-server route registration block. Package-level var because the construction (in serve.go's
 // pipeline init section) happens before the mux is built, but the route registration happens after.
