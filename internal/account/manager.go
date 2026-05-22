@@ -5,6 +5,7 @@
 package account
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -414,6 +415,195 @@ func derefInt64(p *int64, def int64) int64 {
 		return def
 	}
 	return *p
+}
+
+// ReplaceAll swaps the in-memory account list with the provided slice and persists.
+// Used by admin endpoints (PATCH /admin/accounts/{id}) when the handler builds up an edited
+// view via Accounts() copies and needs to commit the result. Caller is responsible for not
+// removing accounts (IDs are not reused — to soft-delete use SetRole(id, RoleDrain)).
+func (m *Manager) ReplaceAll(accounts []*types.CloudAccount) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.accounts = accounts
+	return m.savelocked()
+}
+
+// --- Phase β: quota polling + ReconcileRoles ---
+
+// ProviderLookup resolves a CloudAccount to its CloudProvider. The relay supplies this at
+// StartQuotaPollLoop time so the manager package doesn't need to import internal/cloudconn.
+// Return nil if no provider is loaded for that account — the loop logs and skips.
+type ProviderLookup func(a *types.CloudAccount) types.CloudProvider
+
+// RefreshQuota calls provider.Quota() (if the provider implements QuotaReporter) and updates
+// the account's QuotaUsedBytes/QuotaTotalBytes/QuotaCheckedAt. Returns nil for accounts whose
+// provider doesn't report quota (caller treats nil as "skip silently"). Persists on success.
+//
+// Errors during the API call transition the account to StatusQuarantineUntil = now+5min
+// (or the next ReconcileRoles tick clears the quarantine if a subsequent call succeeds).
+func (m *Manager) RefreshQuota(id int64, lookup ProviderLookup) error {
+	m.mu.Lock()
+	var acc *types.CloudAccount
+	for _, a := range m.accounts {
+		if a.ID == id { acc = a; break }
+	}
+	m.mu.Unlock()
+	if acc == nil { return fmt.Errorf("account %d not found", id) }
+	prov := lookup(acc)
+	if prov == nil { return nil } // provider not loaded (e.g. token revoked) — leave quota stale
+	qr, ok := prov.(types.QuotaReporter)
+	if !ok { return nil } // provider doesn't support Quota (e.g. local fs)
+	used, total, err := qr.Quota()
+	if err != nil {
+		m.mu.Lock()
+		acc.Status = types.StatusError
+		acc.LastError = "quota refresh: " + err.Error()
+		until := time.Now().Add(5 * time.Minute)
+		acc.QuarantineUntil = &until
+		_ = m.savelocked()
+		m.mu.Unlock()
+		return err
+	}
+	m.mu.Lock()
+	acc.QuotaUsedBytes = used
+	acc.QuotaTotalBytes = total
+	acc.QuotaCheckedAt = time.Now().UTC()
+	acc.LastSeenAt = acc.QuotaCheckedAt
+	if acc.Status == types.StatusError { // clear previous error if we now succeed
+		acc.Status = types.StatusActive
+		acc.LastError = ""
+		acc.QuarantineUntil = nil
+	}
+	err = m.savelocked()
+	m.mu.Unlock()
+	return err
+}
+
+// StartQuotaPollLoop spawns a background goroutine that refreshes quotas for all active accounts
+// every cfg.QuotaCheckIntervalMin minutes. Pure dispatch — actual ReconcileRoles fires from a separate
+// loop (see StartReconcileLoop) so quota refresh failures don't block role transitions.
+// Safe to call once at startup. Goroutine exits when ctx cancels.
+func (m *Manager) StartQuotaPollLoop(ctx context.Context, lookup ProviderLookup) {
+	go func() {
+		interval := time.Duration(m.Policy().QuotaCheckIntervalMin) * time.Minute
+		if interval < time.Minute { interval = 30 * time.Minute }
+		// First poll: small delay so the relay can fully initialize providers + answer first Flutter requests
+		// before we start hitting Drive API.
+		select {
+		case <-ctx.Done(): return
+		case <-time.After(30 * time.Second):
+		}
+		for {
+			active := m.ActiveAccounts()
+			for _, a := range active {
+				if a.QuarantineUntil != nil && time.Now().Before(*a.QuarantineUntil) { continue }
+				if err := m.RefreshQuota(a.ID, lookup); err != nil {
+					// Already logged into account.LastError via RefreshQuota; here we just emit one line.
+					fmt.Printf("quota poll: %s (id=%d): %v\n", a.Email, a.ID, err)
+				}
+			}
+			select {
+			case <-ctx.Done(): return
+			case <-time.After(interval):
+			}
+		}
+	}()
+}
+
+// ReconcileRoles enforces auto-demote/auto-promote rules based on current quota + policy.
+// Pure-ish: reads from manager state, may mutate via SetRole — does NOT touch network.
+// Designed for batched calls (e.g. from StartReconcileLoop) but safe to call ad-hoc.
+//
+// Algorithm:
+//  1. For each account with Role=PrimaryWrite and !Pinned: if UsedPercent >= softCap → demote to ReplicaWrite.
+//  2. Per cfg.PromoteStrategy, pick the best ReplicaWrite candidate and promote to PrimaryWrite
+//     when there is no PrimaryWrite left or when the strategy says the current set should rotate.
+//
+// Returns counts of demotions + promotions for logging.
+func (m *Manager) ReconcileRoles() (demoted, promoted int) {
+	if !m.Policy().AutoDemoteOnSoftCap && !m.Policy().AutoPromoteOnSpace { return 0, 0 }
+	cfg := m.Policy()
+	active := m.ActiveAccounts()
+	// Step 1: demote
+	if cfg.AutoDemoteOnSoftCap {
+		for _, a := range active {
+			if a.Role != types.RolePrimaryWrite || a.Pinned { continue }
+			softCap := cfg.SoftCapDefaultPct
+			if a.SoftCapPct != nil { softCap = *a.SoftCapPct }
+			if a.QuotaTotalBytes > 0 && a.UsedPercent() >= softCap {
+				_ = m.SetRole(a.ID, types.RoleReplicaWrite)
+				demoted++
+			}
+		}
+	}
+	// Step 2: promote if no PrimaryWrite candidates exist + we have a ReplicaWrite
+	if cfg.AutoPromoteOnSpace {
+		active = m.ActiveAccounts() // re-load after demotions
+		hasPrimary := false
+		var candidates []*types.CloudAccount
+		for _, a := range active {
+			if a.Pinned { continue }
+			if a.Role == types.RolePrimaryWrite { hasPrimary = true }
+			if a.Role == types.RoleReplicaWrite { candidates = append(candidates, a) }
+		}
+		if !hasPrimary && len(candidates) > 0 {
+			// Pick the candidate by configured strategy.
+			best := pickPromoteCandidate(candidates, cfg.PromoteStrategy)
+			if best != nil {
+				_ = m.SetRole(best.ID, types.RolePrimaryWrite)
+				promoted++
+			}
+		}
+	}
+	return demoted, promoted
+}
+
+// pickPromoteCandidate selects the best account to promote from ReplicaWrite to PrimaryWrite.
+// Strategies (all configurable via cfg.PromoteStrategy):
+//   - "by_priority"        : lowest Priority value (typical default)
+//   - "by_free_pct"        : highest free percentage (load-balance fresh accounts)
+//   - "by_age_oldest_first": oldest AddedAt (rotate stable accounts to the front)
+//   - "round_robin"        : pick by ID modulo current minute (cheap pseudo-random)
+//   - anything else        : fall back to by_priority
+func pickPromoteCandidate(candidates []*types.CloudAccount, strategy string) *types.CloudAccount {
+	if len(candidates) == 0 { return nil }
+	switch strategy {
+	case "by_free_pct":
+		best := candidates[0]
+		for _, c := range candidates[1:] { if 100-c.UsedPercent() > 100-best.UsedPercent() { best = c } }
+		return best
+	case "by_age_oldest_first":
+		best := candidates[0]
+		for _, c := range candidates[1:] { if c.AddedAt.Before(best.AddedAt) { best = c } }
+		return best
+	case "round_robin":
+		min := int64(time.Now().Minute()) % int64(len(candidates))
+		return candidates[min]
+	case "by_priority":
+		fallthrough
+	default:
+		best := candidates[0]
+		for _, c := range candidates[1:] { if c.Priority < best.Priority { best = c } }
+		return best
+	}
+}
+
+// StartReconcileLoop runs ReconcileRoles every 1 minute. Cheap (no network) — fine to run often
+// so promotions surface within a minute of a quota refresh detecting SoftCap.
+func (m *Manager) StartReconcileLoop(ctx context.Context) {
+	go func() {
+		t := time.NewTicker(1 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done(): return
+			case <-t.C:
+				if d, p := m.ReconcileRoles(); d+p > 0 {
+					fmt.Printf("reconcile: demoted=%d promoted=%d\n", d, p)
+				}
+			}
+		}
+	}()
 }
 
 // BootstrapFromProviders auto-creates CloudAccount entries for each existing CloudProvider

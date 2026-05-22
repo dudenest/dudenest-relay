@@ -209,6 +209,31 @@ func runServe(cmd *cobra.Command, args []string) error {
 		p.SetAccountManager(accMgr)
 		log.Printf("✅ account.Manager attached: %d accounts, replication_factor=%d, diversity=%v",
 			len(accMgr.ActiveAccounts()), accMgr.Policy().ReplicationFactor, accMgr.Policy().DiversityRequired)
+
+		// Phase β: start quota polling + ReconcileRoles in background. Both honor cancellation
+		// via a server-lifetime context (the relay process exit terminates them).
+		bgCtx, _ := context.WithCancel(context.Background())
+		// provLookup translates CloudAccount → CloudProvider for the polling loop.
+		// Defined inline so we don't expose pipeline internals to internal/account.
+		provLookup := func(a *types.CloudAccount) types.CloudProvider {
+			want := a.Provider + ":" + a.Email
+			cs, _ := getClouds() // cheap — getClouds caches inside factory
+			for _, c := range cs {
+				if c.ID() == want {
+					return c
+				}
+			}
+			return nil
+		}
+		accMgr.StartQuotaPollLoop(bgCtx, provLookup)
+		accMgr.StartReconcileLoop(bgCtx)
+		log.Printf("✅ account.Manager: quota poll + reconcile loops started (interval=%dm, soft_cap=%d%%, hard_cap=%d%%)",
+			accMgr.Policy().QuotaCheckIntervalMin, accMgr.Policy().SoftCapDefaultPct, accMgr.Policy().HardCapDefaultPct)
+
+		// Phase β admin REST endpoints (wired in full-server section below via mux registration).
+		// Stashed in package var so the route registration in full-server picks them up.
+		// (We can't register here because mux doesn't exist yet — it's built later in serve.go.)
+		globalAdminAccounts = &accountAdmin{mgr: accMgr, provLookup: provLookup}
 	}
 
 	// P5a proactive backfill: walk blockmap, fill in missing CloudIDs from path → Drive file ID.
@@ -277,6 +302,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 	mux.HandleFunc("/files/", requireAuthWithReg(lr, fs.handleFile))
 	mux.HandleFunc("/admin/version", requireAuthWithReg(lr, fs.handleAdminVersion)) // Flutter Update screen — read current + latest release info
 	mux.HandleFunc("/admin/update", requireAuthWithReg(lr, fs.handleAdminUpdate))   // Flutter Update screen — trigger immediate self-update + restart
+	// Phase β: account/policy admin endpoints (CRUD via Flutter Settings → Cloud Accounts).
+	// Same auth wrapper as /files — only the paired user's Flutter can mutate.
+	if globalAdminAccounts != nil {
+		globalAdminAccounts.register(mux, func(h http.HandlerFunc) http.HandlerFunc { return requireAuthWithReg(lr, h) })
+	}
 	// P5c scan engine — Flutter Settings → Sync Status surface
 	getCloudsLive := func() []types.CloudProvider { cs, _ := getClouds(); return cs }
 	scanner, scErr := scan.New(p, getCloudsLive, filepath.Join(authConfigDir, "scan"))

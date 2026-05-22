@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.18.0] — 2026-05-23 — Phase β: quota polling + ReconcileRoles + admin REST endpoints
+
+Non-breaking. Builds on Phase α (v0.17.2). Brings the multi-account orchestration to production-grade: per-account capacity is now tracked, role transitions happen automatically when accounts fill up, and the entire state is mutable via REST.
+
+### Quota polling (`types.QuotaReporter` + `Manager.RefreshQuota` + `StartQuotaPollLoop`)
+
+- New optional sub-interface `pkg/types.QuotaReporter` with `Quota() (used, total int64, err error)`.
+- `internal/cloudconn/gdrive.Provider` implements it via Drive's `About.Get().Fields("storageQuota")` — single API call per refresh. Compile-time assertion `var _ types.QuotaReporter = (*Provider)(nil)` catches signature drift.
+- `Manager.RefreshQuota(id, lookup)` writes `QuotaUsedBytes` / `QuotaTotalBytes` / `QuotaCheckedAt`. On error, transitions account to `Status=Error` + `QuarantineUntil = now+5min`; success clears the quarantine.
+- `Manager.StartQuotaPollLoop(ctx, lookup)` background goroutine: refreshes all active accounts every `cfg.QuotaCheckIntervalMin` (default 30 min). First refresh delayed 30 s after relay start so initial Flutter requests aren't competing with Drive API.
+- Local FS and any provider without `QuotaReporter` is skipped silently — `FreeBytes()` then returns 0 (defensive: `SelectReplicas` won't blindly favor an account with unknown capacity).
+
+### ReconcileRoles (`Manager.ReconcileRoles` + `StartReconcileLoop`)
+
+- Pure-ish function (reads manager state, mutates via SetRole; no network).
+- Step 1: every PrimaryWrite with `UsedPercent() >= SoftCap` and `!Pinned` demotes to ReplicaWrite.
+- Step 2: when no PrimaryWrite remains, pick the best ReplicaWrite per `cfg.PromoteStrategy` and promote it:
+  - `"by_priority"` (default): lowest Priority value wins.
+  - `"by_free_pct"`: highest free percent wins (load-balance fresh capacity).
+  - `"by_age_oldest_first"`: oldest AddedAt wins (rotation stability).
+  - `"round_robin"`: deterministic-per-minute round-robin.
+- `StartReconcileLoop(ctx)` fires every 1 minute. Cheap — no I/O.
+- Pinned accounts are immune to both demote and promote (user-override escape hatch for `/admin/accounts/{id}` PATCH `pinned=true`).
+
+### Admin REST endpoints (`cmd/relay/admin_accounts.go`)
+
+Same auth chain as `/files` (JWT + X-Relay-Token via `requireAuthWithReg`). Only the paired Flutter user can mutate. Routes:
+
+| Route | Method | Body | Returns |
+|-------|--------|------|---------|
+| `/admin/accounts` | GET | – | `{accounts:[...], policy:{...}}` |
+| `/admin/accounts/reorder` | POST | `{ids:[3,1,2]}` | refreshed account list with dense priorities |
+| `/admin/accounts/{id}` | GET | – | one CloudAccount |
+| `/admin/accounts/{id}` | PATCH | overlay (any subset: `role`, `priority`, `pinned`, `soft_cap_pct`, `hard_cap_pct`, `max_file_size_mb`, `accepts_content_types`, `region`, `compression_level`) | refreshed account |
+| `/admin/accounts/{id}` | DELETE | – | sets Role=Drain (Phase β stub; full migration worker pending) |
+| `/admin/accounts/{id}/refresh-quota` | POST | – | account with fresh QuotaUsed/Total |
+| `/admin/policy` | GET | – | full AccountPolicyConfig |
+| `/admin/policy` | PATCH | overlay (any subset of policy fields) | merged + persisted policy |
+
+Routes only registered when `globalAdminAccounts != nil` (i.e. account.Manager attached). Legacy / CLI paths without Manager skip them silently.
+
+### Manager additions
+
+- `ReplaceAll([]*CloudAccount) error` — atomic swap of the in-memory list + disk write. Used by admin PATCH path to commit a batch of edits made via Accounts() copies.
+
+### Tests — 5 new in `internal/account/manager_test.go`
+
+- `TestReconcileRoles_AutoDemoteOnSoftCap` — verifies SoftCap → demote.
+- `TestReconcileRoles_AutoPromoteWhenNoPrimary` — verifies promote fires after demote leaves the pool empty.
+- `TestReconcileRoles_RespectsPinned` — pinned account stays PrimaryWrite even over cap.
+- `TestPickPromoteCandidate_Strategies` — all 4 strategies pick distinct winners + unknown falls back to by_priority.
+- `TestReplaceAll_Persistence` — round-trip after disk reload.
+
+Total Phase α+β: 19 unit tests in the account package.
+
+### Upgrade
+
+Pure-additive: deploy v0.18.0, restart relay; new endpoints + loops start immediately. Existing accounts.json + account_policy.json are picked up unchanged. First quota poll fires 30 s after restart; first ReconcileRoles tick 1 minute later.
+
+### What's still pending (Phase γ)
+
+- Flutter Settings → Cloud Accounts UI (admin endpoints exist; UI lands next).
+- Drain workflow — actual file migration before Status=Removed (currently the DELETE endpoint just sets Role=Drain and stops new uploads).
+- Re-add detection dialog (the `OnReAddSameEmail` policy is read but UI prompt not yet implemented).
+- Encrypted backup blob (`maps_json` still plaintext on hub).
+- Age-based rotation worker (`AgeBasedRotation=true` policy switch is honored only by Phase γ worker).
+- Duplicate detection, dedup, deep archive, multi-region — F1-F4 features per `~/.AI/dudenest-application/CLOUD-ACCOUNT-POLICY-PLAN.md`.
+
+### Reference
+
+`docs/MULTI-ACCOUNT.md` — full per-function reference (Phase α model + algorithms + operator runbook; will be updated for Phase β routes in next agent cycle).
+
+---
+
 ## [0.17.3] — 2026-05-22 — hotfix: folder classification for Phase α PathRoot
 
 Patch hot off v0.17.2. After Phase α started prefixing cloud paths with `PathRoot` (`dudenest/photos/2026/05/foo.jpg`), two classifiers still assumed the legacy "no root" format and produced wrong results:

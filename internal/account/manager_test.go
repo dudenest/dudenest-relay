@@ -297,6 +297,115 @@ func TestManagerPersistence(t *testing.T) {
 	}
 }
 
+// ----- Phase β: ReconcileRoles + promote/demote logic -----
+
+// β-1: account hits SoftCap → auto-demote PrimaryWrite → ReplicaWrite, persisted.
+func TestReconcileRoles_AutoDemoteOnSoftCap(t *testing.T) {
+	m, _ := mkManager(t)
+	cfg := m.Policy()
+	cfg.SoftCapDefaultPct = 90
+	cfg.AutoDemoteOnSoftCap = true
+	_ = m.UpdatePolicy(cfg)
+	a, _ := m.AddAccount("gdrive", "full@x.com")
+	// Mutate quota in place — Manager.Accounts() returns copies so we need to use ReplaceAll.
+	live := m.Accounts()
+	live[0].QuotaTotalBytes = 100
+	live[0].QuotaUsedBytes = 95 // 95% > 90% soft
+	_ = m.ReplaceAll(live)
+	d, p := m.ReconcileRoles()
+	if d != 1 { t.Errorf("expected 1 demotion, got %d", d) }
+	if p != 0 { t.Errorf("expected 0 promotions (no replicas available), got %d", p) }
+	// Re-read
+	for _, acc := range m.Accounts() {
+		if acc.ID == a.ID && acc.Role != types.RoleReplicaWrite {
+			t.Errorf("expected ID%d demoted to replica_write, got %s", acc.ID, acc.Role)
+		}
+	}
+}
+
+// β-2: when PrimaryWrite gets demoted and there's a ReplicaWrite candidate, promote it.
+// Validates "no PrimaryWrite left → auto-promote" path in ReconcileRoles step 2.
+func TestReconcileRoles_AutoPromoteWhenNoPrimary(t *testing.T) {
+	m, _ := mkManager(t)
+	cfg := m.Policy()
+	cfg.AutoDemoteOnSoftCap = true
+	cfg.AutoPromoteOnSpace = true
+	cfg.SoftCapDefaultPct = 90
+	cfg.PromoteStrategy = "by_priority"
+	_ = m.UpdatePolicy(cfg)
+	full, _ := m.AddAccount("gdrive", "full@x.com") // becomes PrimaryWrite
+	other, _ := m.AddAccount("gdrive", "other@x.com") // becomes ReplicaWrite
+	live := m.Accounts()
+	for _, a := range live {
+		if a.ID == full.ID { a.QuotaTotalBytes = 100; a.QuotaUsedBytes = 95 } // over soft cap
+		if a.ID == other.ID { a.QuotaTotalBytes = 100; a.QuotaUsedBytes = 5 }
+	}
+	_ = m.ReplaceAll(live)
+	d, p := m.ReconcileRoles()
+	if d != 1 || p != 1 { t.Errorf("expected demoted=1 promoted=1, got demoted=%d promoted=%d", d, p) }
+	for _, a := range m.Accounts() {
+		if a.ID == other.ID && a.Role != types.RolePrimaryWrite {
+			t.Errorf("expected ID%d promoted to primary_write, got %s", a.ID, a.Role)
+		}
+	}
+}
+
+// β-3: Pinned accounts are never auto-demoted, even when over soft cap.
+// Validates the user-override escape hatch.
+func TestReconcileRoles_RespectsPinned(t *testing.T) {
+	m, _ := mkManager(t)
+	cfg := m.Policy()
+	cfg.AutoDemoteOnSoftCap = true
+	cfg.SoftCapDefaultPct = 90
+	_ = m.UpdatePolicy(cfg)
+	a, _ := m.AddAccount("gdrive", "pinned@x.com")
+	live := m.Accounts()
+	live[0].QuotaTotalBytes = 100
+	live[0].QuotaUsedBytes = 99 // very over cap
+	live[0].Pinned = true
+	_ = m.ReplaceAll(live)
+	d, _ := m.ReconcileRoles()
+	if d != 0 { t.Errorf("pinned account must not be demoted, got %d demotions", d) }
+	for _, acc := range m.Accounts() {
+		if acc.ID == a.ID && acc.Role != types.RolePrimaryWrite {
+			t.Errorf("pinned account changed role from PrimaryWrite to %s", acc.Role)
+		}
+	}
+}
+
+// β-4: pickPromoteCandidate strategies pick distinct winners on the same input.
+func TestPickPromoteCandidate_Strategies(t *testing.T) {
+	// Three candidates: A oldest+high prio, B free%-leader, C lowest prio.
+	a := &types.CloudAccount{ID: 1, Priority: 5, AddedAt: time.Unix(1700, 0), QuotaTotalBytes: 100, QuotaUsedBytes: 80}
+	b := &types.CloudAccount{ID: 2, Priority: 3, AddedAt: time.Unix(2000, 0), QuotaTotalBytes: 100, QuotaUsedBytes: 10}
+	c := &types.CloudAccount{ID: 3, Priority: 1, AddedAt: time.Unix(1900, 0), QuotaTotalBytes: 100, QuotaUsedBytes: 50}
+	cands := []*types.CloudAccount{a, b, c}
+	if pickPromoteCandidate(cands, "by_priority").ID != 3 { t.Errorf("by_priority: expected ID 3 (lowest prio)") }
+	if pickPromoteCandidate(cands, "by_free_pct").ID != 2 { t.Errorf("by_free_pct: expected ID 2 (90%% free)") }
+	if pickPromoteCandidate(cands, "by_age_oldest_first").ID != 1 { t.Errorf("by_age: expected ID 1 (oldest)") }
+	// round_robin is deterministic-per-minute; just assert it returns a valid candidate.
+	got := pickPromoteCandidate(cands, "round_robin")
+	if got != a && got != b && got != c { t.Errorf("round_robin returned unexpected account") }
+	// Unknown strategy falls back to by_priority.
+	if pickPromoteCandidate(cands, "unknown").ID != 3 { t.Errorf("unknown strategy: should fall back to by_priority") }
+}
+
+// β-5: ReplaceAll persists changes — re-load Manager and verify.
+func TestReplaceAll_Persistence(t *testing.T) {
+	m, dir := mkManager(t)
+	_, _ = m.AddAccount("gdrive", "a@x.com")
+	_, _ = m.AddAccount("gdrive", "b@x.com")
+	live := m.Accounts()
+	live[0].Priority = 99 // change something
+	live[1].Pinned = true
+	if err := m.ReplaceAll(live); err != nil { t.Fatalf("ReplaceAll: %v", err) }
+	m2, err := New(dir)
+	if err != nil { t.Fatalf("reload: %v", err) }
+	accs := m2.Accounts()
+	if len(accs) != 2 { t.Fatalf("expected 2 accounts after reload, got %d", len(accs)) }
+	if accs[0].Priority != 99 || !accs[1].Pinned { t.Errorf("changes did not persist: %+v %+v", accs[0], accs[1]) }
+}
+
 // ----- test helpers -----
 
 func mkAccount(id int64, provider, email string, role types.Role, priority int) *types.CloudAccount {

@@ -378,3 +378,22 @@ func loadToken(path string) (*oauth2.Token, error) {
 		Expiry:       tf.Expiry,
 	}, nil
 }
+
+// Quota implements types.QuotaReporter. Uses Drive's About endpoint to fetch storageQuota.
+// Returns (used, total, nil) on success. Drive's "unlimited" quota (Workspace) reports
+// limit=0 in the API — we translate that to total=0 (which CloudAccount.FreeBytes()
+// defensively treats as "unknown" so SelectReplicas doesn't favor this account blindly).
+// Single Drive API call per invocation — safe to call frequently.
+func (p *Provider) Quota() (used, total int64, err error) {
+	about, err := p.svc.About.Get().Fields("storageQuota").Do()
+	if err != nil {
+		return 0, 0, fmt.Errorf("about.get: %w", err)
+	}
+	if about.StorageQuota == nil {
+		return 0, 0, nil
+	}
+	return about.StorageQuota.Usage, about.StorageQuota.Limit, nil
+}
+
+// Compile-time assertion that Provider satisfies QuotaReporter — catches signature drift at build.
+var _ types.QuotaReporter = (*Provider)(nil)

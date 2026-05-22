@@ -74,6 +74,15 @@ type CloudProvider interface {
 	Available() bool // checks quota and connectivity
 }
 
+// QuotaReporter is an OPTIONAL sub-interface for providers that can report storage usage.
+// Used by Phase β quota polling loop (internal/account.Manager) to keep CloudAccount.QuotaUsedBytes/
+// QuotaTotalBytes fresh. Providers that can't report (e.g. local filesystem) just don't implement it;
+// the polling loop type-asserts and skips them, leaving quota at 0/0 (which SelectReplicas treats as
+// "free space unknown" via the defensive FreeBytes()==0 return).
+type QuotaReporter interface {
+	Quota() (usedBytes, totalBytes int64, err error)
+}
+
 // CloudLister is an OPTIONAL sub-interface for providers that can enumerate their contents.
 // Go-idiomatic pattern (like io.ReadSeeker on top of io.Reader): scan engine type-asserts
 // (`l, ok := provider.(CloudLister)`) and skips providers that don't support it.
