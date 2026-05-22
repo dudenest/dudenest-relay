@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.17.1] — 2026-05-22 — s313: Phase 0 fast-update mechanism + RELAY_PUBLIC_URL anti-regression guard
+
+Patch release closing s313 carry-overs. Non-breaking: backward-compatible with older hubs (`{"status":"ok"}`-only response) and with relays that never get `RELAY_PUBLIC_URL` set.
+
+### Phase 0 fast-update (relay client side)
+
+The 24h `dudenest-relay-update.timer` is too slow for hot-fixes — Phase 0 cuts mean update latency to ~30 seconds in steady state, ~5 seconds during the release burst window.
+
+- `internal/backup/client.go`:
+  - `Ping()` signature changed: now returns `(*PingResponse, error)` instead of `error`. The response carries hub-provided `latest_version`, `download_url`, `update_now`, `next_ping_seconds`. Old `{"status":"ok"}`-only responses still decode cleanly (unknown fields → zero values, no update push).
+  - `Ping()` body now includes `arch` (`runtime.GOOS + "-" + runtime.GOARCH`) so the hub can dispatch the right `linux-amd64` / `linux-arm64` / `darwin-*` download URL.
+  - On `update_now=true && latest_version != Version && download_url != ""`, fires `systemctl start dudenest-relay-update.service` in the background (fire-and-forget; the service replaces the binary and restarts the relay, which kills the calling goroutine).
+  - Defense-in-depth: client-side checks `latest_version != Version` before triggering, even if hub claims `update_now=true` — guards against a buggy hub flapping the whole fleet.
+  - `StartPingLoop(initial)` now adopts hub-driven `next_ping_seconds` after each ping, clamped to `[1s, 5min]`. Default in `cmd/relay/serve.go` lowered from `5*time.Minute` to `30*time.Second` (3 callsites).
+  - New package-level `updateTrigger` var allows test injection without spawning real `systemctl`.
+
+- Tests: `TestPing_BackwardCompatOldHub`, `TestPing_TriggersUpdateOnNewerVersion`, `TestPing_DoesNotTriggerOnSameVersion`, `TestPing_DoesNotTriggerOnMissingDownloadURL`, `TestPing_NilClientSafe`.
+
+### s313 — `RELAY_PUBLIC_URL` anti-regression guard
+
+Per `~/.AI/dudenest-application/session-2026-05-21-prod-incident-oauth.md`: relay-poc2 had `RELAY_PUBLIC_URL=https://relay2.dudenest.com` manually set in `/etc/dudenest/relay.env` per an obsolete plan. Every restart called `bc.UpdateURL("https://relay2.dudenest.com")` → CRDB overwrote the auto-provisioned `relay-<8hex>.dudenest.com` URL. Flutter then resolved a routing-less hostname.
+
+- `cmd/relay/serve.go:219`: wraps `bc.UpdateURL(cfg.Backup.PublicURL)` in `if cfg.Backup.PublicURL != ""` — empty env means "trust the hub's auto-URL".
+- Paired with server-side guard in `dudenest-backup` (`autoURLPattern` regex) — `/relay/update-url` rejects 409 Conflict for any auto→manual downgrade.
+
+### Documentation
+
+- `docs/RELAY-OPS.md`: new "🌐 Public URL lifecycle" section explaining auto vs legacy, anti-regression rationale, diagnosis commands.
+
+### Upgrade
+
+`dudenest-relay-update.timer` will pick this up within 24h. To accelerate: `ssh root@<relay-vm> /usr/local/bin/relay update`. After the binary swap and restart, the relay adopts the new 30s default ping interval and starts honouring hub-driven `next_ping_seconds` — meaning **any subsequent v0.17.2+ release reaches the fleet within ~30 seconds** without anyone touching the timer.
+
+---
+
 ## [0.17.0] — 2026-05-20 — P5 (P5a + P5b + P5c bundled): CloudID-as-index + date-bucketed uploads + scan engine
 
 ### P5a — CloudID-as-index (replaces path as primary addressing)
