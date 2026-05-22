@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.17.3] — 2026-05-22 — hotfix: folder classification for Phase α PathRoot
+
+Patch hot off v0.17.2. After Phase α started prefixing cloud paths with `PathRoot` (`dudenest/photos/2026/05/foo.jpg`), two classifiers still assumed the legacy "no root" format and produced wrong results:
+
+### Bug — `folderFromFileMap` in `cmd/relay/serve.go`
+
+This function decides whether a FileMap shows up in the Flutter **Photos** tab or **Files** tab. It scanned `Shard.Location` for the substring `":photos/"` (the legacy format had the folder directly after the `:` separator). With Phase α, the path becomes `gdrive:email:dudenest/photos/2026/05/foo.jpg` — the photos folder is now after `dudenest/`, not after `:`, so the check missed and the new JPG fell through to the default `FilesFolder`. User saw: **photos appearing in the Files tab.**
+
+Fix: scan for `"/photos/"` (matches the new PathRoot format) AND keep `":photos/"` (matches legacy). Same for `files`. Added 8 unit tests in `cmd/relay/folder_test.go` covering all three location formats (Phase α / v0.11..v0.17.1 / pre-v0.11.0 legacy) for both photos and files, plus defensive cases (empty location, no shards).
+
+### Bug — `handleMeta` PATCH `TakenAtOverride` in `cmd/relay/serve.go`
+
+Same root cause. When a user edits a photo's date in the UI, `Pipeline.MoveFile` rebuckets the file into the new YYYY/MM directory. The destination directory was derived by parsing `Shard.Location` with `strings.SplitN(":", 2)` then `strings.SplitN("/", 2)` — which on the new format yielded `top = "email:dudenest"` (the email gobbled into segment 0) instead of `"photos"`. Result: the file would have been moved into a directory like `email:dudenest/2026/05/` — broken.
+
+Fix: same scan strategy as `folderFromFileMap`; additionally if the location contains the configured `PathRoot`, preserve it in the destination directory so `MoveFile` keeps the file under `dudenest/`. Added `Pipeline.AccountManager()` accessor so `handleMeta` can read the active `PathRoot` from policy without going through unexported fields.
+
+### Upgrade
+
+Pure hotfix — no schema/state changes. Update via `relay update` (or scp if GitHub rate-limit hit) + restart. After restart, all previously-uploaded photos that were on Phase α path become immediately visible in the Photos tab; no migration job needed.
+
+---
+
 ## [0.17.2] — 2026-05-22 — Phase α: multi-account orchestration (CloudAccount model + SelectReplicas)
 
 Non-breaking. Solves the problem that the previous version hard-coded `limit := 2` and `p.clouds[:2]` in upload — meaning that for users with 3+ cloud accounts, only the first two (in filesystem order) were ever written to. Phase α replaces this with a policy-driven selector.
