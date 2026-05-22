@@ -119,3 +119,114 @@ func TestReadProviderTokensWithFiles(t *testing.T) {
 	if err := json.Unmarshal(tokens, &parsed); err != nil { t.Fatalf("parse tokens: %v", err) }
 	if _, ok := parsed["gdrive_test@example.com.json"]; !ok { t.Error("token file not in parsed map") }
 }
+
+// --- s313 Phase 0: fast-update via /relay/ping response ---
+
+// mockUpdateTrigger swaps the package-level updateTrigger for tests.
+// Returns a counter that increments on each call + a restore func.
+func mockUpdateTrigger(t *testing.T) (*atomic.Int64, func()) {
+	t.Helper()
+	original := updateTrigger
+	var calls atomic.Int64
+	updateTrigger = func() error {
+		calls.Add(1)
+		return nil
+	}
+	return &calls, func() { updateTrigger = original }
+}
+
+// TestPing_BackwardCompatOldHub: hub returns plain {"status":"ok"} (pre-Phase 0); relay must not crash and must not trigger update.
+func TestPing_BackwardCompatOldHub(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok"}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+	calls, restore := mockUpdateTrigger(t)
+	defer restore()
+	t.Setenv("RELAY_ID", "relay-old")
+	t.Setenv("RELAY_SECRET", "secret-old")
+	c := New(testMasterKey(), t.TempDir(), srv.URL, 3*time.Second, "v0.16.0")
+	if c == nil { t.Fatal("client nil") }
+	resp, err := c.Ping()
+	if err != nil { t.Fatalf("ping: %v", err) }
+	if resp == nil { t.Fatal("expected non-nil response") }
+	if resp.UpdateNow { t.Error("old hub response should not trigger update") }
+	if calls.Load() != 0 { t.Errorf("updateTrigger called %d times, expected 0", calls.Load()) }
+}
+
+// TestPing_TriggersUpdateOnNewerVersion: hub indicates newer version → updateTrigger called exactly once.
+func TestPing_TriggersUpdateOnNewerVersion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify relay sent arch field (Phase 0 contract)
+		var body map[string]string
+		json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+		if body["arch"] == "" { t.Errorf("relay must send arch in ping body") }
+		if body["relay_version"] != "v0.17.0" { t.Errorf("wrong relay_version: %q", body["relay_version"]) }
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(PingResponse{ //nolint:errcheck
+			Status: "ok", LatestVersion: "v0.17.5",
+			DownloadURL: "https://example.com/relay-linux-amd64.tar.gz",
+			UpdateNow:   true, NextPingSeconds: 3,
+		})
+	}))
+	defer srv.Close()
+	calls, restore := mockUpdateTrigger(t)
+	defer restore()
+	t.Setenv("RELAY_ID", "relay-x"); t.Setenv("RELAY_SECRET", "secret-x")
+	c := New(testMasterKey(), t.TempDir(), srv.URL, 3*time.Second, "v0.17.0")
+	resp, err := c.Ping()
+	if err != nil { t.Fatalf("ping: %v", err) }
+	if !resp.UpdateNow { t.Error("expected update_now=true in parsed response") }
+	if calls.Load() != 1 { t.Errorf("updateTrigger called %d times, expected 1", calls.Load()) }
+}
+
+// TestPing_DoesNotTriggerOnSameVersion: even if hub says update_now=true, mismatch check on client side guards.
+// (Hub should not send update_now=true when versions match, but defense-in-depth.)
+func TestPing_DoesNotTriggerOnSameVersion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(PingResponse{ //nolint:errcheck
+			Status: "ok", LatestVersion: "v0.17.5",
+			DownloadURL: "https://example.com/relay-linux-amd64.tar.gz",
+			UpdateNow:   true, // hub bug: claims update but versions match
+		})
+	}))
+	defer srv.Close()
+	calls, restore := mockUpdateTrigger(t)
+	defer restore()
+	t.Setenv("RELAY_ID", "relay-y"); t.Setenv("RELAY_SECRET", "secret-y")
+	c := New(testMasterKey(), t.TempDir(), srv.URL, 3*time.Second, "v0.17.5") // same as latest
+	_, err := c.Ping()
+	if err != nil { t.Fatalf("ping: %v", err) }
+	if calls.Load() != 0 { t.Errorf("must not trigger update when versions match, got %d calls", calls.Load()) }
+}
+
+// TestPing_DoesNotTriggerOnMissingDownloadURL: hub didn't supply URL (unknown arch); skip.
+func TestPing_DoesNotTriggerOnMissingDownloadURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(PingResponse{ //nolint:errcheck
+			Status: "ok", LatestVersion: "v0.17.5",
+			DownloadURL: "", // arch not supported by hub
+			UpdateNow:   true,
+		})
+	}))
+	defer srv.Close()
+	calls, restore := mockUpdateTrigger(t)
+	defer restore()
+	t.Setenv("RELAY_ID", "relay-z"); t.Setenv("RELAY_SECRET", "secret-z")
+	c := New(testMasterKey(), t.TempDir(), srv.URL, 3*time.Second, "v0.17.0")
+	_, err := c.Ping()
+	if err != nil { t.Fatalf("ping: %v", err) }
+	if calls.Load() != 0 { t.Errorf("must not trigger update with empty download URL, got %d calls", calls.Load()) }
+}
+
+// TestPing_NilClientSafe: Ping on nil receiver must not panic (used pre-registration).
+func TestPing_NilClientSafe(t *testing.T) {
+	var c *Client
+	resp, err := c.Ping()
+	if err != nil || resp != nil {
+		t.Errorf("nil client ping should return (nil, nil), got (%v, %v)", resp, err)
+	}
+}

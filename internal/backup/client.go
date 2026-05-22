@@ -10,7 +10,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -110,32 +112,94 @@ func (c *Client) UpdateUserID(userID string) error {
 	return nil
 }
 
-// Ping updates last_seen_at and relay_version on the backup server. Safe to call on nil.
-func (c *Client) Ping() error {
-	if c == nil { return nil }
-	body, _ := json.Marshal(map[string]string{"relay_version": c.version})
+// PingResponse — extended in s313 Phase 0 to carry latest-release info from hub.
+// Older hub instances respond with {"status":"ok"} only; unknown fields default to zero values
+// (no update push, no interval change) so the relay stays put.
+type PingResponse struct {
+	Status          string `json:"status"`
+	LatestVersion   string `json:"latest_version,omitempty"`
+	DownloadURL     string `json:"download_url,omitempty"`
+	UpdateNow       bool   `json:"update_now"`
+	NextPingSeconds int    `json:"next_ping_seconds,omitempty"`
+}
+
+// triggerUpdate runs systemctl start dudenest-relay-update.service in the background.
+// Fire-and-forget — the service downloads the new binary and restarts the relay, which
+// kills this process. We don't want to block the ping loop on it.
+// Overridable for tests via the package-level updateTrigger var.
+var updateTrigger = func() error {
+	cmd := exec.Command("systemctl", "start", "dudenest-relay-update.service")
+	return cmd.Start() // Start, not Run — don't wait for the service to finish (it restarts us mid-flight)
+}
+
+// Ping POSTs /relay/ping to the hub and acts on the response:
+//   - If hub indicates a newer version + matching arch download URL → fires systemctl update service.
+//   - If hub instructs a new next_ping_seconds → caller (StartPingLoop) adjusts interval.
+//
+// Safe to call on nil.
+func (c *Client) Ping() (*PingResponse, error) {
+	if c == nil { return nil, nil }
+	body, _ := json.Marshal(map[string]string{
+		"relay_version": c.version,
+		"arch":          runtime.GOOS + "-" + runtime.GOARCH, // e.g. "linux-amd64" — hub uses this to pick the right download URL
+	})
 	req, err := http.NewRequest(http.MethodPost, c.url+"/relay/ping", bytes.NewReader(body))
-	if err != nil { return fmt.Errorf("ping: new request: %w", err) }
+	if err != nil { return nil, fmt.Errorf("ping: new request: %w", err) }
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Relay-ID", c.relayID)
 	req.Header.Set("X-Relay-Secret", c.secret)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil { return fmt.Errorf("ping: http post: %w", err) }
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK { return fmt.Errorf("ping: status %d", resp.StatusCode) }
-	log.Printf("backup: ping ok (relay_id=%s version=%s)", c.relayID, c.version)
-	return nil
+	httpResp, err := http.DefaultClient.Do(req)
+	if err != nil { return nil, fmt.Errorf("ping: http post: %w", err) }
+	defer httpResp.Body.Close()
+	if httpResp.StatusCode != http.StatusOK { return nil, fmt.Errorf("ping: status %d", httpResp.StatusCode) }
+	var resp PingResponse
+	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
+		// Older hub may return plain {"status":"ok"} which still decodes fine; only true JSON errors land here.
+		return nil, fmt.Errorf("ping: decode: %w", err)
+	}
+	log.Printf("backup: ping ok (relay_id=%s version=%s, latest=%s, update_now=%v, next_ping=%ds)",
+		c.relayID, c.version, resp.LatestVersion, resp.UpdateNow, resp.NextPingSeconds)
+	if resp.UpdateNow && resp.LatestVersion != "" && resp.LatestVersion != c.version && resp.DownloadURL != "" {
+		log.Printf("backup: fast-update: hub says newer version %s available, triggering systemd update unit", resp.LatestVersion)
+		if err := updateTrigger(); err != nil {
+			log.Printf("backup: fast-update: failed to trigger systemctl: %v (will retry next ping)", err)
+		}
+	}
+	return &resp, nil
 }
 
-// StartPingLoop sends POST /relay/ping every interval to keep last_seen_at current.
-// Runs in background goroutine. Safe to call on nil.
-func (c *Client) StartPingLoop(interval time.Duration) {
+// StartPingLoop sends POST /relay/ping at an adaptive interval starting at `initial`.
+// If the hub returns next_ping_seconds > 0 in the response, the loop adopts that interval
+// for the next tick — this is how the burst-then-relax cadence is driven from the hub side
+// (see ~/.AI/dudenest-application/FAST-UPDATE-PLAN.md "Phase 0").
+//
+// Bounds enforced on hub-suggested interval: [1s, 5min]. Anything outside is clamped — defends
+// against hub bug/typo from accidentally hammering or stalling the whole fleet.
+// Safe to call on nil.
+func (c *Client) StartPingLoop(initial time.Duration) {
 	if c == nil { return }
+	const (
+		minInterval = 1 * time.Second
+		maxInterval = 5 * time.Minute
+	)
 	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for range ticker.C {
-			if err := c.Ping(); err != nil { log.Printf("backup: ping failed: %v", err) }
+		interval := initial
+		for {
+			time.Sleep(interval)
+			resp, err := c.Ping()
+			if err != nil {
+				log.Printf("backup: ping failed: %v", err)
+				continue
+			}
+			if resp != nil && resp.NextPingSeconds > 0 {
+				newInterval := time.Duration(resp.NextPingSeconds) * time.Second
+				if newInterval < minInterval { newInterval = minInterval }
+				if newInterval > maxInterval { newInterval = maxInterval }
+				if newInterval != interval {
+					log.Printf("backup: ping interval %s → %s (hub-driven)", interval, newInterval)
+					interval = newInterval
+				}
+			}
 		}
 	}()
 }

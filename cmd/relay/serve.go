@@ -155,7 +155,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 			log.Printf("✅ standby register: relay registered with backup (user=%s relay_url=%s)", claims.Sub, cfg.Backup.PublicURL)
 			key, _ := getKey() // start ping loop even in standby — updates last_seen_at + relay_version
 			if bc := backup.New(key, authConfigDir, cfg.Backup.URL, cfg.Debounce(), Version); bc != nil {
-				bc.StartPingLoop(5 * time.Minute)
+				bc.StartPingLoop(30 * time.Second) // s313 Phase 0: 30s default; hub adapts to 3s during release burst window via next_ping_seconds
 				log.Printf("✅ standby: ping loop started (version=%s)", Version)
 			}
 		})
@@ -215,7 +215,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 	bc := backup.New(key, authConfigDir, cfg.Backup.URL, cfg.Debounce(), Version) // nil if URL/RELAY_ID/RELAY_SECRET not set
 	if bc != nil {
-		bc.StartPingLoop(5 * time.Minute) // keep last_seen_at current
+		bc.StartPingLoop(30 * time.Second) // s313 Phase 0: 30s default; hub adapts to 3s during release burst window via next_ping_seconds // keep last_seen_at current
 		// Guard (s313): empty RELAY_PUBLIC_URL means "trust the hub" — auto-provisioned relays (relay-<8hex>.dudenest.com)
 		// must not have their CRDB relay_url overwritten on every restart. Only legacy relay-poc1 sets this env explicitly.
 		if cfg.Backup.PublicURL != "" {
@@ -371,7 +371,7 @@ func (lr *lazyRegistrar) tryRegister(userID string) {
 			lr.fs.setBackup(bc)
 			log.Printf("✅ lazy register: backup enabled (relay_id=%s owner=%s)", creds.RelayID, ownerID)
 			if maps, err2 := lr.fs.p.ListFiles(); err2 == nil { bc.Trigger(maps) } // initial snapshot
-			bc.StartPingLoop(5 * time.Minute)
+			bc.StartPingLoop(30 * time.Second) // s313 Phase 0: 30s default; hub adapts to 3s during release burst window via next_ping_seconds
 		}
 	})
 }
