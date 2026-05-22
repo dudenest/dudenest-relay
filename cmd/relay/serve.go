@@ -440,13 +440,22 @@ func (fs *fileServer) writeDims(fileID string, d thumbnail.Dims) {
 }
 
 // folderFromFileMap returns "photos" or "files" for the Flutter Photos/Files tab filter, derived from
-// the first Shard's Location ("gdrive:<email>:photos/<hash>/..." vs "gdrive:<email>:files/<hash>/...").
-// Defaults to "files" for legacy entries without a recognizable prefix (pre-v0.11.0 replicas all used
-// "files/" regardless of content — the Flutter side can re-classify by extension as a secondary signal).
+// the first Shard's Location.
+//
+// Three location formats are recognized, depending on the version that wrote the file:
+//   - v0.17.2+ (Phase α): "gdrive:<email>:dudenest/photos/2026/05/foo.jpg" — has PathRoot prefix
+//   - v0.11.0..v0.17.1 (P2 to s313 cont): "gdrive:<email>:photos/2026/05/foo.jpg" — no PathRoot
+//   - pre-v0.11.0 (legacy hash-based): "gdrive:<email>:files/<hash>/0/0" — all stored under files/
+//
+// Match strategy: scan for "/photos/" (covers both new "dudenest/photos/" and any future PathRoot)
+// OR for ":photos/" at the colon boundary right after provider:email (covers legacy without root).
+// Default "files" preserves the pre-v0.11.0 behavior where everything was under files/ regardless
+// of content type — the Flutter side may further re-classify by extension as a secondary signal.
 func folderFromFileMap(fm *types.FileMap) string {
 	if len(fm.Chunks) == 0 || len(fm.Chunks[0].Shards) == 0 { return types.FilesFolder }
-	loc := fm.Chunks[0].Shards[0].Location // "provider_id:<relative_path>"
-	if strings.Contains(loc, ":"+types.PhotosFolder+"/") { return types.PhotosFolder }
+	loc := fm.Chunks[0].Shards[0].Location // "<provider>:<email>:<relative_path>"
+	if strings.Contains(loc, "/"+types.PhotosFolder+"/") { return types.PhotosFolder } // new format with PathRoot
+	if strings.Contains(loc, ":"+types.PhotosFolder+"/") { return types.PhotosFolder } // legacy format without PathRoot
 	return types.FilesFolder
 }
 
@@ -899,14 +908,29 @@ func (fs *fileServer) handleMeta(w http.ResponseWriter, r *http.Request, fileID 
 			if t, perr := time.Parse(time.RFC3339, patch.TakenAtOverride); perr == nil {
 				fm, gerr := fs.p.GetFileMap(fileID)
 				if gerr == nil && len(fm.Chunks) > 0 && len(fm.Chunks[0].Shards) > 0 {
-					// Derive top folder (photos|files) from existing Location: "provider:topFolder/.../filename"
-					parts := strings.SplitN(fm.Chunks[0].Shards[0].Location, ":", 2)
+					// Derive top folder (photos|files) from existing Location.
+					// Three location formats are recognized (matches folderFromFileMap):
+					//   v0.17.2+ Phase α:   "gdrive:<email>:dudenest/photos/2026/05/foo.jpg"
+					//   v0.11.0..v0.17.1:   "gdrive:<email>:photos/2026/05/foo.jpg"
+					//   pre-v0.11.0 legacy: "gdrive:<email>:files/<hash>/0/0"
+					// Scan for /<folder>/ (PathRoot present) or :<folder>/ (no PathRoot).
+					loc := fm.Chunks[0].Shards[0].Location
 					top := types.FilesFolder
-					if len(parts) == 2 {
-						segs := strings.SplitN(parts[1], "/", 2)
-						if len(segs) > 0 && segs[0] != "" { top = segs[0] }
+					for _, fold := range []string{types.PhotosFolder, types.FilesFolder} {
+						if strings.Contains(loc, "/"+fold+"/") || strings.Contains(loc, ":"+fold+"/") {
+							top = fold
+							break
+						}
 					}
+					// Preserve PathRoot prefix when present in the current location so MoveFile keeps
+					// the file under the same root (dudenest/) and doesn't accidentally relocate to drive root.
 					newDir := fmt.Sprintf("%s/%04d/%02d", top, t.Year(), int(t.Month()))
+					if accts := fs.p.AccountManager(); accts != nil {
+						cfg := accts.Policy()
+						if cfg.PathRoot != "" && strings.Contains(loc, ":"+cfg.PathRoot+"/") {
+							newDir = fmt.Sprintf("%s/%s/%04d/%02d", cfg.PathRoot, top, t.Year(), int(t.Month()))
+						}
+					}
 					if mErr := fs.p.MoveFile(fileID, newDir); mErr != nil {
 						log.Printf("⚠️  meta-PATCH MoveFile %s → %s: %v", fileID, newDir, mErr)
 					} else {
