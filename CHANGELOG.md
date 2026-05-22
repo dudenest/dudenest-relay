@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.17.2] — 2026-05-22 — Phase α: multi-account orchestration (CloudAccount model + SelectReplicas)
+
+Non-breaking. Solves the problem that the previous version hard-coded `limit := 2` and `p.clouds[:2]` in upload — meaning that for users with 3+ cloud accounts, only the first two (in filesystem order) were ever written to. Phase α replaces this with a policy-driven selector.
+
+### Model — `pkg/types/accounts.go` (new file)
+
+- `CloudAccount` struct — identity (`int64` monotonic ID, `Provider`, `Email`, `AddedAt`), role machine (`Role`, `Priority`, `Pinned`), quota cache (`QuotaTotalBytes`, `QuotaUsedBytes`, `QuotaCheckedAt`), per-account policy overrides (`SoftCapPct`, `HardCapPct`, `MaxFileSizeBytes`, `AcceptsContentTypes`), forward-compat (`Region`, `CompressionLevel`, `LogicalAliasOK`), state (`Status`, `LastError`, `LastSeenAt`, `QuarantineUntil`).
+- `Role` enum: PrimaryWrite / ReplicaWrite / ReadOnly / ColdArchive / Drain / Quarantine.
+- `Status` enum: Active / ReauthNeeded / OverQuota / Error / Removed.
+- `AccountPolicyConfig` — 26 fields, ALL user-configurable from the UI (no hardcoded behavior). The Standard preset is in `DefaultPolicy()`.
+- `DisplayID()` → `"ID001".."ID999"` then `"ID1000+"` (auto-expanding pad).
+- `PathFor()` → cloud-side path per `cfg.PathScheme` (`"year_month"` default per design decision §11 #5 — no migration from existing).
+- `AcceptsContentType()` filter.
+
+### Engine — `internal/account/manager.go` (new file)
+
+- `Manager` owns `accounts.json` + `account_policy.json` (atomic-write on every mutation).
+- `SelectReplicas(file, accounts, cfg)` — **pure function** (no I/O, fully unit-testable). Four steps:
+  1. Filter: Active + writable role + below HardCap + within MaxFileSize + AcceptsContentType.
+  2. Stable-sort by `(Priority ASC, FreeBytes DESC, AddedAt ASC)`.
+  3. Pick up to `cfg.ReplicationFactor`, honoring `DiversityRequired` (Provider) + `DiversityRegionRequired` (Region).
+  4. Insufficient-replicas: return error or partial+warning per `AllowSingleReplicaWithWarning`.
+- `BootstrapFromProviders(providerIDs)` — first-run migration helper. When `accounts.json` is empty, auto-creates CloudAccount records from existing `providers/*.json` (first → PrimaryWrite/Priority 0, rest → ReplicaWrite/Priority N).
+- `AddAccount`, `Reorder`, `SetRole`, `NextID`, `Accounts`, `ActiveAccounts` mutators (goroutine-safe via `sync.RWMutex`).
+
+### Tests — 14 new (`internal/account/manager_test.go`)
+
+`SelectReplicas` acceptance α-1..α-8 (zero accounts, single+warning allowed, single strict, picks-first-2-by-priority, tie-break-by-free-space, over-hard-cap-excluded, diversity-required, content-type-filter) + `AddAccount` first-vs-subsequent + `NextID` monotonic-across-removed + `Reorder` dense-priorities + `DisplayID` padding + `PathFor` default-year-month + accounts/policy round-trip + on-disk persistence.
+
+### Pipeline integration — `internal/pipeline/pipeline.go`
+
+- `Pipeline.accts *account.Manager` field (nil = legacy "first 2 in slice" fallback, kept for tests + CLI).
+- `New(masterKey, clouds, mapStorePath, accts)` — new 4th arg, `nil` opts into legacy path. All existing callers updated (CLI in `cmd/relay/main.go`, test files).
+- `SetAccountManager(m)` setter for `cmd/relay/serve.go` to attach the long-lived Manager after pipeline construction.
+- `findProviderByAccount(a)` maps `CloudAccount → CloudProvider` via `"<provider>:<email>"` match on `CloudProvider.ID()`.
+- `uploadReplica` now calls `SelectReplicas` when `accts != nil`, falls back to old behavior otherwise. Path generation goes through `cfg.PathFor()`.
+
+### Bootstrap — `cmd/relay/serve.go`
+
+After pipeline init: `account.New(authConfigDir)` loads existing `accounts.json` (or creates empty Manager). If empty + providers exist, `BootstrapFromProviders` auto-populates with current filesystem order. Manager attached via `p.SetAccountManager(accMgr)`. Logs `✅ account bootstrap: created N CloudAccount records from existing providers (edit priorities in Settings → Cloud Accounts)`.
+
+### User-visible behavior
+
+| Setup | Pre-Phase α | Post-Phase α |
+|-------|-------------|--------------|
+| 2 accounts | Replicates to both (alphabetic by email) | Replicates to both, in Priority order |
+| 3+ accounts | Replicates ONLY to first 2 (rest invisible to upload) | Replicates to top-RF by Priority + quota |
+| Account full | Upload to that account fails, others unaffected | Account excluded if over HardCap (configurable per-account) |
+| Single account | Upload OK (1 replica only, silent) | Upload OK + warning logged (`AllowSingleReplicaWithWarning=true` default) |
+
+### Upgrade path
+
+This is a non-breaking patch — both relays update via `dudenest-relay-update.timer` within 24h, or immediately with `ssh root@<relay> /usr/local/bin/relay update && systemctl restart …`. First start after update creates `accounts.json` from existing providers (idempotent — re-running does nothing). Configuration UI (Settings → Cloud Accounts) lands in Phase β.
+
+### What's NOT in this release (Phase β/γ pending)
+
+- Quota polling — `QuotaUsedBytes` stays at 0 until Phase β wires `Drive.about.get` etc. Until then the HardCap gate is inactive (everything is "0% used"); only Role + Priority drive selection.
+- `ReconcileRoles` loop (auto-demote/promote) — Phase β.
+- Admin endpoints (`/admin/accounts`, `/admin/policy`) + Flutter UI — Phase β.
+- Encrypted backup blob (currently `maps_json` is still plaintext on the hub) — Phase β.
+- Age-based rotation, deep archive, dedup — Phase γ.
+
+### Design doc
+
+`~/.AI/dudenest-application/CLOUD-ACCOUNT-POLICY-PLAN.md` (full data model + state machine + scenarios + CRUSH analysis + 3-phase roadmap).
+
+---
+
 ## [0.17.1] — 2026-05-22 — s313: Phase 0 fast-update mechanism + RELAY_PUBLIC_URL anti-regression guard
 
 Patch release closing s313 carry-overs. Non-breaking: backward-compatible with older hubs (`{"status":"ok"}`-only response) and with relays that never get `RELAY_PUBLIC_URL` set.
