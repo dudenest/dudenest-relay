@@ -311,7 +311,8 @@ type fileServer struct {
 		ListFiles() ([]*types.FileMap, error)
 		GetFileMap(fileID string) (*types.FileMap, error)
 		DeleteFile(fileID string) error
-		MoveFile(fileID, newDir string) error // P5b: re-bucket a file when its TakenAtOverride changes; no data transfer
+		MoveFile(fileID, newDir string) error  // P5b: re-bucket a file when its TakenAtOverride changes; no data transfer
+		AccountManager() *account.Manager      // Phase α (v0.17.2+): may return nil for CLI/test paths; handleMeta uses it to read PathRoot policy when computing MoveFile destination directory
 	}
 	thumbCache     *thumbnail.Cache
 	backupMu       sync.RWMutex
