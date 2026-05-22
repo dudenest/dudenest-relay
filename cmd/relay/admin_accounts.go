@@ -257,11 +257,8 @@ func (a *accountAdmin) handlePolicy(w http.ResponseWriter, r *http.Request) {
 
 // --- helpers ---
 
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
+// writeJSON is provided by admin.go (same package). httpErr stays local since it has different
+// semantics (error envelope) from the rest of the codebase's jsonErr().
 
 func httpErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
