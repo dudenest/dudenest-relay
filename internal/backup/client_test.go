@@ -91,8 +91,47 @@ func TestSendEncryptsAndPosts(t *testing.T) {
 	if err := c.send([]*types.FileMap{fm}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	if received["maps_json"] == nil { t.Error("maps_json missing in payload") }
+	if received["backup_blob"] == nil { t.Error("backup_blob missing in payload (v0.20.0+ format)") }
 	if received["backup_version"] == nil { t.Error("backup_version missing in payload") }
+	if received["maps_json"] != nil { t.Error("maps_json must NOT be sent by v0.20.0+ relays (zero-knowledge)") }
+}
+
+// TestBackupBlobRoundtrip: encrypt innerSnapshot → decrypt → recovered identical.
+func TestBackupBlobRoundtrip(t *testing.T) {
+	t.Setenv("RELAY_ID", "rel-1"); t.Setenv("RELAY_SECRET", "sec-1")
+	c := New(testMasterKey(), t.TempDir(), "http://localhost:0", 0, "test")
+	if c == nil { t.Fatal("client nil") }
+	inner := innerSnapshot{Maps: []*types.FileMap{{FileID: "f1", Name: "a.txt"}}, ProviderIDs: []string{"gdrive:a@b"}}
+	innerJSON, _ := json.Marshal(inner)
+	version := int64(42)
+	blob, err := c.enc.Encrypt(backupBlockID(c.relayID, version), innerJSON)
+	if err != nil { t.Fatalf("encrypt: %v", err) }
+	decoded, err := c.enc.Decrypt(backupBlockID(c.relayID, version), blob)
+	if err != nil { t.Fatalf("decrypt: %v", err) }
+	var got innerSnapshot
+	if err := json.Unmarshal(decoded, &got); err != nil { t.Fatalf("unmarshal: %v", err) }
+	if len(got.Maps) != 1 || got.Maps[0].FileID != "f1" { t.Errorf("maps mismatch: %+v", got) }
+}
+
+// TestBackupBlobTampering: any bit flip in blob → Decrypt fails (GCM tag verification).
+func TestBackupBlobTampering(t *testing.T) {
+	t.Setenv("RELAY_ID", "rel-1"); t.Setenv("RELAY_SECRET", "sec-1")
+	c := New(testMasterKey(), t.TempDir(), "http://localhost:0", 0, "test")
+	blob, _ := c.enc.Encrypt(backupBlockID(c.relayID, 1), []byte("secret"))
+	blob[len(blob)-1] ^= 0x01 // flip last byte of GCM tag
+	if _, err := c.enc.Decrypt(backupBlockID(c.relayID, 1), blob); err == nil {
+		t.Error("expected decrypt to fail on tampered blob (GCM auth)")
+	}
+}
+
+// TestBackupBlobVersionSwap: blob from version A cannot decrypt as version B (HKDF info change).
+func TestBackupBlobVersionSwap(t *testing.T) {
+	t.Setenv("RELAY_ID", "rel-1"); t.Setenv("RELAY_SECRET", "sec-1")
+	c := New(testMasterKey(), t.TempDir(), "http://localhost:0", 0, "test")
+	blob, _ := c.enc.Encrypt(backupBlockID(c.relayID, 100), []byte("v100"))
+	if _, err := c.enc.Decrypt(backupBlockID(c.relayID, 101), blob); err == nil {
+		t.Error("expected decrypt to fail when version swapped (HKDF info differs)")
+	}
 }
 
 // TestReadProviderTokensEmpty: empty providers dir → nil tokens, no error.

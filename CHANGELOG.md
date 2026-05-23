@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.20.0] — 2026-05-23 — Zero-knowledge backup blob + ReconcileRoles loop fix
+
+Non-breaking on hub side (hub v2026-05-23+ accepts both formats). Breaking nothing visible to operator.
+
+### Zero-knowledge backup (`internal/backup/client.go`)
+
+Relay now encrypts the full snapshot (`{maps, providers_enc, provider_ids}`) into a single AES-256-GCM blob keyed with HKDF(`relay-backup-v1:<relay_id>:<version>`). The blob is sent as `backup_blob` field instead of plaintext `maps_json`. Hub stores opaque bytes in new `relay_backups.backup_blob` column. Hub now sees only: `relay_id`, `backup_version`, `provider_ids` (display index — non-sensitive), `backup_blob` (opaque), `created_at`.
+
+Migration: hub accepts EITHER legacy `maps_json+providers_enc` OR new `backup_blob` (XOR validated, 400 on both). v0.20.0+ relays always send blob; legacy relays continue working unchanged. After 30 days fleet-wide v0.20.0+ adoption, legacy hub columns can be dropped.
+
+Restore path: tries `backup_blob` decryption first (with version-pinned HKDF info), falls back to legacy fields. Logs which format was restored.
+
+Tests: `TestBackupBlobRoundtrip` (encrypt+decrypt symmetry), `TestBackupBlobTampering` (GCM auth tag rejects bit flips), `TestBackupBlobVersionSwap` (HKDF info change rejects cross-version replay), updated `TestSendEncryptsAndPosts` (asserts `maps_json` NOT sent by v0.20.0+).
+
+### Bug fix: `ReconcileRoles` Step 2 over-cap loop (`internal/account/manager.go`)
+
+Step 2 (auto-promote when no PrimaryWrite) was selecting from ALL ReplicaWrite accounts including ones over SoftCap — which meant Step 1 demoting an over-cap account would be undone by Step 2 re-promoting it in the same tick, looping forever. Fix: Step 2 now filters out candidates with `UsedPercent >= SoftCap`. `TestReconcileRoles_AutoDemoteOnSoftCap` + `TestReconcileRoles_AutoPromoteWhenNoPrimary` now pass.
+
+---
+
 ## [0.19.0] — 2026-05-23 — Phase γ drain workflow + ops fixes (GITHUB_TOKEN, dual-service cleanup)
 
 Non-breaking. Three independent items in one release:

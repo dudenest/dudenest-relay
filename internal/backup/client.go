@@ -205,11 +205,28 @@ func (c *Client) StartPingLoop(initial time.Duration) {
 }
 
 // backupRequest matches dudenest-backup POST /relay/backup body.
+// v0.20.0+: BackupBlob (zero-knowledge AES-256-GCM) is the canonical field.
+// Legacy MapsJSON+ProvidersEnc kept in struct only for hub backward-compat decoding (NOT populated on send).
 type backupRequest struct {
-	MapsJSON      string   `json:"maps_json"`
-	ProvidersEnc  []byte   `json:"providers_enc"`
-	ProviderIDs   []string `json:"provider_ids"`
+	MapsJSON      string   `json:"maps_json,omitempty"`      // EMPTY for v0.20.0+ — relay sends BackupBlob instead
+	ProvidersEnc  []byte   `json:"providers_enc,omitempty"`  // EMPTY for v0.20.0+ — encrypted inside BackupBlob
+	BackupBlob    []byte   `json:"backup_blob,omitempty"`    // NEW: AES-256-GCM(innerSnapshot) — hub stores opaque
+	ProviderIDs   []string `json:"provider_ids"`             // display only — non-sensitive index
 	BackupVersion int64    `json:"backup_version"`
+}
+
+// innerSnapshot is the payload encrypted into BackupBlob — hub never sees this plaintext.
+// Marshaled to JSON before Encrypt. ProviderIDs duplicated outside blob for hub-side ops queries.
+type innerSnapshot struct {
+	Maps         []*types.FileMap `json:"maps"`
+	ProvidersEnc []byte           `json:"providers_enc"` // tokens encrypted with separate "relay-providers-v1" key
+	ProviderIDs  []string         `json:"provider_ids"`
+}
+
+// backupBlockID derives a per-backup HKDF info string for crypto.Encryptor.
+// Includes relay_id+version → prevents cross-relay swap and cross-version replay.
+func backupBlockID(relayID string, version int64) string {
+	return "relay-backup-v1:" + relayID + ":" + fmt.Sprintf("%d", version)
 }
 
 func (c *Client) send(maps []*types.FileMap) error {
@@ -227,11 +244,17 @@ func (c *Client) send(maps []*types.FileMap) error {
 			return fmt.Errorf("encrypt tokens: %w", err)
 		}
 	}
+	backupVersion := time.Now().UnixMilli()
+	inner := innerSnapshot{Maps: maps, ProvidersEnc: providersEnc, ProviderIDs: providerIDs}
+	innerJSON, err := json.Marshal(inner)
+	if err != nil { return fmt.Errorf("marshal inner snapshot: %w", err) }
+	_ = mapsJSON // kept for backward-compat reference; not sent
+	backupBlob, err := c.enc.Encrypt(backupBlockID(c.relayID, backupVersion), innerJSON)
+	if err != nil { return fmt.Errorf("encrypt backup blob: %w", err) }
 	body, err := json.Marshal(backupRequest{
-		MapsJSON:      string(mapsJSON),
-		ProvidersEnc:  providersEnc,
-		ProviderIDs:   providerIDs,
-		BackupVersion: time.Now().UnixMilli(),
+		BackupBlob:    backupBlob,
+		ProviderIDs:   providerIDs, // duplicated for hub ops index — non-sensitive
+		BackupVersion: backupVersion,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)
@@ -251,15 +274,17 @@ func (c *Client) send(maps []*types.FileMap) error {
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		return fmt.Errorf("unexpected status %d from backup service", resp.StatusCode)
 	}
-	log.Printf("backup: snapshot sent (%d maps, %d providers) → HTTP %d", len(maps), len(providerIDs), resp.StatusCode)
+	log.Printf("backup: snapshot sent (%d maps, %d providers, %d bytes blob) → HTTP %d", len(maps), len(providerIDs), len(backupBlob), resp.StatusCode)
 	return nil
 }
 
 // restoreResponse matches the GET /relay/restore response from dudenest-backup.
+// Hub returns both legacy (maps_json/providers_enc) AND new (backup_blob) fields; client picks based on which is present.
 type restoreResponse struct {
 	RelayID       string  `json:"relay_id"`
-	MapsJSON      string  `json:"maps_json"`
-	ProvidersEnc  []byte  `json:"providers_enc"`
+	MapsJSON      string  `json:"maps_json"`       // LEGACY: empty for v0.20.0+ backups
+	ProvidersEnc  []byte  `json:"providers_enc"`   // LEGACY: empty for v0.20.0+ backups
+	BackupBlob    []byte  `json:"backup_blob"`     // NEW: AES-256-GCM(innerSnapshot); empty for legacy backups
 	ProviderIDs   []string `json:"provider_ids"`
 	BackupVersion int64   `json:"backup_version"`
 	CreatedAt     string  `json:"created_at"`
@@ -280,15 +305,25 @@ func (c *Client) Restore() (bool, error) {
 	if resp.StatusCode != http.StatusOK { return false, fmt.Errorf("restore: backup returned %d", resp.StatusCode) }
 	var r restoreResponse
 	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil { return false, fmt.Errorf("restore: decode: %w", err) }
-	if r.MapsJSON == "" { return false, nil }
-	// Write maps.json to configDir (pipeline reads from this location)
+	// Two-format handling: v0.20.0+ backups arrive as BackupBlob; legacy backups as MapsJSON+ProvidersEnc.
+	mapsJSON := r.MapsJSON
+	providersEnc := r.ProvidersEnc
+	if len(r.BackupBlob) > 0 {
+		innerJSON, err := c.enc.Decrypt(backupBlockID(c.relayID, r.BackupVersion), r.BackupBlob)
+		if err != nil { return false, fmt.Errorf("restore: decrypt blob (relay_id=%s version=%d): %w", c.relayID, r.BackupVersion, err) }
+		var inner innerSnapshot
+		if err := json.Unmarshal(innerJSON, &inner); err != nil { return false, fmt.Errorf("restore: unmarshal inner: %w", err) }
+		mapsBytes, _ := json.Marshal(inner.Maps)
+		mapsJSON = string(mapsBytes)
+		providersEnc = inner.ProvidersEnc
+	}
+	if mapsJSON == "" { return false, nil }
 	mapsPath := filepath.Join(c.configDir, "maps.json")
-	if err := os.WriteFile(mapsPath, []byte(r.MapsJSON), 0o600); err != nil {
+	if err := os.WriteFile(mapsPath, []byte(mapsJSON), 0o600); err != nil {
 		return false, fmt.Errorf("restore: write maps: %w", err)
 	}
-	// Decrypt and restore provider tokens if present
-	if len(r.ProvidersEnc) > 0 && c.enc != nil {
-		provJSON, err := c.enc.Decrypt("relay-providers-v1", r.ProvidersEnc)
+	if len(providersEnc) > 0 && c.enc != nil {
+		provJSON, err := c.enc.Decrypt("relay-providers-v1", providersEnc)
 		if err != nil { log.Printf("restore: decrypt providers failed: %v (skipping token restore)", err) } else {
 			var tokens map[string]json.RawMessage
 			if err := json.Unmarshal(provJSON, &tokens); err == nil {
@@ -303,7 +338,9 @@ func (c *Client) Restore() (bool, error) {
 			}
 		}
 	}
-	log.Printf("restore: ✅ restored backup v%d (%s) — %d providers", r.BackupVersion, r.CreatedAt, len(r.ProviderIDs))
+	format := "legacy"
+	if len(r.BackupBlob) > 0 { format = "zero-knowledge blob" }
+	log.Printf("restore: ✅ restored backup v%d (%s, %s) — %d providers", r.BackupVersion, r.CreatedAt, format, len(r.ProviderIDs))
 	return true, nil
 }
 

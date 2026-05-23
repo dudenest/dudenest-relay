@@ -536,7 +536,9 @@ func (m *Manager) ReconcileRoles() (demoted, promoted int) {
 			}
 		}
 	}
-	// Step 2: promote if no PrimaryWrite candidates exist + we have a ReplicaWrite
+	// Step 2: promote if no PrimaryWrite candidates exist + we have a ReplicaWrite below SoftCap.
+	// Critical: exclude candidates that are over SoftCap — otherwise Step 1 demote + Step 2 re-promote
+	// loops every tick (any over-cap account demoted by Step 1 would be re-promoted by Step 2).
 	if cfg.AutoPromoteOnSpace {
 		active = m.ActiveAccounts() // re-load after demotions
 		hasPrimary := false
@@ -544,7 +546,12 @@ func (m *Manager) ReconcileRoles() (demoted, promoted int) {
 		for _, a := range active {
 			if a.Pinned { continue }
 			if a.Role == types.RolePrimaryWrite { hasPrimary = true }
-			if a.Role == types.RoleReplicaWrite { candidates = append(candidates, a) }
+			if a.Role == types.RoleReplicaWrite {
+				softCap := cfg.SoftCapDefaultPct
+				if a.SoftCapPct != nil { softCap = *a.SoftCapPct }
+				if a.QuotaTotalBytes > 0 && a.UsedPercent() >= softCap { continue } // skip over-cap (would loop)
+				candidates = append(candidates, a)
+			}
 		}
 		if !hasPrimary && len(candidates) > 0 {
 			// Pick the candidate by configured strategy.
