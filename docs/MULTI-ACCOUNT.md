@@ -504,10 +504,281 @@ Roadmap details: `~/.AI/dudenest-application/CLOUD-ACCOUNT-POLICY-PLAN.md`.
 
 ---
 
-## 12. Cross-references
+## 12. Phase β — Quota polling, ReconcileRoles, admin REST (v0.18.0)
+
+### 12.1. Quota polling
+
+#### `types.QuotaReporter` interface (`pkg/types/types.go`)
+
+Optional sub-interface, paralleled to `CloudLister`, `CloudIDDownloader` etc. Providers that can report storage usage implement it; those that can't (local FS) are skipped silently by the polling loop.
+
+```go
+type QuotaReporter interface {
+    Quota() (usedBytes, totalBytes int64, err error)
+}
+```
+
+**Important convention**: when `totalBytes == 0`, it means **unknown** (e.g. Google Workspace unlimited reports `limit=0`). `CloudAccount.FreeBytes()` defensively returns 0 in that case to prevent `SelectReplicas` from blindly favoring "infinite" accounts.
+
+#### `gdrive.Provider.Quota()` (`internal/cloudconn/gdrive/gdrive.go`)
+
+Single Drive API call per invocation:
+
+```go
+about, err := p.svc.About.Get().Fields("storageQuota").Do()
+// returns about.StorageQuota.Usage, about.StorageQuota.Limit
+```
+
+Compile-time assertion `var _ types.QuotaReporter = (*Provider)(nil)` catches signature drift at build.
+
+#### `Manager.RefreshQuota(id, lookup)` (`internal/account/manager.go`)
+
+On-demand quota fetch for a single account. Side effects:
+- Looks up the provider via `lookup ProviderLookup` callback.
+- Calls `QuotaReporter.Quota()` — if provider doesn't implement, returns `nil` silently.
+- On success: writes `QuotaUsedBytes`, `QuotaTotalBytes`, `QuotaCheckedAt`, `LastSeenAt`. Clears `Status=Error` if previously set.
+- On error: `Status=Error`, `LastError=<msg>`, `QuarantineUntil=now+5min`. Persists.
+
+```go
+func (m *Manager) RefreshQuota(id int64, lookup ProviderLookup) error
+```
+
+#### `Manager.StartQuotaPollLoop(ctx, lookup)`
+
+Background goroutine. First poll happens 30 s after start (gives Flutter time to make initial requests before competing for Drive API). Subsequent polls every `cfg.QuotaCheckIntervalMin` (default 30 min). Goroutine exits when ctx cancels.
+
+```go
+func (m *Manager) StartQuotaPollLoop(ctx context.Context, lookup ProviderLookup)
+```
+
+`ProviderLookup` is a callback type `func(*CloudAccount) types.CloudProvider`. Defined in account package so the package doesn't import `internal/cloudconn` (would be a layering violation).
+
+### 12.2. ReconcileRoles
+
+#### `Manager.ReconcileRoles() (demoted, promoted int)`
+
+Pure-ish function — reads manager state, mutates via `SetRole`, no I/O. Two steps:
+
+**Step 1: auto-demote.** For each `Role=PrimaryWrite` and `!Pinned`:
+- Resolve `softCap` (per-account override or `cfg.SoftCapDefaultPct`).
+- If `QuotaTotalBytes > 0 && UsedPercent() >= softCap`: `SetRole(id, RoleReplicaWrite)`. Increments `demoted` counter.
+
+**Step 2: auto-promote.** Only fires when zero PrimaryWrite remain after step 1:
+- Build candidate pool: `Role=ReplicaWrite && !Pinned`.
+- `pickPromoteCandidate(candidates, cfg.PromoteStrategy)` returns the chosen account.
+- `SetRole(id, RolePrimaryWrite)`. Increments `promoted`.
+
+#### `pickPromoteCandidate(candidates, strategy)` (`internal/account/manager.go`)
+
+Four strategies:
+
+| `strategy` | Winner |
+|------------|--------|
+| `"by_priority"` (default + fallback) | Lowest `Priority` value |
+| `"by_free_pct"` | Highest `100 - UsedPercent()` |
+| `"by_age_oldest_first"` | Earliest `AddedAt` |
+| `"round_robin"` | Index `(time.Now().Minute() % len)` — deterministic per minute |
+
+Unknown strategy falls back to `by_priority` (defensive — typo in policy.json doesn't break the loop).
+
+#### `Manager.StartReconcileLoop(ctx)`
+
+Background goroutine, fires `ReconcileRoles` every 1 minute (cheap — no I/O). Promotions surface within ~1 min of a quota refresh detecting SoftCap crossing.
+
+### 12.3. Admin REST endpoints (`cmd/relay/admin_accounts.go`)
+
+All routes share the same auth chain as `/files`: `requireAuthWithReg(lr, handler)` = JWT Bearer + X-Relay-Token HMAC. Registered only when `globalAdminAccounts != nil` (the package-level var set by serve.go after Manager construction).
+
+| Route | Method | Body | Returns |
+|-------|--------|------|---------|
+| `/admin/accounts` | GET | – | `{accounts: [CloudAccount...], policy: AccountPolicyConfig}` |
+| `/admin/accounts/reorder` | POST | `{ids: [3,1,2]}` | refreshed accounts list with dense priorities |
+| `/admin/accounts/{id}` | GET | – | single CloudAccount |
+| `/admin/accounts/{id}` | PATCH | overlay (any subset of `role`, `priority`, `pinned`, `soft_cap_pct`, `hard_cap_pct`, `max_file_size_mb`, `accepts_content_types`, `region`, `compression_level`) | refreshed account |
+| `/admin/accounts/{id}` | DELETE | – | `{status: "drain_initiated"}` — flips Role to Drain; background worker takes over |
+| `/admin/accounts/{id}/refresh-quota` | POST | – | account with fresh QuotaUsed/Total |
+| `/admin/policy` | GET | – | full `AccountPolicyConfig` |
+| `/admin/policy` | PATCH | overlay (any subset of policy fields) | merged + persisted policy |
+
+#### PATCH semantics (overlay merge)
+
+For `PATCH /admin/policy`, body is decoded into `map[string]any`, applied onto the marshaled current policy, re-marshaled, then `Unmarshal` into typed `AccountPolicyConfig`. Type validation happens implicitly — a typo like `"replication_factor": "two"` fails the round-trip with a clean error.
+
+For `PATCH /admin/accounts/{id}`, body fields are individually pointer-typed (`*int`, `*bool`, `*string`) so unset fields are easy to distinguish from explicit zero. Special handling: `max_file_size_mb` is multiplied by `1024*1024` to set `MaxFileSizeBytes`. `role` change goes through `Manager.SetRole()` (which persists immediately); other fields are applied to a `live := m.Accounts()` slice + `ReplaceAll`.
+
+#### DELETE = Drain stub → real workflow
+
+In Phase β, DELETE flipped the account to `Role=Drain` but no background worker existed. Phase γ (v0.19.0) added the worker (§13). The response is `{"status": "drain_initiated", "note": "background migration worker pending Phase β implementation; account will not receive new uploads"}` — the note is now stale post-v0.19.0 but the JSON shape stays stable for UI compat.
+
+### 12.4. `Manager.ReplaceAll([]*CloudAccount)`
+
+Atomic swap of the in-memory slice + disk persist. Used by `PATCH /admin/accounts/{id}` after building an edited view from `Accounts()` (which returns deep copies). Caller must NOT remove accounts — IDs aren't reusable; to soft-delete use `SetRole(id, RoleDrain)` and let the drain worker mark `Status=Removed`.
+
+---
+
+## 13. Phase γ — Drain workflow (v0.19.0)
+
+### 13.1. Design
+
+When the user calls `DELETE /admin/accounts/{id}` (or Flutter `Remove (drain)` menu item), the account flips to `Role=Drain` immediately and stops receiving new uploads (SelectReplicas filters out non-`PrimaryWrite/ReplicaWrite`). A background worker then walks every FileMap, finds shards on that account, copies them to other still-active accounts, rewrites `Location`+`CloudID`, persists, best-effort deletes from source. When zero shards remain → `Status=Removed`, `RemovedAt=now`. The account record stays in `accounts.json` for audit.
+
+### 13.2. `PipelineDrainer` interface (`internal/account/drain.go`)
+
+Minimal Pipeline surface the worker needs. Defined in `account` package to avoid `pipeline ↔ account` import cycle.
+
+```go
+type PipelineDrainer interface {
+    ListFiles() ([]*types.FileMap, error)
+    GetFileMap(fileID string) (*types.FileMap, error)
+    SaveFileMap(fm *types.FileMap) error
+    CloudByID(providerID string) types.CloudProvider
+}
+```
+
+`Pipeline` satisfies this — `Pipeline.SaveFileMap` and `Pipeline.CloudByID` were added in v0.19.0 specifically for this purpose. `Pipeline.ListFiles` and `Pipeline.GetFileMap` existed pre-Phase α.
+
+### 13.3. `Manager.StartDrainLoop(ctx, drainer, state, interval)`
+
+Background goroutine. Initial delay 1 min (lets quota poll + reconcile bootstrap first). Subsequent sweeps every `interval` (default 2 min).
+
+```go
+func (m *Manager) StartDrainLoop(ctx context.Context, drainer PipelineDrainer, state *DrainState, interval time.Duration)
+```
+
+Each sweep calls `m.drainOnePass()` which iterates `Role=Drain` accounts and dispatches `drainOneAccount(d, ...)`.
+
+### 13.4. `drainOneAccount`
+
+For one draining account:
+
+1. Build `drainProviderID := d.Provider + ":" + d.Email` — the Location prefix that identifies its shards.
+2. `ListFiles()`, iterate all FileMaps, all Chunks, all Shards. Match on `strings.HasPrefix(sh.Location, drainProviderID+":")`.
+3. Build `otherAccounts` pool — all Active, NOT this one, NOT `Role=Drain`.
+4. **Safety**: if `len(otherAccounts) == 0` → log warning, set `prog.LastErr = "no migration target accounts"`, exit. User must add another account first; the next sweep retries.
+5. For each matching shard: spawn `migrateOneShard` goroutine, capped by semaphore `cfg.DrainMaxConcurrentMigrations` (default 4).
+6. Wait for all goroutines, then re-scan to confirm zero shards remain. If `prog.ShardsFailed == 0 && stillThere == 0`: transition account to `Status=Removed`, `Role=ReadOnly` (terminal), `RemovedAt=now`. Log `✅ drain ID%03d done: %d shards migrated, account marked Removed (audit-retained)`.
+
+### 13.5. `migrateOneShard`
+
+For one shard:
+
+1. Resolve source provider via `drainer.CloudByID(srcID)`.
+2. Parse Location: `parts := strings.SplitN(sh.Location, ":", 3)` (format `<provider>:<email>:<path>`). Extract `srcPath = parts[2]`.
+3. **Download**: prefer `CloudIDDownloader.DownloadByID(sh.CloudID)` if known (ID-stable, survives renames), fall back to `src.Download(srcPath)`.
+4. Infer `contentType` from path (`/photos/` or `/files/`).
+5. `SelectReplicas(FileMeta{Size, ContentType}, otherAccounts, cfg)` → take the highest-priority chosen (we replace one replica, not create multiple).
+6. **Upload** to target: prefer `CloudIDUploader.UploadAndReturnID(destPath, data)`, fall back to `Upload`. Captures new `cloudID` if supported. Destination path = source path (same relative path on the new provider's base folder — keeps directory structure consistent).
+7. **Atomically rewrite shard**: `GetFileMap` again (catches concurrent meta edits), find the matching shard, rewrite `Location` + `CloudID` + `Created`, `SaveFileMap`. If a concurrent update already migrated this shard (prefix changed), bail silently — no double-migration.
+8. **Best-effort delete from source**: `idd.DeleteByID(sh.CloudID)` + `src.Delete(srcPath)`. Failure non-fatal (the data is already safely replicated; the scan engine will catch orphans later).
+9. **Bandwidth throttle**: if `cfg.DrainBandwidthLimitMBPerSec > 0`, sleep `bytes / (limit_mbps * 1MB) * 1sec`.
+
+### 13.6. `DrainState` tracker (`internal/account/drain.go`)
+
+In-memory only — per relay start. Holds `drainProgress` per account:
+
+```go
+type drainProgress struct {
+    StartedAt        time.Time
+    FileMapsScanned  int
+    ShardsToMigrate  int
+    ShardsMigrated   int
+    ShardsFailed     int
+    LastErr          string
+}
+```
+
+`NewDrainState()` returns empty tracker. `Snapshot(id)` returns a copy (thread-safe via `sync.RWMutex`). Future admin endpoint `/admin/accounts/{id}/drain-progress` (not yet implemented) reads from this to feed UI progress bar.
+
+Restart-resume: the in-memory counters reset, but `Location` pointers on disk drive the actual resumption — already-migrated shards have different prefixes so they're invisibly skipped on next sweep.
+
+### 13.7. Wire-up in `cmd/relay/serve.go`
+
+```go
+bgCtx, _ := context.WithCancel(context.Background())
+provLookup := func(a *types.CloudAccount) types.CloudProvider {
+    want := a.Provider + ":" + a.Email
+    cs, _ := getClouds()
+    for _, c := range cs { if c.ID() == want { return c } }
+    return nil
+}
+accMgr.StartQuotaPollLoop(bgCtx, provLookup)
+accMgr.StartReconcileLoop(bgCtx)
+globalDrainState = account.NewDrainState()
+accMgr.StartDrainLoop(bgCtx, p, globalDrainState, 2*time.Minute)
+log.Printf("✅ account.Manager: quota poll + reconcile + drain loops started ...")
+globalAdminAccounts = &accountAdmin{mgr: accMgr, provLookup: provLookup}
+```
+
+Three loops + admin handlers all hang off the same `bgCtx`. Process exit cancels them.
+
+---
+
+## 14. Tests — complete catalog (22 tests)
+
+All in `internal/account/manager_test.go`. Run: `go test ./internal/account/...`.
+
+### Phase α (8 acceptance + 6 unit/integration)
+
+| Test | What it asserts |
+|------|-----------------|
+| `TestSelectReplicas_NoAccounts` | Empty pool → `ErrNoEligibleAccounts` |
+| `TestSelectReplicas_SingleAccountWithWarningAllowed` | RF=2, 1 account + `AllowSingleReplicaWithWarning=true` → 1 chosen, no error |
+| `TestSelectReplicas_SingleAccountStrictFailsClosed` | RF=2, 1 account + `false` → `ErrInsufficientReplicas` |
+| `TestSelectReplicas_PicksFirstTwoByPriority` | 3 accounts RF=2 → first two by Priority (no waste of #3) |
+| `TestSelectReplicas_TieBreakByFreeSpace` | Equal Priority → more free space wins |
+| `TestSelectReplicas_OverHardCapExcluded` | UsedPercent >= HardCap → account excluded entirely |
+| `TestSelectReplicas_DiversityRequired` | `DiversityRequired=true` → no two replicas on same Provider type |
+| `TestSelectReplicas_ContentTypeFilter` | photos-only account skipped for "files" upload |
+| `TestAddAccount_FirstIsPrimarySubsequentIsReplica` | First add → PrimaryWrite/Priority 0; rest → ReplicaWrite/Priority N |
+| `TestNextID_MonotonicAcrossRemoved` | IDs never reused, even past Removed entries |
+| `TestReorder_Dense` | UI drag-drop produces dense [0,1,2,...] priorities |
+| `TestDisplayID_PaddingRules` | `ID%03d` for <1000, no pad above |
+| `TestPathFor_DefaultsToYearMonth` | Default scheme matches user decision §11 #5 |
+| `TestAccountsRoundTrip` + `TestPolicyRoundTrip` + `TestManagerPersistence` | JSON storage integrity across restart |
+
+### Phase β (5 tests)
+
+| Test | What it asserts |
+|------|-----------------|
+| `TestReconcileRoles_AutoDemoteOnSoftCap` | Account hits SoftCap → demote PrimaryWrite → ReplicaWrite, persisted |
+| `TestReconcileRoles_AutoPromoteWhenNoPrimary` | Demote leaves pool empty → promote best ReplicaWrite |
+| `TestReconcileRoles_RespectsPinned` | Pinned account stays PrimaryWrite even over cap |
+| `TestPickPromoteCandidate_Strategies` | All 4 strategies pick distinct winners; unknown falls back to by_priority |
+| `TestReplaceAll_Persistence` | ReplaceAll atomically swaps + persists |
+
+### Phase γ (3 tests)
+
+| Test | What it asserts |
+|------|-----------------|
+| `TestDrainState_NilSnapshotForUnknown` | UI safety: nil snapshot for unknown account ID |
+| `TestDrain_NoOpWhenNoDrainAccounts` | Early exit when no Role=Drain — doesn't accidentally drain healthy accounts |
+| `TestDrain_RefusesWhenNoOtherAccounts` | Last-account safety — won't mark Removed without target |
+
+### Hotfix v0.17.3 (`cmd/relay/folder_test.go`, 8 tests)
+
+| Test | What it asserts |
+|------|-----------------|
+| `TestFolderFromFileMap` (6 subtests) | Phase α PathRoot format + v0.11..v0.17.1 + pre-v0.11.0 legacy + MEGA provider, photos vs files for each |
+| `TestFolderFromFileMap_EmptyOrInvalid` (4 subtests) | Defensive defaults to FilesFolder for empty/malformed |
+
+### Phase 0 fast-update (`internal/backup/client_test.go`, 4 tests)
+
+| Test | What it asserts |
+|------|-----------------|
+| `TestPing_BackwardCompatOldHub` | Old hub `{"status":"ok"}` response doesn't trigger update |
+| `TestPing_TriggersUpdateOnNewerVersion` | Mock hub + mock updateTrigger → triggers exactly once |
+| `TestPing_DoesNotTriggerOnSameVersion` | Even if hub says update_now=true, client-side version check guards |
+| `TestPing_DoesNotTriggerOnMissingDownloadURL` | Empty download_url (unknown arch) → no trigger |
+| `TestPing_NilClientSafe` | Nil receiver doesn't panic |
+
+---
+
+## 15. Cross-references
 
 - Design doc: `~/.AI/dudenest-application/CLOUD-ACCOUNT-POLICY-PLAN.md`
+- Flutter UI reference: `~/Architect/github.com/dudenest/dudenest/docs/FLUTTER-CLOUD-ACCOUNTS-UI.md`
 - Fast-update mechanism: `~/.AI/dudenest-application/FAST-UPDATE-PLAN.md`
 - Relay URL routing: `~/.AI/dudenest-application/RELAY-URL-ROUTING.md`
 - Operator incident playbook: `~/.AI/dudenest-application/INCIDENT-RUNBOOK.md`
-- Photos/Files classification note: `~/.AI/dudenest-application/PHOTOS-FILES-CLASSIFICATION-NOTE.md` (to merge into this doc when next agent revises)
+- Photos/Files classification note: `~/.AI/dudenest-application/PHOTOS-FILES-CLASSIFICATION-NOTE.md`
+- Session files: `~/.AI/dudenest-application/session-2026-05-22-phase-alpha-multi-account.md`, `session-2026-05-23-phase-beta-multi-account.md`, `session-2026-05-23-phase-gamma-drain-ops.md`, `session-2026-05-23-flutter-cloud-accounts-ui.md`
