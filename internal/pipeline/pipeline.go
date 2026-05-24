@@ -46,13 +46,14 @@ func mediaFolder(name string, data []byte) string {
 	if strings.HasPrefix(mime, "image/") || strings.HasPrefix(mime, "video/") {
 		return types.PhotosFolder
 	}
-	if mime == "application/octet-stream" { // sniff inconclusive — fall back to extension for known-but-unsniffable media
-		switch strings.ToLower(filepath.Ext(name)) {
-		case ".heic", ".heif", ".raw", ".arw", ".nef", ".cr2", ".cr3", ".dng", ".rw2", ".orf", ".pef", ".rwl", ".srw":
-			return types.PhotosFolder
-		case ".mov", ".mkv", ".m4v", ".3gp", ".mts", ".m2ts", ".avi":
-			return types.PhotosFolder
-		}
+	// Sniff inconclusive (octet-stream) OR stdlib mis-classifies ISO-BMFF ftyp boxes (mp4/m4a) as
+	// generic application/octet-stream or application/* — fall back to extension for known media formats.
+	// s320 fix: .mp4 missing from list caused all MP4 videos to land in /Files instead of /Photos.
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".heic", ".heif", ".raw", ".arw", ".nef", ".cr2", ".cr3", ".dng", ".rw2", ".orf", ".pef", ".rwl", ".srw":
+		return types.PhotosFolder
+	case ".mov", ".mkv", ".m4v", ".m4a", ".mp4", ".3gp", ".mts", ".m2ts", ".avi", ".webm":
+		return types.PhotosFolder
 	}
 	return types.FilesFolder
 }
