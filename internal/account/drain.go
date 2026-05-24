@@ -50,30 +50,31 @@ type PipelineDrainer interface {
 	CloudByID(providerID string) types.CloudProvider
 }
 
-// drainProgress tracks per-account state so the admin endpoint can show progress in UI.
+// DrainProgress tracks per-account state so the admin endpoint can show progress in UI.
 // Lives in-memory only — restart resumes from where Location pointers stand.
-type drainProgress struct {
-	StartedAt        time.Time
-	FileMapsScanned  int
-	ShardsToMigrate  int
-	ShardsMigrated   int
-	ShardsFailed     int
-	LastErr          string
+// Exported so /admin/accounts/{id}/drain-progress can return it as JSON via DrainState.Snapshot.
+type DrainProgress struct {
+	StartedAt        time.Time `json:"started_at"`
+	FileMapsScanned  int       `json:"file_maps_scanned"`
+	ShardsToMigrate  int       `json:"shards_to_migrate"`
+	ShardsMigrated   int       `json:"shards_migrated"`
+	ShardsFailed     int       `json:"shards_failed"`
+	LastErr          string    `json:"last_err,omitempty"`
 }
 
 // DrainState exposes per-account progress for /admin/accounts/{id} GET. Thread-safe.
 type DrainState struct {
 	mu   sync.RWMutex
-	byID map[int64]*drainProgress
+	byID map[int64]*DrainProgress
 }
 
 // NewDrainState returns an empty tracker. Created once in serve.go and passed to StartDrainLoop.
 func NewDrainState() *DrainState {
-	return &DrainState{byID: map[int64]*drainProgress{}}
+	return &DrainState{byID: map[int64]*DrainProgress{}}
 }
 
 // Snapshot returns a copy of the current progress for an account (for /admin/accounts/{id}).
-func (s *DrainState) Snapshot(id int64) *drainProgress {
+func (s *DrainState) Snapshot(id int64) *DrainProgress {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	p, ok := s.byID[id]
@@ -139,7 +140,7 @@ func (m *Manager) drainOneAccount(d *types.CloudAccount, drainer PipelineDrainer
 	state.mu.Lock()
 	prog, ok := state.byID[d.ID]
 	if !ok {
-		prog = &drainProgress{StartedAt: time.Now()}
+		prog = &DrainProgress{StartedAt: time.Now()}
 		state.byID[d.ID] = prog
 	}
 	state.mu.Unlock()

@@ -106,6 +106,10 @@ func (a *accountAdmin) handleByID(w http.ResponseWriter, r *http.Request) {
 		a.handleRefreshQuota(w, r, id)
 		return
 	}
+	if sub == "drain-progress" {
+		a.handleDrainProgress(w, r, id)
+		return
+	}
 	if sub != "" {
 		httpErr(w, http.StatusNotFound, "unknown sub-resource: "+sub)
 		return
@@ -116,12 +120,11 @@ func (a *accountAdmin) handleByID(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPatch:
 		a.handlePatch(w, r, id)
 	case http.MethodDelete:
-		// Phase β stub: real drain workflow in a separate worker. For now we mark Status=Removed
-		// without migrating files — so user-visible "remove" is destructive in that the account
-		// stops receiving uploads, but historical pliki are still addressable (Location pointers intact).
-		// Real Drain ships when DrainMaxConcurrentMigrations worker exists.
+		// Phase γ (v0.19.0+): drain worker is live. Account flips to Role=Drain immediately,
+		// stops receiving new uploads via SelectReplicas filter, and within 2 min the StartDrainLoop
+		// sweep starts migrating shards to other accounts. Progress polled via /admin/accounts/{id}/drain-progress.
 		if err := a.mgr.SetRole(id, types.RoleDrain); err != nil { httpErr(w, http.StatusNotFound, err.Error()); return }
-		writeJSON(w, http.StatusOK, map[string]string{"status": "drain_initiated", "note": "background migration worker pending Phase β implementation; account will not receive new uploads"})
+		writeJSON(w, http.StatusOK, map[string]string{"status": "drain_initiated", "note": "account will not receive new uploads; poll /admin/accounts/{id}/drain-progress for migration status (background worker starts within 2 min)"})
 	default:
 		httpErr(w, http.StatusMethodNotAllowed, "GET, PATCH, DELETE only")
 	}
@@ -205,6 +208,33 @@ func (a *accountAdmin) handlePatch(w http.ResponseWriter, r *http.Request, id in
 		if acc.ID == id { writeJSON(w, http.StatusOK, acc); return }
 	}
 	httpErr(w, http.StatusInternalServerError, "account vanished after patch")
+}
+
+// handleDrainProgress returns DrainState snapshot for one account. Surfaces background-worker
+// progress to Flutter UI so user sees "draining 437/1247 shards (35%)" instead of opaque "Role=Drain".
+// Returns 200 always (drain may not have started yet — `started_at` is zero-time when in-flight not yet begun).
+// 503 if globalDrainState not wired (legacy/CLI path).
+func (a *accountAdmin) handleDrainProgress(w http.ResponseWriter, r *http.Request, id int64) {
+	if r.Method != http.MethodGet { httpErr(w, http.StatusMethodNotAllowed, "GET only"); return }
+	if globalDrainState == nil {
+		httpErr(w, http.StatusServiceUnavailable, "drain state tracker not initialized (legacy build)")
+		return
+	}
+	snap := globalDrainState.Snapshot(id)
+	// Verify account actually exists + is in Drain role; otherwise UI gets misleading "0/0" forever.
+	var acct *types.CloudAccount
+	for _, acc := range a.mgr.Accounts() {
+		if acc.ID == id { acct = acc; break }
+	}
+	if acct == nil { httpErr(w, http.StatusNotFound, fmt.Sprintf("account %d not found", id)); return }
+	resp := map[string]any{
+		"account_id":  id,
+		"role":        string(acct.Role),
+		"status":      string(acct.Status),
+		"in_progress": acct.Role == types.RoleDrain && (snap == nil || snap.ShardsMigrated < snap.ShardsToMigrate),
+		"snapshot":    snap, // nil before first sweep — Flutter renders "waiting for first sweep"
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleRefreshQuota triggers an on-demand quota fetch for one account. Useful when the user

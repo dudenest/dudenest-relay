@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.20.1] — 2026-05-24 — drain-progress endpoint + drain DELETE note update
+
+Non-breaking additive. Carry-over from s317 / Phase γ continue.
+
+### `GET /admin/accounts/{id}/drain-progress`
+
+New admin sub-route exposes live `DrainState.Snapshot(id)` from the background drain worker so Flutter UI can show `437/1247 copies migrated (35%)` instead of opaque `Role=Drain`. Response shape:
+
+```json
+{ "account_id": 7, "role": "drain", "status": "active", "in_progress": true,
+  "snapshot": { "started_at": "...", "shards_to_migrate": 1247, "shards_migrated": 437,
+                "shards_failed": 0, "file_maps_scanned": 89, "last_err": "" } }
+```
+
+`snapshot: null` when account is `Role=Drain` but `StartDrainLoop` hasn't run its first sweep yet (waiting up to 2 min). `503` when `globalDrainState == nil` (legacy/CLI build).
+
+### `DELETE /admin/accounts/{id}` note refreshed
+
+Old text said "background migration worker pending Phase β implementation" — false since v0.19.0. New text points operator at `/admin/accounts/{id}/drain-progress` for live status.
+
+### `DrainProgress` exported (was lower-case `drainProgress`)
+
+Required to surface JSON-encodable fields with explicit tags (`json:"started_at"` etc.). No behavior change. Tests updated (γ-4 `TestDrainState_SnapshotIsCopy` verifies defensive copy semantics).
+
+---
+
 ## [0.20.0] — 2026-05-23 — Zero-knowledge backup blob + ReconcileRoles loop fix
 
 Non-breaking on hub side (hub v2026-05-23+ accepts both formats). Breaking nothing visible to operator.

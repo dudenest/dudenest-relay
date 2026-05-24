@@ -449,6 +449,22 @@ func TestDrain_RefusesWhenNoOtherAccounts(t *testing.T) {
 	if prog == nil || prog.LastErr == "" { t.Error("expected LastErr to record 'no migration target'") }
 }
 
+// γ-4: DrainState.Snapshot returns a defensive copy — mutating the returned struct doesn't leak back.
+// This guards against the /admin/accounts/{id}/drain-progress endpoint accidentally exposing internal state.
+func TestDrainState_SnapshotIsCopy(t *testing.T) {
+	st := NewDrainState()
+	// Force a progress entry via direct map insert (bypasses needing full drainOneAccount setup).
+	st.mu.Lock()
+	st.byID[42] = &DrainProgress{ShardsToMigrate: 100, ShardsMigrated: 30}
+	st.mu.Unlock()
+	snap := st.Snapshot(42)
+	if snap == nil { t.Fatal("expected snapshot") }
+	if snap.ShardsToMigrate != 100 || snap.ShardsMigrated != 30 { t.Errorf("snapshot mismatch: %+v", snap) }
+	snap.ShardsMigrated = 999 // mutate copy
+	again := st.Snapshot(42)
+	if again.ShardsMigrated != 30 { t.Errorf("internal state leaked: got %d, want 30", again.ShardsMigrated) }
+}
+
 // noopDrainer is a stub PipelineDrainer for unit tests — no files, no providers.
 type noopDrainer struct{}
 
