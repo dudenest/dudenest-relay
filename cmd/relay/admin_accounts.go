@@ -66,9 +66,13 @@ func (a *accountAdmin) handleListOrReorder(w http.ResponseWriter, r *http.Reques
 	case http.MethodGet:
 		writeJSON(w, http.StatusOK, map[string]any{"accounts": a.mgr.Accounts(), "policy": a.mgr.Policy()})
 	case http.MethodPost:
-		// Reorder route: POST /admin/accounts/reorder
+		// Sub-routes via path suffix (s319 #9: refresh-quota for bulk refresh)
+		if strings.HasSuffix(r.URL.Path, "/refresh-quota") {
+			a.handleRefreshQuotaAll(w, r)
+			return
+		}
 		if !strings.HasSuffix(r.URL.Path, "/reorder") {
-			httpErr(w, http.StatusNotFound, "expected /admin/accounts/reorder")
+			httpErr(w, http.StatusNotFound, "expected /admin/accounts/reorder or /admin/accounts/refresh-quota")
 			return
 		}
 		var body struct {
@@ -208,6 +212,43 @@ func (a *accountAdmin) handlePatch(w http.ResponseWriter, r *http.Request, id in
 		if acc.ID == id { writeJSON(w, http.StatusOK, acc); return }
 	}
 	httpErr(w, http.StatusInternalServerError, "account vanished after patch")
+}
+
+// handleRefreshQuotaAll triggers concurrent on-demand quota fetch for ALL accounts. Useful when
+// user opens the UI and wants up-to-date quota across the board without waiting for the 30-min
+// scheduled poll. Returns immediately (fire-and-forget); next GET /admin/accounts will see refreshed
+// values. Backed by goroutine pool sized at min(len(accounts), 8) to avoid hammering Drive API.
+// s319 #9 carry-over.
+func (a *accountAdmin) handleRefreshQuotaAll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost { httpErr(w, http.StatusMethodNotAllowed, "POST only"); return }
+	if a.provLookup == nil {
+		httpErr(w, http.StatusServiceUnavailable, "quota refresh disabled: no provider lookup configured")
+		return
+	}
+	accts := a.mgr.Accounts()
+	ids := []int64{}
+	for _, acc := range accts {
+		if acc.Status == types.StatusRemoved { continue } // skip soft-deleted
+		ids = append(ids, acc.ID)
+	}
+	// Fire-and-forget: spawn goroutine that walks IDs with bounded concurrency.
+	go func() {
+		const maxConcurrent = 8
+		sem := make(chan struct{}, maxConcurrent)
+		for _, id := range ids {
+			sem <- struct{}{}
+			go func(id int64) {
+				defer func() { <-sem }()
+				if err := a.mgr.RefreshQuota(id, a.provLookup); err != nil {
+					// Per-account error already logged inside RefreshQuota via Status=Error; nothing to do here
+					_ = err
+				}
+			}(id)
+		}
+		// Drain sem to wait for all (so we know when done, though caller already returned)
+		for i := 0; i < maxConcurrent; i++ { sem <- struct{}{} }
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "accounts_queued": len(ids)})
 }
 
 // handleDrainProgress returns DrainState snapshot for one account. Surfaces background-worker

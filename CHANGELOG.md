@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.20.3] — 2026-05-24 — Bulk refresh-quota endpoint
+
+Non-breaking additive. Quick-win for UI responsiveness — operator doesn't wait 30 min for scheduled quota poll.
+
+### `POST /admin/accounts/refresh-quota` (no ID)
+
+New bulk variant of existing per-id `POST /admin/accounts/{id}/refresh-quota`. Triggers `RefreshQuota` concurrently for ALL non-Removed accounts (semaphore cap 8 to avoid Drive API hammering). Fire-and-forget: returns `202 Accepted` immediately with `{status, accounts_queued}`. Next GET /admin/accounts shows refreshed values within ~5-10s (Drive about.get latency per provider).
+
+Mux routing: `handleListOrReorder` now distinguishes 3 POST sub-routes by path suffix:
+- `/admin/accounts/reorder` → bulk priority reorder
+- `/admin/accounts/refresh-quota` → bulk quota refresh (NEW)
+- `/admin/accounts` (no suffix) → reserved for future "add account" workflow (404 currently)
+
+---
+
 ## [0.20.2] — 2026-05-24 — Age-based rotation worker (Phase γ continue)
 
 Non-breaking additive. Worker disabled by default (`cfg.AgeBasedRotation=false`) — operator opts in.
