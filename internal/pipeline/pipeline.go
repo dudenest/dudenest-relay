@@ -12,9 +12,9 @@
 // canonical FileMap with the same hash already exists, the new FileMap is saved as a LogicalAlias
 // pointer with no replicas — zero cloud I/O happens. Download resolves aliases transparently.
 //
-// Historical note: pre-v0.21.0 the codebase carried legacy Reed-Solomon "chunking" structures
-// (FileMap.Chunks/Shards, internal/erasure, internal/blockstore). v0.21.0 deletes all of that —
-// every record is migrated to the Replica-only schema on first load (see blockmap.unmarshalWithMigration).
+// Historical note: pre-v0.21.0 the codebase carried legacy Reed-Solomon split-file structures
+// (internal/erasure, internal/blockstore). v0.21.0 deletes all of that — every record is
+// migrated to the Replica-only schema on first load (see blockmap.unmarshalWithMigration).
 package pipeline
 
 import (
@@ -132,7 +132,7 @@ func (p *Pipeline) Upload(filePath string) (*types.FileMap, error) {
 }
 
 // uploadReplicas writes the whole file to the N accounts chosen by SelectReplicas.
-// No chunking, no erasure coding, no encryption — bytes go to the cloud as-is.
+// No splitting, no erasure coding, no encryption — bytes go to the cloud as-is.
 func (p *Pipeline) uploadReplicas(fm *types.FileMap, filePath string) (*types.FileMap, error) {
 	if len(p.clouds) == 0 { return nil, fmt.Errorf("no cloud providers available") }
 	data, err := os.ReadFile(filePath)

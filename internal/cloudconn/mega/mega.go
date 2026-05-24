@@ -43,7 +43,7 @@ func (p *Provider) Upload(path string, data []byte) error {
 		return fmt.Errorf("parent node %s: %w", dir, err)
 	}
 	// MEGA API requires a local file path — write to temp
-	tmp, err := os.CreateTemp("", "relay-mega-*.shard")
+	tmp, err := os.CreateTemp("", "relay-mega-*.tmp")
 	if err != nil {
 		return fmt.Errorf("tempfile: %w", err)
 	}
@@ -63,7 +63,7 @@ func (p *Provider) Download(path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("node %s: %w", path, err)
 	}
-	tmp, err := os.CreateTemp("", "relay-mega-dl-*.shard")
+	tmp, err := os.CreateTemp("", "relay-mega-dl-*.tmp")
 	if err != nil {
 		return nil, fmt.Errorf("tempfile: %w", err)
 	}

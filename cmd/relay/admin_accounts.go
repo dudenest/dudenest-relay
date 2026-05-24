@@ -26,7 +26,7 @@ import (
 )
 
 // globalDrainState holds the live drain progress tracker. Phase γ admin endpoint
-// /admin/accounts/{id} GET surfaces this so Flutter UI can show "draining: 437/1247 shards".
+// /admin/accounts/{id} GET surfaces this so Flutter UI can show "draining: 437/1247 replicas".
 var globalDrainState *account.DrainState
 
 // globalAdminAccounts is set by serve.go after account.Manager is constructed and read by the
@@ -126,7 +126,7 @@ func (a *accountAdmin) handleByID(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		// Phase γ (v0.19.0+): drain worker is live. Account flips to Role=Drain immediately,
 		// stops receiving new uploads via SelectReplicas filter, and within 2 min the StartDrainLoop
-		// sweep starts migrating shards to other accounts. Progress polled via /admin/accounts/{id}/drain-progress.
+		// sweep starts migrating replicas to other accounts. Progress polled via /admin/accounts/{id}/drain-progress.
 		if err := a.mgr.SetRole(id, types.RoleDrain); err != nil { httpErr(w, http.StatusNotFound, err.Error()); return }
 		writeJSON(w, http.StatusOK, map[string]string{"status": "drain_initiated", "note": "account will not receive new uploads; poll /admin/accounts/{id}/drain-progress for migration status (background worker starts within 2 min)"})
 	default:
@@ -252,7 +252,7 @@ func (a *accountAdmin) handleRefreshQuotaAll(w http.ResponseWriter, r *http.Requ
 }
 
 // handleDrainProgress returns DrainState snapshot for one account. Surfaces background-worker
-// progress to Flutter UI so user sees "draining 437/1247 shards (35%)" instead of opaque "Role=Drain".
+// progress to Flutter UI so user sees "draining 437/1247 replicas (35%)" instead of opaque "Role=Drain".
 // Returns 200 always (drain may not have started yet — `started_at` is zero-time when in-flight not yet begun).
 // 503 if globalDrainState not wired (legacy/CLI path).
 func (a *accountAdmin) handleDrainProgress(w http.ResponseWriter, r *http.Request, id int64) {

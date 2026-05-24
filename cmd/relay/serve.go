@@ -245,7 +245,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}
 		accMgr.StartQuotaPollLoop(bgCtx, provLookup)
 		accMgr.StartReconcileLoop(bgCtx)
-		// Phase γ drain worker: scans for Role=Drain accounts and migrates their shards to other
+		// Phase γ drain worker: scans for Role=Drain accounts and migrates their replicas to other
 		// active accounts. 2-min sweep cadence. Honors cfg.DrainMaxConcurrentMigrations and
 		// cfg.DrainBandwidthLimitMBPerSec. Pipeline implements PipelineDrainer interface via
 		// ListFiles + GetFileMap + SaveFileMap + CloudByID — all methods that already existed
@@ -255,7 +255,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		// Phase γ continue: age-based rotation worker. Daily sweep migrates files older than
 		// cfg.AgeRotationDays from PrimaryWrite/ReplicaWrite accounts to ColdArchive accounts.
 		// No-op until operator sets cfg.AgeBasedRotation=true + adds at least one Role=ColdArchive.
-		// Reuses migrateOneShard from drain — same atomic download+upload+rewrite+persist semantics.
+		// Reuses migrateOneReplica from drain — same atomic download+upload+rewrite+persist semantics.
 		accMgr.StartAgeRotationLoop(bgCtx, p, 24*time.Hour)
 		log.Printf("✅ account.Manager: quota poll + reconcile + drain + age-rotation loops started (interval=%dm, soft_cap=%d%%, hard_cap=%d%%, drain_max_concurrent=%d, age_rotation_enabled=%v age_rotation_days=%d)",
 			accMgr.Policy().QuotaCheckIntervalMin, accMgr.Policy().SoftCapDefaultPct, accMgr.Policy().HardCapDefaultPct, accMgr.Policy().DrainMaxConcurrentMigrations,
@@ -502,7 +502,7 @@ func (fs *fileServer) writeDims(fileID string, d thumbnail.Dims) {
 }
 
 // folderFromFileMap returns "photos" or "files" for the Flutter Photos/Files tab filter, derived from
-// the first Shard's Location.
+// the first Replica.Location field.
 //
 // Three location formats are recognized, depending on the version that wrote the file:
 //   - v0.17.2+ (Phase α): "gdrive:<email>:dudenest/photos/2026/05/foo.jpg" — has PathRoot prefix
@@ -538,7 +538,7 @@ func (fs *fileServer) handleList(w http.ResponseWriter, r *http.Request) {
 		Size    int64      `json:"size"`
 		Hash    string     `json:"hash"`
 		Created time.Time  `json:"created"`
-		Folder  string     `json:"folder"`             // P2/P3 redesign: "photos" (media) or "files" (non-media) — sourced from Shard.Location path prefix; Flutter Photos vs Files tabs filter on this
+		Folder  string     `json:"folder"`             // P2/P3 redesign: "photos" (media) or "files" (non-media) — sourced from Replica.Location path prefix; Flutter Photos vs Files tabs filter on this
 		Width   int        `json:"width,omitempty"`    // original image width (0 = unknown/non-image)
 		Height  int        `json:"height,omitempty"`   // original image height
 		TakenAt *time.Time `json:"taken_at,omitempty"` // EXIF DateTimeOriginal; null if absent

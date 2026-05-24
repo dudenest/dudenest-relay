@@ -24,7 +24,7 @@ Today: `Files | Settings`. After redesign: `Photos | Files | Upload | Settings`.
 |------|------------------|-------------------|
 | Media (photo, video) uploaded via Dudenest | `/dudenest-relay/files/<hash>/<name>` | `/dudenest/photos/<hash>/<name>` |
 | Non-media uploaded via Dudenest | `/dudenest-relay/files/<hash>/<name>` | `/dudenest/files/<hash>/<name>` |
-| Erasure-coded blocks (legacy chunking strategy) | `/dudenest-relay/blocks/...` | `/dudenest/blocks/...` |
+| (LEGACY blocks path — removed v0.21.0) | `/dudenest-relay/blocks/...` | `/dudenest/blocks/...` |
 
 Path classification is **content-type-driven** at upload time (`magic-number` sniff, fallback to extension).
 

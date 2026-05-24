@@ -5,11 +5,12 @@
 // FileMap.Replicas lists where each copy lives. Download fetches from the first available
 // replica; integrity is verified by FileMap.Hash (SHA-256 of the whole plaintext file).
 //
-// Historical note: pre-v0.21.0 the codebase carried legacy structures from an earlier Reed-Solomon
-// chunking design (split each file into chunks, then 6+3 erasure-code each chunk across providers).
-// That strategy was abandoned long before public release; v0.21.0 removes every remaining trace
-// (types, code paths, terminology, docs) and migrates persisted FileMaps to the new schema on first
-// load. The terms "chunk" and "shard" are intentionally absent from this package going forward.
+// Historical note: pre-v0.21.0 the codebase carried legacy structures from an earlier split-file
+// design (Reed-Solomon erasure-encoding). That strategy was abandoned long before public release;
+// v0.21.0 removes every remaining trace (types, code paths, terminology, docs) and migrates
+// persisted FileMaps to the new schema on first load. The only place where legacy JSON field names
+// still appear is `internal/blockmap/legacy_v1_migration.go` (out of necessity — to Unmarshal the
+// old wire format). Everywhere else the vocabulary is exclusively "1 file + N replicas".
 package types
 
 import "time"
@@ -40,7 +41,7 @@ type Replica struct {
 // FileMap is the per-file metadata record: identity (FileID, Name, Hash) + list of replicas.
 // Persisted as JSON in <configDir>/maps/<file_id>.json. The hub keeps an encrypted backup blob.
 type FileMap struct {
-	Version      int       `json:"version"`                 // schema version; v0.21.0+ writes Version=2 (Replicas), older relays wrote Version=1 (legacy chunks/shards — migrated on load)
+	Version      int       `json:"version"`                 // schema version; v0.21.0+ writes Version=2 (Replicas), older relays wrote Version=1 (legacy split format — migrated on load)
 	FileID       string    `json:"file_id"`                 // UUID assigned at upload
 	Name         string    `json:"name"`                    // original filename
 	Size         int64     `json:"size"`                    // original file size in bytes

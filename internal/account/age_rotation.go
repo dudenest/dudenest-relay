@@ -1,13 +1,13 @@
 // Package account: age-based rotation worker (Phase γ continue, s319).
-// Periodically scans FileMaps for files older than cfg.AgeRotationDays and migrates shards
+// Periodically scans FileMaps for files older than cfg.AgeRotationDays and migrates replicas
 // living on non-ColdArchive accounts to ColdArchive accounts. Disabled by default — operator
 // opts in via cfg.AgeBasedRotation=true + at least one Role=ColdArchive account.
 //
-// Reuses migrateOneShard from drain.go (same download/upload/rewrite/save pattern). Difference:
-// source isn't a draining account — it's any account currently holding a shard older than the cutoff.
+// Reuses migrateOneReplica from drain.go (same download/upload/rewrite/save pattern). Difference:
+// source isn't a draining account — it's any account currently holding a replica older than the cutoff.
 // Target pool = only ColdArchive accounts (vs drain's "all-other-active" pool).
 //
-// Idempotent — after migration the shard's Location prefix points to the ColdArchive account,
+// Idempotent — after migration the replica.s Location prefix points to the ColdArchive account,
 // so subsequent passes invisibly skip it (HasPrefix check on the source list excludes ColdArchive).
 package account
 
@@ -21,7 +21,7 @@ import (
 	"github.com/dudenest/dudenest-relay/pkg/types"
 )
 
-// StartAgeRotationLoop runs a sweep every interval and migrates aged shards to ColdArchive accounts.
+// StartAgeRotationLoop runs a sweep every interval and migrates aged replicas to ColdArchive accounts.
 // Disabled unless cfg.AgeBasedRotation=true AND at least one Role=ColdArchive account exists.
 // Default interval 24h. First sweep delayed 5 min after start so other loops (quota/reconcile/drain)
 // run first and don't compete on the same FileMaps.
@@ -34,7 +34,7 @@ func (m *Manager) StartAgeRotationLoop(ctx context.Context, drainer PipelineDrai
 			cfg := m.Policy()
 			if cfg.AgeBasedRotation {
 				if n := m.ageRotateOnePass(drainer, cfg); n > 0 {
-					log.Printf("age-rotation: completed pass — %d shards migrated to ColdArchive", n)
+					log.Printf("age-rotation: completed pass — %d replicas migrated to ColdArchive", n)
 				}
 			}
 			select { case <-ctx.Done(): return; case <-time.After(interval): }
@@ -42,10 +42,10 @@ func (m *Manager) StartAgeRotationLoop(ctx context.Context, drainer PipelineDrai
 	}()
 }
 
-// ageRotateOnePass walks all FileMaps, finds shards older than cfg.AgeRotationDays sitting on
+// ageRotateOnePass walks all FileMaps, finds replicas older than cfg.AgeRotationDays sitting on
 // non-ColdArchive accounts, and migrates each to a ColdArchive target via SelectReplicas.
-// Returns total shards migrated this pass (logged for ops visibility).
-// Idempotent: subsequent passes skip shards already on ColdArchive (excluded from source set).
+// Returns total replicas migrated this pass (logged for ops visibility).
+// Idempotent: subsequent passes skip replicas already on ColdArchive (excluded from source set).
 func (m *Manager) ageRotateOnePass(drainer PipelineDrainer, cfg types.AccountPolicyConfig) int {
 	coldTargets := []*types.CloudAccount{}
 	activeByProviderEmail := map[string]*types.CloudAccount{}

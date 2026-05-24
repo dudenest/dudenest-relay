@@ -134,7 +134,7 @@ func getPipeline() (*pipeline.Pipeline, error) {
 func uploadCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "upload <file>",
-		Short: "Chunk, encrypt, erasure-code or replicate and upload a file",
+		Short: "Upload a file (replicated to N cloud accounts per policy)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p, err := getPipeline()

@@ -30,7 +30,7 @@ type tokenFile struct {
 }
 
 // Provider stores files on Google Drive under a single base folder (default "dudenest" since v0.10.0).
-// Thread-safe: folderCache protected by mu (parallel shard uploads use same Provider).
+// Thread-safe: folderCache protected by mu (parallel replica uploads use same Provider).
 // Legacy "dudenest-relay" base support REMOVED in v0.12.0 — see CHANGELOG.
 type Provider struct {
 	id           string

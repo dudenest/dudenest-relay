@@ -18,13 +18,13 @@ Other answers (Q5 all-files, Q7 per-file pause, Q8 24h auto-rescan default ON) i
 ## Why CloudID-as-Index is actually better
 
 Today (post-P2):
-- `FileMap.Chunks[0].Shards[0].Location = "gdrive:<email>:<relative_path>"`
+- `FileMap.Replicas[0].Location = "gdrive:<email>:<relative_path>"`
 - `gdrive.Provider.Download(path)` walks Drive's folder tree, calls `files.list(q=...)` to resolve the path to a file ID, then fetches by ID.
 - Two API calls per Download (list to find ID, then get).
 - **Fragile**: if user renames/moves the file on Drive directly, our blockmap entry is stale. Next Download → 404.
 
 With CloudID:
-- `FileMap.Chunks[0].Shards[0].CloudID = "1o_qJz-ItwQzmp4rUCyygaZsrRjlBNDa0"` (Drive's permanent file ID)
+- `FileMap.Replicas[0].CloudID = "1o_qJz-ItwQzmp4rUCyygaZsrRjlBNDa0"` (Drive's permanent file ID)
 - `gdrive.Provider.DownloadByID(id)` is `svc.Files.Get(id).Download()` — **one API call**.
 - Renames/moves on Drive side: file ID stays the same → our index keeps working.
 - Path information becomes informational (for UI display, for organizing new uploads) rather than addressing.
@@ -52,10 +52,10 @@ type Entry struct {
     CloudID string    `json:"cloud_id,omitempty"` // NEW — provider's permanent file ID (Drive: 28-char alphanum)
 }
 
-// Add CloudID to Block (Shard):
+// Add CloudID to Replica:
 type Block struct {
     ID       string    `json:"id"`
-    ShardIdx int       `json:"shard"`
+    ReplicaIdx int       `json:"replica_idx"`
     Size     int64     `json:"size"`
     Location string    `json:"location"`           // KEPT for back-compat + debugging
     CloudID  string    `json:"cloud_id,omitempty"` // NEW — primary addressing key; Location becomes fallback
@@ -80,16 +80,16 @@ type CloudIDDownloader interface {
 
 Pipeline.Download logic:
 ```go
-shard := fm.Chunks[0].Shards[0]
-if shard.CloudID != "" {
-    return idProv.DownloadByID(shard.CloudID)
+r := fm.Replicas[0]
+if r.CloudID != "" {
+    return idProv.DownloadByID(r.CloudID)
 }
 // Fallback: legacy path-based
-data, err := p.Download(shard.Location)
+data, err := p.Download(r.Location)
 if err == nil && idProv != nil {
     // Lazy capture: resolve path → ID once, persist for next time
-    if id := p.resolvePathToID(shard.Location); id != "" {
-        shard.CloudID = id
+    if id := p.resolvePathToID(r.Location); id != "" {
+        r.CloudID = id
         bm.Save(fm)
     }
 }
@@ -121,7 +121,7 @@ Two `IMG_0001.JPG` in the same month → both upload to `photos/2026/05/IMG_0001
 - `Name: entry.Name`
 - `Size: entry.Size`
 - `Created: entry.MTime`
-- `Chunks: [{Shards: [{CloudID: entry.CloudID, Location: entry.Path}]}]`
+- `Replicas: [{CloudID: entry.CloudID, Location: entry.Path}]`
 
 **No file is moved or renamed on the cloud side.** User's Drive structure is preserved exactly as they have it.
 
