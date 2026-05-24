@@ -100,6 +100,10 @@ func (a *accountAdmin) handleByID(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "account id required")
 		return
 	}
+	if rest == "refresh-quota" { // s320 hotfix: bulk endpoint matched by trailing-slash mux; route here before parseInt
+		a.handleRefreshQuotaAll(w, r)
+		return
+	}
 	idStr, sub, _ := strings.Cut(rest, "/")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
