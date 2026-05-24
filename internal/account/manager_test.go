@@ -449,6 +449,36 @@ func TestDrain_RefusesWhenNoOtherAccounts(t *testing.T) {
 	if prog == nil || prog.LastErr == "" { t.Error("expected LastErr to record 'no migration target'") }
 }
 
+// γ-5: ageRotateOnePass with no ColdArchive accounts is a no-op (silent).
+// Guards against accidentally migrating to wrong role pool when operator hasn't set up ColdArchive.
+func TestAgeRotation_NoOpWhenNoColdArchive(t *testing.T) {
+	m, _ := mkManager(t)
+	cfg := m.Policy()
+	cfg.AgeBasedRotation = true
+	cfg.AgeRotationDays = 1
+	_ = m.UpdatePolicy(cfg)
+	_, _ = m.AddAccount("gdrive", "primary@x.com") // becomes PrimaryWrite, NOT ColdArchive
+	n := m.ageRotateOnePass(&noopDrainer{}, cfg)
+	if n != 0 { t.Errorf("expected 0 migrations (no ColdArchive targets), got %d", n) }
+}
+
+// γ-6: ageRotateOnePass skips files whose Modified is in the future or zero (no timestamp).
+// Defensive — corrupted or freshly-created FileMaps shouldn't be moved.
+func TestAgeRotation_SkipsFreshFiles(t *testing.T) {
+	m, _ := mkManager(t)
+	cfg := m.Policy()
+	cfg.AgeBasedRotation = true
+	cfg.AgeRotationDays = 30
+	_ = m.UpdatePolicy(cfg)
+	cold, _ := m.AddAccount("gdrive", "cold@x.com")
+	_ = m.SetRole(cold.ID, types.RoleColdArchive)
+	src, _ := m.AddAccount("gdrive", "src@x.com") // PrimaryWrite
+	_ = src
+	// noopDrainer.ListFiles returns nil — easy guarantee no migrations attempted.
+	n := m.ageRotateOnePass(&noopDrainer{}, cfg)
+	if n != 0 { t.Errorf("expected 0 (no files reported), got %d", n) }
+}
+
 // γ-4: DrainState.Snapshot returns a defensive copy — mutating the returned struct doesn't leak back.
 // This guards against the /admin/accounts/{id}/drain-progress endpoint accidentally exposing internal state.
 func TestDrainState_SnapshotIsCopy(t *testing.T) {

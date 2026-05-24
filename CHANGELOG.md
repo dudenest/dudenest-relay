@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.20.2] — 2026-05-24 — Age-based rotation worker (Phase γ continue)
+
+Non-breaking additive. Worker disabled by default (`cfg.AgeBasedRotation=false`) — operator opts in.
+
+### `internal/account/age_rotation.go` (NEW, ~100 LOC)
+
+- `StartAgeRotationLoop(ctx, drainer, interval)` — daily sweep (default 24h interval, 5min initial delay so it doesn't compete with quota poll / reconcile / drain at startup)
+- `ageRotateOnePass(drainer, cfg)`: walk all FileMaps → find shards on non-ColdArchive accounts where `FileMap.Modified` is older than `cfg.AgeRotationDays` → migrate to ColdArchive target via `migrateOneShard` (reused from drain). Returns count of migrated shards for ops logging.
+- Target selection: filters `Role=ColdArchive` accounts with quota headroom (`UsedPercent < HardCapPct`); skips when zero targets exist (silent no-op).
+- Source filter: skips shards already on ColdArchive accounts (idempotent — subsequent passes invisible).
+- Concurrency: shares `cfg.DrainMaxConcurrentMigrations` budget with drain worker (one global semaphore vs two competing).
+- Bandwidth throttle: inherits `cfg.DrainBandwidthLimitMBPerSec` via `migrateOneShard` reuse.
+
+### `cmd/relay/serve.go`
+
+Loop wire-up after `StartDrainLoop`:
+```go
+accMgr.StartAgeRotationLoop(bgCtx, p, 24*time.Hour)
+```
+Startup log updated: `account.Manager: quota poll + reconcile + drain + age-rotation loops started`.
+
+### Tests (`internal/account/manager_test.go`)
+
+- γ-5 `TestAgeRotation_NoOpWhenNoColdArchive`: enables age rotation but has no Role=ColdArchive account → `ageRotateOnePass` returns 0 (defensive — operator misconfig doesn't crash).
+- γ-6 `TestAgeRotation_SkipsFreshFiles`: ColdArchive present + AgeRotationDays=30 + noopDrainer returns no files → `ageRotateOnePass` returns 0 (boundary condition).
+
+### Operator usage
+
+```bash
+# Add a ColdArchive account first (via Flutter UI or PATCH role)
+curl -X PATCH http://localhost:8086/admin/accounts/3 -d '{"role":"cold_archive"}' ...
+
+# Enable age rotation (default 30 days):
+curl -X PATCH http://localhost:8086/admin/policy -d '{"age_based_rotation":true,"age_rotation_days":30}' ...
+
+# Next 24h tick (or relay restart): worker migrates files older than 30 days to ID 003.
+# Watch: journalctl -u dudenest-relay -f | grep age-rotation
+```
+
+---
+
 ## [0.20.1] — 2026-05-24 — drain-progress endpoint + drain DELETE note update
 
 Non-breaking additive. Carry-over from s317 / Phase γ continue.

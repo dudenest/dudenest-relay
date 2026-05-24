@@ -234,8 +234,14 @@ func runServe(cmd *cobra.Command, args []string) error {
 		// or were added in this commit for exactly this purpose.
 		globalDrainState = account.NewDrainState()
 		accMgr.StartDrainLoop(bgCtx, p, globalDrainState, 2*time.Minute)
-		log.Printf("✅ account.Manager: quota poll + reconcile + drain loops started (interval=%dm, soft_cap=%d%%, hard_cap=%d%%, drain_max_concurrent=%d)",
-			accMgr.Policy().QuotaCheckIntervalMin, accMgr.Policy().SoftCapDefaultPct, accMgr.Policy().HardCapDefaultPct, accMgr.Policy().DrainMaxConcurrentMigrations)
+		// Phase γ continue: age-based rotation worker. Daily sweep migrates files older than
+		// cfg.AgeRotationDays from PrimaryWrite/ReplicaWrite accounts to ColdArchive accounts.
+		// No-op until operator sets cfg.AgeBasedRotation=true + adds at least one Role=ColdArchive.
+		// Reuses migrateOneShard from drain — same atomic download+upload+rewrite+persist semantics.
+		accMgr.StartAgeRotationLoop(bgCtx, p, 24*time.Hour)
+		log.Printf("✅ account.Manager: quota poll + reconcile + drain + age-rotation loops started (interval=%dm, soft_cap=%d%%, hard_cap=%d%%, drain_max_concurrent=%d, age_rotation_enabled=%v age_rotation_days=%d)",
+			accMgr.Policy().QuotaCheckIntervalMin, accMgr.Policy().SoftCapDefaultPct, accMgr.Policy().HardCapDefaultPct, accMgr.Policy().DrainMaxConcurrentMigrations,
+			accMgr.Policy().AgeBasedRotation, accMgr.Policy().AgeRotationDays)
 
 		// Phase β admin REST endpoints (wired in full-server section below via mux registration).
 		// Stashed in package var so the route registration in full-server picks them up.
