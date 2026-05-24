@@ -16,6 +16,7 @@ import (
 	"github.com/dudenest/dudenest-relay/internal/blockstore"
 	"github.com/dudenest/dudenest-relay/internal/crypto"
 	"github.com/dudenest/dudenest-relay/internal/erasure"
+	"github.com/dudenest/dudenest-relay/internal/index"
 	"github.com/dudenest/dudenest-relay/pkg/types"
 )
 
@@ -50,6 +51,7 @@ type Pipeline struct {
 	bm      *blockmap.Manager
 	clouds  []types.CloudProvider // multiple providers for Replica strategy
 	accts   *account.Manager      // Phase α: nil → legacy first-2 selection; non-nil → SelectReplicas + policy.PathFor
+	idx     *index.Index          // F1 dedup: nil → no dedup (legacy); non-nil → Upload checks/inserts here
 	chunkSz int
 }
 
@@ -82,6 +84,13 @@ func (p *Pipeline) SetAccountManager(m *account.Manager) {
 	p.accts = m
 }
 
+// SetIndex attaches the F1 sha-256 dedup index. nil = dedup disabled (legacy path).
+// Called from serve.go after Index.Load() + bootstrap from existing FileMaps.
+func (p *Pipeline) SetIndex(i *index.Index) { p.idx = i }
+
+// Index returns the attached dedup index (may be nil). Exposed for admin/ops queries.
+func (p *Pipeline) Index() *index.Index { return p.idx }
+
 // AccountManager returns the currently-attached Manager (may be nil). Exposed so admin
 // endpoints can mutate account policy + accounts without going through serve.go.
 func (p *Pipeline) AccountManager() *account.Manager {
@@ -106,14 +115,38 @@ func (p *Pipeline) findProviderByAccount(a *types.CloudAccount) types.CloudProvi
 // Upload stores a file using the selected strategy.
 // StrategyReplica: stores full file (unencrypted) on 1-2 providers in parallel.
 // StrategyChunking (legacy): Reed-Solomon 6+3 shards, encrypted.
+//
+// F1 dedup short-circuit: if Index is attached and fm.Hash matches an existing canonical entry,
+// returns a FileMap with LogicalAlias=existingFileID + zero Chunks — skipping all cloud I/O.
+// Saves user quota when same content uploaded from multiple devices. Caller checks LogicalAlias
+// before attempting downloads (download path resolves alias by loading target FileMap's Chunks).
 func (p *Pipeline) Upload(filePath string, strategy string) (*types.FileMap, error) {
 	fm, err := blockmap.NewFileMap(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("new filemap: %w", err)
 	}
 	fm.Strategy = strategy
+	// F1: dedup short-circuit (only when Index attached AND hash is present)
+	if p.idx != nil && fm.Hash != "" {
+		if existing := p.idx.Lookup(fm.Hash); existing != "" && existing != fm.FileID {
+			fm.LogicalAlias = existing
+			fm.Chunks = nil // explicit: alias entries have no Chunks (caller resolves via target)
+			if err := p.bm.Save(fm); err != nil { return nil, fmt.Errorf("save alias filemap: %w", err) }
+			if err := p.idx.InsertAlias(fm.Hash, fm.FileID); err != nil {
+				log.Printf("upload: dedup alias inserted but index update failed: %v (filemap saved)", err)
+			}
+			log.Printf("upload: ✅ dedup hit — %s aliased to %s (skipped %d bytes upload)", fm.FileID, existing, fm.Size)
+			return fm, nil
+		}
+	}
 	if strategy == types.StrategyReplica {
-		return p.uploadReplica(fm, filePath)
+		out, err := p.uploadReplica(fm, filePath)
+		if err == nil && p.idx != nil && fm.Hash != "" {
+			if ierr := p.idx.Insert(fm.Hash, fm.FileID); ierr != nil {
+				log.Printf("upload: index insert failed after successful upload: %v (non-fatal)", ierr)
+			}
+		}
+		return out, err
 	}
 	return p.uploadChunking(fm, filePath)
 }

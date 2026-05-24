@@ -41,16 +41,17 @@ type ChunkMeta struct {
 
 // FileMap is the complete block map for a file — stored encrypted on cloud.
 type FileMap struct {
-	Version   int         `json:"version"`   // schema version
-	FileID    string      `json:"file_id"`   // UUID assigned at upload
-	Strategy  string      `json:"strategy"`  // Chunking or Replica
-	Name      string      `json:"name"`      // original filename
-	Size      int64       `json:"size"`      // original file size in bytes
-	Hash      string      `json:"hash"`      // SHA-256 of entire file
-	ChunkSize int         `json:"chunk_size"` // bytes per chunk
-	Chunks    []ChunkMeta `json:"chunks"`
-	Created   time.Time   `json:"created"`
-	Modified  time.Time   `json:"modified"`
+	Version      int         `json:"version"`                 // schema version
+	FileID       string      `json:"file_id"`                 // UUID assigned at upload
+	Strategy     string      `json:"strategy"`                // Chunking or Replica
+	Name         string      `json:"name"`                    // original filename
+	Size         int64       `json:"size"`                    // original file size in bytes
+	Hash         string      `json:"hash"`                    // SHA-256 of entire file
+	ChunkSize    int         `json:"chunk_size"`              // bytes per chunk
+	Chunks       []ChunkMeta `json:"chunks"`
+	Created      time.Time   `json:"created"`
+	Modified     time.Time   `json:"modified"`
+	LogicalAlias string      `json:"logical_alias,omitempty"` // F1 dedup: if non-empty, this FileMap is a pointer to another FileID (target holds Chunks)
 }
 // GDriveToken is persisted to ~/.config/dudenest/providers/gdrive_<id>.json.
 type GDriveToken struct {

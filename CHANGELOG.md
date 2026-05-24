@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.20.4] — 2026-05-24 — F1 duplicate detection (sha-256 dedup index)
+
+Non-breaking additive. Opt-in via Index presence (wired in serve.go by default). Saves significant quota when users replicate same file across devices/accounts.
+
+### `internal/index/sha_index.go` (NEW, ~160 LOC)
+
+JSON-on-disk per-relay content index. Maps `SHA-256(file plaintext)` → `[]Entry{FileID, IsAlias, CreatedAt}`. Persisted to `<configDir>/sha_index.json` with atomic write (tmp + rename). Thread-safe via `sync.RWMutex`. No new dependencies (uses `encoding/json` stdlib).
+
+API:
+- `New(configDir) *Index` + `Load() error` (handles missing file as empty)
+- `Lookup(hash) → fileID` (returns canonical = first non-alias, "" if unknown)
+- `Insert(hash, fileID)` + `InsertAlias(hash, fileID)` — sorted canonical-first, idempotent on duplicate fileID, persists on each call
+- `Stats() (hashes, entries, aliases int)` for ops queries
+- `BootstrapFromList([]struct{FileID, Hash, IsAlias})` — rebuilds from FileMap data, decoupled from pipeline to avoid import cycle
+
+### `pkg/types/types.go`
+
+`FileMap.LogicalAlias string` field added (omitempty) — empty for canonical FileMaps, FileID-of-target for dedup aliases.
+
+### `internal/pipeline/pipeline.go`
+
+`Pipeline.idx *index.Index` field + `SetIndex(i)` / `Index()` accessors.
+
+`Upload()` short-circuit before chunking/replica: if `idx.Lookup(fm.Hash)` returns existing FileID, set `fm.LogicalAlias = existing`, save alias FileMap (zero Chunks), call `idx.InsertAlias(hash, fm.FileID)`. Log: `upload: ✅ dedup hit — <fileID> aliased to <existing> (skipped N bytes upload)`.
+
+On successful canonical upload (no dedup hit): `idx.Insert(fm.Hash, fm.FileID)` registers for future dedup. Index insert failure is logged but not fatal (upload already succeeded).
+
+### `cmd/relay/serve.go`
+
+Wire-up after `p.SetAccountManager(accMgr)`:
+- `shaIdx := index.New(authConfigDir)` (sibling of accounts.json)
+- `shaIdx.Load()` (graceful on missing/corrupt)
+- Bootstrap from existing `p.ListFiles()` → `BootstrapFromList` (handles initial deploy with pre-existing FileMaps)
+- `p.SetIndex(shaIdx)` activates dedup
+- Log: `✅ sha_index attached: N unique hashes, M entries (K aliases) — F1 dedup active`
+
+### Tests (`internal/index/sha_index_test.go`)
+
+8 unit tests:
+- F1-1 `TestInsertAndLookup` — basic roundtrip
+- F1-2 `TestPersistAndLoad` — survives process restart
+- F1-3 `TestInsertIdempotent` — same fileID twice = no-op
+- F1-4 `TestCanonicalPreferredOverAlias` — Lookup prefers canonical even if alias inserted first
+- F1-5 `TestStats` — hashes/entries/aliases counters
+- F1-6 `TestConcurrentInserts` — 50 parallel inserts, mutex correctness
+- F1-7 `TestBootstrapFromList` — rebuild from raw data
+- F1-8 `TestAtomicWrite` — .tmp removed after rename
+
+### Migration / backward-compat
+
+Existing relays: on first start with v0.20.4, serve.go bootstraps index from all known FileMaps (all become canonical since pre-v0.20.4 had no LogicalAlias). After that, any new upload of an already-seen hash skips cloud I/O.
+
+Download path: caller must check `fm.LogicalAlias != ""` and resolve to target FileMap before reading Chunks. (Pipeline.Download / Flutter UI integration deferred to follow-up commit — current PR delivers index + upload path; download path defaults to "no Chunks" error which Flutter UI can handle as "load aliased FileMap by ID".)
+
+### Forward-compat F2 (cross-account dedup)
+
+This commit lays groundwork for F2 (`CloudAccount.LogicalAliasOK` flag, already defined). F2 would let an account explicitly host dedup targets vs source files. Out of scope for v0.20.4.
+
+---
+
 ## [0.20.3] — 2026-05-24 — Bulk refresh-quota endpoint
 
 Non-breaking additive. Quick-win for UI responsiveness — operator doesn't wait 30 min for scheduled quota poll.

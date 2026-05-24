@@ -25,6 +25,7 @@ import (
 	"github.com/dudenest/dudenest-relay/internal/blockmap"
 	"github.com/dudenest/dudenest-relay/internal/browser"
 	"github.com/dudenest/dudenest-relay/internal/config"
+	"github.com/dudenest/dudenest-relay/internal/index"
 	"github.com/dudenest/dudenest-relay/internal/pipeline"
 	"github.com/dudenest/dudenest-relay/internal/register"
 	"github.com/dudenest/dudenest-relay/internal/scan"
@@ -209,6 +210,23 @@ func runServe(cmd *cobra.Command, args []string) error {
 		p.SetAccountManager(accMgr)
 		log.Printf("✅ account.Manager attached: %d accounts, replication_factor=%d, diversity=%v",
 			len(accMgr.ActiveAccounts()), accMgr.Policy().ReplicationFactor, accMgr.Policy().DiversityRequired)
+
+		// F1 sha-256 dedup index — bootstrap from existing FileMaps so dedup works on day 1 after deploy.
+		// Index file lives next to accounts.json. Load tries to read existing; on missing/corrupt we
+		// rebuild from FileMaps. Inserting fm.LogicalAlias="" (canonical) and !="" (alias) is handled
+		// by BootstrapFromList. After this, p.SetIndex makes Upload short-circuit on duplicate hashes.
+		shaIdx := index.New(authConfigDir)
+		if err := shaIdx.Load(); err != nil { log.Printf("⚠️  sha_index load: %v (rebuilding from FileMaps)", err) }
+		if maps, err := p.ListFiles(); err == nil {
+			boot := make([]struct{ FileID, Hash string; IsAlias bool }, 0, len(maps))
+			for _, fm := range maps {
+				boot = append(boot, struct{ FileID, Hash string; IsAlias bool }{fm.FileID, fm.Hash, fm.LogicalAlias != ""})
+			}
+			if err := shaIdx.BootstrapFromList(boot); err != nil { log.Printf("⚠️  sha_index bootstrap: %v", err) }
+		}
+		p.SetIndex(shaIdx)
+		hashCount, entryCount, aliasCount := shaIdx.Stats()
+		log.Printf("✅ sha_index attached: %d unique hashes, %d entries (%d aliases) — F1 dedup active", hashCount, entryCount, aliasCount)
 
 		// Phase β: start quota polling + ReconcileRoles in background. Both honor cancellation
 		// via a server-lifetime context (the relay process exit terminates them).
