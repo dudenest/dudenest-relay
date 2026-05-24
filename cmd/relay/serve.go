@@ -559,9 +559,14 @@ func (fs *fileServer) handleList(w http.ResponseWriter, r *http.Request) {
 		if d.Width == 0 || len(lqipData) == 0 {
 			go fs.lazyGenSidecars(fm.FileID, fm.Name)
 		}
+		// F1 dedup: alias FileMap has no Chunks — derive folder from canonical (one cached lookup).
+		folder := folderFromFileMap(fm)
+		if fm.LogicalAlias != "" && (len(fm.Chunks) == 0 || len(fm.Chunks[0].Shards) == 0) {
+			if canonical, gerr := fs.p.GetFileMap(fm.LogicalAlias); gerr == nil { folder = folderFromFileMap(canonical) }
+		}
 		summaries = append(summaries, fileSummary{
 			FileID: fm.FileID, Name: fm.Name, Size: fm.Size, Hash: fm.Hash, Created: fm.Created,
-			Folder: folderFromFileMap(fm),
+			Folder: folder,
 			Width: d.Width, Height: d.Height, TakenAt: d.TakenAt, LQIP: string(lqipData),
 		})
 	}

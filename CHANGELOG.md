@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.20.5] — 2026-05-24 — F1 alias resolve in Download + handleList
+
+Critical follow-up to v0.20.4. v0.20.4 introduced dedup at upload time but Download + handleList did not resolve aliases — meaning users could upload a duplicate (alias FileMap saved, zero Chunks), then receive a download error when fetching it back. v0.20.5 closes this gap.
+
+### `Pipeline.Download` (`internal/pipeline/pipeline.go`)
+
+If `fm.LogicalAlias != ""`, load the target FileMap (max 1 hop — aliases never chain by design, defensive check returns error if they do) and borrow its `Chunks` + `Strategy`. Verify post-reassemble still uses alias's `Name + Hash + Size` so user sees their own filename.
+
+### `handleList` folder classification (`cmd/relay/serve.go`)
+
+`folderFromFileMap(fm)` returns `FilesFolder` when `fm.Chunks` is empty (default fallback). For alias FileMaps (Chunks empty by design), this incorrectly classified the file as `Files` even if the canonical content was a photo. Fix: when `LogicalAlias != ""` AND chunks empty, look up canonical and call `folderFromFileMap(canonical)`. One extra `GetFileMap` per alias in the list — cheap.
+
+### What was broken in v0.20.4 (pre-v0.20.5)
+
+If user re-uploaded a photo (dedup hit):
+- Upload: ✅ succeeded, returned alias FileMap
+- Photos tab: ❌ photo appeared in Files tab instead (wrong folder classification)
+- Download: ❌ "load filemap: chunks empty" or similar — file unrecoverable from UI
+
+After v0.20.5 fleet adoption (~60s via Phase 0 auto-update): both paths work transparently.
+
+### Tests
+
+Existing 8 F1 unit tests still pass (test the index, not pipeline integration). Integration test: manual via Section G of `dudenest-infra/docs/MANUAL-TESTING.md` (upload same photo twice → verify both visible in Photos tab + both downloadable).
+
+---
+
 ## [0.20.4] — 2026-05-24 — F1 duplicate detection (sha-256 dedup index)
 
 Non-breaking additive. Opt-in via Index presence (wired in serve.go by default). Saves significant quota when users replicate same file across devices/accounts.

@@ -321,6 +321,20 @@ func (p *Pipeline) Download(fileID, outputPath string) error {
 	if err != nil {
 		return fmt.Errorf("load filemap: %w", err)
 	}
+	// F1 dedup: resolve alias by loading target FileMap (max 1 hop — aliases never chain).
+	// Original filename + verify use ALIAS metadata so user sees the file under the name they uploaded;
+	// only Chunks come from canonical (cloud locations).
+	if fm.LogicalAlias != "" {
+		canonical, cerr := p.bm.Load(fm.LogicalAlias)
+		if cerr != nil { return fmt.Errorf("load alias target %s: %w", fm.LogicalAlias, cerr) }
+		if canonical.LogicalAlias != "" {
+			// Defensive: aliases should never chain (Upload only inserts alias to canonical), but guard anyway.
+			return fmt.Errorf("alias chain detected: %s → %s → %s (data integrity issue)", fileID, fm.LogicalAlias, canonical.LogicalAlias)
+		}
+		// Borrow Chunks + Strategy from canonical; keep alias's Name/Hash for Verify post-reassemble.
+		fm.Chunks = canonical.Chunks
+		fm.Strategy = canonical.Strategy
+	}
 	var allChunks [][]byte
 	for _, meta := range fm.Chunks {
 		var chunk []byte
