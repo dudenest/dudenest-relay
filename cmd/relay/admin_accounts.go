@@ -272,7 +272,7 @@ func (a *accountAdmin) handleDrainProgress(w http.ResponseWriter, r *http.Reques
 		"account_id":  id,
 		"role":        string(acct.Role),
 		"status":      string(acct.Status),
-		"in_progress": acct.Role == types.RoleDrain && (snap == nil || snap.ShardsMigrated < snap.ShardsToMigrate),
+		"in_progress": acct.Role == types.RoleDrain && (snap == nil || snap.ReplicasMigrated < snap.ReplicasToMigrate),
 		"snapshot":    snap, // nil before first sweep — Flutter renders "waiting for first sweep"
 	}
 	writeJSON(w, http.StatusOK, resp)

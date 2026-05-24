@@ -1,24 +1,23 @@
 // Phase γ — Drain workflow. When the user removes an account via DELETE /admin/accounts/{id},
 // admin_accounts.go transitions the account to Role=Drain (instead of immediate hard-delete).
-// This file implements the background worker that walks all FileMaps, finds shards living on
-// the draining account, copies them to one of the other still-active accounts (chosen via the
+// This file implements the background worker that walks all FileMaps, finds replicas living on
+// the draining account, copies each one to one of the other still-active accounts (chosen via the
 // same SelectReplicas algorithm — minus the drainee), updates Location, and finally — once
-// every shard has been migrated — transitions the account to Status=Removed.
+// every replica has been migrated — transitions the account to Status=Removed.
 //
 // Design intent:
-//   - Idempotent: re-running mid-migration picks up where it left off (each shard is checked
-//     individually; already-migrated ones skipped).
+//   - Idempotent: re-running mid-migration picks up where it left off (each replica is checked
+//     individually; already-migrated ones skipped via prefix match).
 //   - Throttled: honors cfg.DrainMaxConcurrentMigrations + cfg.DrainBandwidthLimitMBPerSec.
-//   - Resumable: persistent state lives in CRDB (via FileMap.Location updates) — no separate
-//     migration log to lose.
+//   - Resumable: persistent state lives in FileMap.Location updates — no separate migration log.
 //   - Safe under upload pressure: new uploads continue going to non-draining accounts thanks to
 //     SelectReplicas excluding Role=Drain. So we never race "upload to draining account" while
 //     drain is in progress.
 //
-// Out of scope for Phase γ MVP: cross-provider migration (drain a Drive account by copying
-// shards to a MEGA account). Currently best-effort — we use SelectReplicas without diversity
-// override, so if user has only one Drive and one MEGA, draining the Drive may pick MEGA as
-// target (correct behavior) or fail if MEGA is over its file-size cap (logged + retried).
+// Out of scope: cross-provider migration semantics (drain a Drive account by copying replicas to
+// a MEGA account). Currently best-effort — we use SelectReplicas without diversity override, so
+// if user has only one Drive and one MEGA, draining the Drive may pick MEGA as target (correct
+// behavior) or fail if MEGA is over its file-size cap (logged + retried next pass).
 package account
 
 import (
@@ -46,7 +45,7 @@ type PipelineDrainer interface {
 	SaveFileMap(fm *types.FileMap) error
 	// CloudByID looks up a CloudProvider by its CloudProvider.ID(), e.g. "gdrive:user@x.com".
 	// Returns nil if the provider is not loaded. The drain worker uses this to: (a) download
-	// shard data from the draining account, (b) upload to the chosen target account.
+	// replica data from the draining account, (b) upload to the chosen target account.
 	CloudByID(providerID string) types.CloudProvider
 }
 
@@ -54,12 +53,12 @@ type PipelineDrainer interface {
 // Lives in-memory only — restart resumes from where Location pointers stand.
 // Exported so /admin/accounts/{id}/drain-progress can return it as JSON via DrainState.Snapshot.
 type DrainProgress struct {
-	StartedAt        time.Time `json:"started_at"`
-	FileMapsScanned  int       `json:"file_maps_scanned"`
-	ShardsToMigrate  int       `json:"shards_to_migrate"`
-	ShardsMigrated   int       `json:"shards_migrated"`
-	ShardsFailed     int       `json:"shards_failed"`
-	LastErr          string    `json:"last_err,omitempty"`
+	StartedAt         time.Time `json:"started_at"`
+	FileMapsScanned   int       `json:"file_maps_scanned"`
+	ReplicasToMigrate int       `json:"replicas_to_migrate"`
+	ReplicasMigrated  int       `json:"replicas_migrated"`
+	ReplicasFailed    int       `json:"replicas_failed"`
+	LastErr           string    `json:"last_err,omitempty"`
 }
 
 // DrainState exposes per-account progress for /admin/accounts/{id} GET. Thread-safe.
@@ -84,7 +83,7 @@ func (s *DrainState) Snapshot(id int64) *DrainProgress {
 }
 
 // StartDrainLoop runs a sweep every interval and drains every Role=Drain account it finds.
-// Idempotent — if a previous run was interrupted, the next pass picks up remaining shards
+// Idempotent — if a previous run was interrupted, the next pass picks up remaining replicas
 // (those whose Location still references the draining account).
 //
 // One pass blocks until all draining accounts are processed; intervals between passes give
@@ -101,7 +100,7 @@ func (m *Manager) StartDrainLoop(ctx context.Context, drainer PipelineDrainer, s
 		for {
 			drained := m.drainOnePass(drainer, state)
 			if drained > 0 {
-				log.Printf("drain: completed pass — %d accounts had shards remaining", drained)
+				log.Printf("drain: completed pass — %d accounts had replicas remaining", drained)
 			}
 			select {
 			case <-ctx.Done(): return
@@ -111,8 +110,8 @@ func (m *Manager) StartDrainLoop(ctx context.Context, drainer PipelineDrainer, s
 	}()
 }
 
-// drainOnePass walks all accounts with Role=Drain and migrates their shards. Returns the
-// number of accounts touched (with at least one shard remaining at the start of the pass).
+// drainOnePass walks all accounts with Role=Drain and migrates their replicas. Returns the
+// number of accounts touched (with at least one replica remaining at the start of the pass).
 func (m *Manager) drainOnePass(drainer PipelineDrainer, state *DrainState) int {
 	cfg := m.Policy()
 	drains := []*types.CloudAccount{}
@@ -128,13 +127,12 @@ func (m *Manager) drainOnePass(drainer PipelineDrainer, state *DrainState) int {
 	return len(drains)
 }
 
-// drainOneAccount migrates every shard belonging to one draining account. Implementation:
+// drainOneAccount migrates every replica belonging to one draining account. Implementation:
 //  1. Build the "draining" provider ID string ("<provider>:<email>") used as Location prefix.
-//  2. ListFiles, then for each FileMap walk Chunks/Shards looking for ones whose Location
-//     starts with that prefix.
-//  3. For each match: download data from draining provider, choose a new target via
-//     SelectReplicas (with current account temporarily removed from consideration), upload,
-//     rewrite Location + CloudID in place, persist FileMap.
+//  2. ListFiles, then for each FileMap walk Replicas looking for ones whose Location starts with that prefix.
+//  3. For each match: download data from draining provider, choose a new target via SelectReplicas
+//     (with current account temporarily removed from consideration), upload, rewrite Location +
+//     CloudID in place, persist FileMap.
 //  4. When zero matches remain across all FileMaps → transition account to Status=Removed.
 func (m *Manager) drainOneAccount(d *types.CloudAccount, drainer PipelineDrainer, state *DrainState, cfg types.AccountPolicyConfig) {
 	state.mu.Lock()
@@ -176,42 +174,38 @@ func (m *Manager) drainOneAccount(d *types.CloudAccount, drainer PipelineDrainer
 
 	for _, fm := range files {
 		fm := fm
-		for ci := range fm.Chunks {
-			for si := range fm.Chunks[ci].Shards {
-				sh := &fm.Chunks[ci].Shards[si]
-				if !strings.HasPrefix(sh.Location, drainProviderID+":") {
-					continue // shard not on the draining account
-				}
-				remainingAfter++
-				wg.Add(1)
-				sem <- struct{}{}
-				go func(fm *types.FileMap, ci, si int) {
-					defer wg.Done()
-					defer func() { <-sem }()
-					if err := m.migrateOneShard(fm, ci, si, d, otherAccounts, drainer, cfg); err != nil {
-						log.Printf("drain ID%03d: migrate %s shard %d.%d: %v", d.ID, fm.FileID, ci, si, err)
-						muProg.Lock(); prog.ShardsFailed++; prog.LastErr = err.Error(); muProg.Unlock()
-						return
-					}
-					muProg.Lock(); prog.ShardsMigrated++; muProg.Unlock()
-				}(fm, ci, si)
+		for ri := range fm.Replicas {
+			r := &fm.Replicas[ri]
+			if !strings.HasPrefix(r.Location, drainProviderID+":") {
+				continue // replica not on the draining account
 			}
+			remainingAfter++
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(fm *types.FileMap, ri int) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				if err := m.migrateOneReplica(fm, ri, d, otherAccounts, drainer, cfg); err != nil {
+					log.Printf("drain ID%03d: migrate %s replica %d: %v", d.ID, fm.FileID, ri, err)
+					muProg.Lock(); prog.ReplicasFailed++; prog.LastErr = err.Error(); muProg.Unlock()
+					return
+				}
+				muProg.Lock(); prog.ReplicasMigrated++; muProg.Unlock()
+			}(fm, ri)
 		}
 	}
-	prog.ShardsToMigrate = remainingAfter
+	prog.ReplicasToMigrate = remainingAfter
 	wg.Wait()
 
 	// After this pass, if no failures + nothing left → transition to Removed.
-	if prog.ShardsFailed == 0 {
+	if prog.ReplicasFailed == 0 {
 		// Re-scan to confirm — guards against TOCTOU between counting + Wait.
 		files2, err := drainer.ListFiles()
 		if err == nil {
 			stillThere := 0
 			for _, fm := range files2 {
-				for _, c := range fm.Chunks {
-					for _, sh := range c.Shards {
-						if strings.HasPrefix(sh.Location, drainProviderID+":") { stillThere++ }
-					}
+				for _, r := range fm.Replicas {
+					if strings.HasPrefix(r.Location, drainProviderID+":") { stillThere++ }
 				}
 			}
 			if stillThere == 0 {
@@ -227,21 +221,21 @@ func (m *Manager) drainOneAccount(d *types.CloudAccount, drainer PipelineDrainer
 				}
 				_ = m.savelocked()
 				m.mu.Unlock()
-				log.Printf("✅ drain ID%03d done: %d shards migrated, account marked Removed (audit-retained)", d.ID, prog.ShardsMigrated)
+				log.Printf("✅ drain ID%03d done: %d replicas migrated, account marked Removed (audit-retained)", d.ID, prog.ReplicasMigrated)
 			}
 		}
 	}
 }
 
-// migrateOneShard performs the actual download+upload+rewrite for a single shard.
+// migrateOneReplica performs the actual download+upload+rewrite for a single replica.
 // Honors bandwidth throttling via cfg.DrainBandwidthLimitMBPerSec (if > 0, sleep proportional
-// to bytes transferred before completing — keeps shard atomic but caps overall throughput).
-func (m *Manager) migrateOneShard(
-	fm *types.FileMap, ci, si int,
+// to bytes transferred before completing — keeps each migration atomic but caps overall throughput).
+func (m *Manager) migrateOneReplica(
+	fm *types.FileMap, ri int,
 	d *types.CloudAccount, otherAccounts []*types.CloudAccount,
 	drainer PipelineDrainer, cfg types.AccountPolicyConfig,
 ) error {
-	sh := &fm.Chunks[ci].Shards[si]
+	r := &fm.Replicas[ri]
 	// Source provider lookup
 	srcID := d.Provider + ":" + d.Email
 	src := drainer.CloudByID(srcID)
@@ -249,18 +243,18 @@ func (m *Manager) migrateOneShard(
 		return fmt.Errorf("source provider %s not loaded", srcID)
 	}
 	// Path = everything after "<provider>:<email>:"
-	parts := strings.SplitN(sh.Location, ":", 3)
+	parts := strings.SplitN(r.Location, ":", 3)
 	if len(parts) != 3 {
-		return fmt.Errorf("malformed Location %q", sh.Location)
+		return fmt.Errorf("malformed Location %q", r.Location)
 	}
 	srcPath := parts[2]
 
 	// Download. Prefer CloudIDDownloader if we have an ID — survives renames on cloud side.
 	var data []byte
 	var err error
-	if sh.CloudID != "" {
+	if r.CloudID != "" {
 		if idd, ok := src.(types.CloudIDDownloader); ok {
-			data, err = idd.DownloadByID(sh.CloudID)
+			data, err = idd.DownloadByID(r.CloudID)
 		}
 	}
 	if data == nil {
@@ -271,7 +265,6 @@ func (m *Manager) migrateOneShard(
 	}
 
 	// Pick target via SelectReplicas with file size + content type from path inference.
-	// Content type: derive from "/photos/" or "/files/" in path.
 	contentType := types.FilesFolder
 	if strings.Contains(srcPath, "/"+types.PhotosFolder+"/") || strings.Contains(srcPath, ":"+types.PhotosFolder+"/") {
 		contentType = types.PhotosFolder
@@ -280,19 +273,16 @@ func (m *Manager) migrateOneShard(
 	if err != nil {
 		return fmt.Errorf("select target: %w", err)
 	}
-	// Use the highest-priority chosen as the single migration target — we're replacing one
-	// replica, not creating multiple.
+	// Use the highest-priority chosen as the single migration target — we're replacing one replica, not creating multiple.
 	target := chosen[0]
 	dst := drainer.CloudByID(target.Provider + ":" + target.Email)
 	if dst == nil {
 		return fmt.Errorf("target provider %s:%s not loaded", target.Provider, target.Email)
 	}
 
-	// Build dest path: keep filename + use same folder layout as a fresh upload.
-	// We re-derive folder + when from path (last segment = filename, parent dirs = layout).
-	// For Phase γ MVP this just reuses the existing path so the Drive structure remains the same.
+	// Build dest path: keep filename + use same folder layout as the source for now.
 	// (Future: re-bucket if PathScheme changed since original upload.)
-	destPath := srcPath // simple: same relative path, on the new provider's base folder
+	destPath := srcPath
 	var newCloudID string
 	if u, ok := dst.(types.CloudIDUploader); ok {
 		newCloudID, err = u.UploadAndReturnID(destPath, data)
@@ -303,33 +293,32 @@ func (m *Manager) migrateOneShard(
 		return fmt.Errorf("upload to target: %w", err)
 	}
 
-	// Rewrite shard Location + CloudID, persist FileMap.
+	// Rewrite replica Location + CloudID, persist FileMap.
 	newLocation := fmt.Sprintf("%s:%s", dst.ID(), destPath)
 	// Re-load FileMap before saving to merge with any concurrent meta edits.
-	fresh, err := drainer.GetFileMap(fm.FileID)
-	if err == nil {
+	fresh, gerr := drainer.GetFileMap(fm.FileID)
+	if gerr == nil {
 		fm = fresh
-		// re-find the matching shard (indices may have shifted if FileMap changed — unlikely but defensive)
-		if ci < len(fm.Chunks) && si < len(fm.Chunks[ci].Shards) {
-			sh = &fm.Chunks[ci].Shards[si]
-			if !strings.HasPrefix(sh.Location, srcID+":") {
-				// Concurrent update already migrated this shard — bail.
+		if ri < len(fm.Replicas) {
+			r = &fm.Replicas[ri]
+			if !strings.HasPrefix(r.Location, srcID+":") {
+				// Concurrent update already migrated this replica — bail.
 				return nil
 			}
 		}
 	}
-	sh.Location = newLocation
-	if newCloudID != "" { sh.CloudID = newCloudID }
-	sh.Created = time.Now().UTC()
+	r.Location = newLocation
+	if newCloudID != "" { r.CloudID = newCloudID }
+	r.Created = time.Now().UTC()
 	if err := drainer.SaveFileMap(fm); err != nil {
 		return fmt.Errorf("save updated filemap: %w", err)
 	}
 
-	// Best-effort: remove the source shard from the draining account. Failure here is non-fatal —
+	// Best-effort: remove the source copy from the draining account. Failure here is non-fatal —
 	// the data has been replicated successfully; orphan cleanup happens via the scan engine.
-	if sh.CloudID != "" {
+	if r.CloudID != "" {
 		if idd, ok := src.(types.CloudIDDownloader); ok {
-			_ = idd.DeleteByID(sh.CloudID)
+			_ = idd.DeleteByID(r.CloudID)
 		}
 	}
 	_ = src.Delete(srcPath)

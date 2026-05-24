@@ -10,7 +10,7 @@ import (
 // PathRoot prefix (default "dudenest/") caused new uploads to be misclassified as Files
 // in the Flutter UI even though their cloud-side path was dudenest/photos/2026/05/foo.jpg.
 //
-// The Location format produced by uploadReplica is:
+// The Location format produced by upload is:
 //
 //	"<provider_id>:<path>"
 //
@@ -58,9 +58,7 @@ func TestFolderFromFileMap(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fm := &types.FileMap{
-				Chunks: []types.ChunkMeta{{
-					Shards: []types.Block{{Location: tc.location}},
-				}},
+				Replicas: []types.Replica{{Location: tc.location}},
 			}
 			if got := folderFromFileMap(fm); got != tc.want {
 				t.Errorf("location=%q: got %q, want %q", tc.location, got, tc.want)
@@ -76,10 +74,9 @@ func TestFolderFromFileMap_EmptyOrInvalid(t *testing.T) {
 		name string
 		fm   *types.FileMap
 	}{
-		{"no chunks", &types.FileMap{}},
-		{"chunks without shards", &types.FileMap{Chunks: []types.ChunkMeta{{}}}},
-		{"empty location", &types.FileMap{Chunks: []types.ChunkMeta{{Shards: []types.Block{{Location: ""}}}}}},
-		{"non-recognizable", &types.FileMap{Chunks: []types.ChunkMeta{{Shards: []types.Block{{Location: "weird-format-no-colons-no-slashes"}}}}}},
+		{"no replicas", &types.FileMap{}},
+		{"empty location", &types.FileMap{Replicas: []types.Replica{{Location: ""}}}},
+		{"non-recognizable", &types.FileMap{Replicas: []types.Replica{{Location: "weird-format-no-colons-no-slashes"}}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

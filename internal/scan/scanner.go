@@ -264,8 +264,8 @@ func (s *Scanner) runScan(providerID string, prov types.CloudProvider, lister ty
 	maps, _ := s.pipeline.ListFiles()
 	known := make(map[string]bool, 1024)
 	for _, fm := range maps {
-		for _, c := range fm.Chunks {
-			for _, b := range c.Shards { if b.CloudID != "" { known[b.CloudID] = true } }
+		for _, r := range fm.Replicas {
+			if r.CloudID != "" { known[r.CloudID] = true }
 		}
 	}
 	// Start at the configured base folder root (prefix="").

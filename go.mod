@@ -8,7 +8,6 @@ require (
 	github.com/chromedp/chromedp v0.13.6
 	github.com/gobwas/ws v1.4.0
 	github.com/google/uuid v1.6.0
-	github.com/klauspost/reedsolomon v1.12.1
 	github.com/spf13/cobra v1.8.1
 	github.com/t3rm1n4l/go-mega v0.0.0-20251120131202-6845944c051c
 	github.com/tyler-smith/go-bip39 v1.1.0
@@ -33,7 +32,6 @@ require (
 	github.com/googleapis/enterprise-certificate-proxy v0.3.6 // indirect
 	github.com/googleapis/gax-go/v2 v2.14.1 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/klauspost/cpuid/v2 v2.2.7 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.60.0 // indirect

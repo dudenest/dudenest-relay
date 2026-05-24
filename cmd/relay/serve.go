@@ -367,12 +367,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 // fileServer handles /files/* endpoints using the pipeline.
 type fileServer struct {
 	p interface {
-		Upload(filePath string, strategy string) (*types.FileMap, error)
+		Upload(filePath string) (*types.FileMap, error)
 		Download(fileID, outputPath string) error
 		ListFiles() ([]*types.FileMap, error)
 		GetFileMap(fileID string) (*types.FileMap, error)
 		DeleteFile(fileID string) error
-		MoveFile(fileID, newDir string) error  // P5b: re-bucket a file when its TakenAtOverride changes; no data transfer
+		MoveFile(fileID, newDir string) error  // re-bucket a file when its TakenAtOverride changes; no data transfer
 		AccountManager() *account.Manager      // Phase α (v0.17.2+): may return nil for CLI/test paths; handleMeta uses it to read PathRoot policy when computing MoveFile destination directory
 	}
 	thumbCache     *thumbnail.Cache
@@ -514,8 +514,8 @@ func (fs *fileServer) writeDims(fileID string, d thumbnail.Dims) {
 // Default "files" preserves the pre-v0.11.0 behavior where everything was under files/ regardless
 // of content type — the Flutter side may further re-classify by extension as a secondary signal.
 func folderFromFileMap(fm *types.FileMap) string {
-	if len(fm.Chunks) == 0 || len(fm.Chunks[0].Shards) == 0 { return types.FilesFolder }
-	loc := fm.Chunks[0].Shards[0].Location // "<provider>:<email>:<relative_path>"
+	if len(fm.Replicas) == 0 { return types.FilesFolder }
+	loc := fm.Replicas[0].Location // "<provider>:<email>:<relative_path>"
 	if strings.Contains(loc, "/"+types.PhotosFolder+"/") { return types.PhotosFolder } // new format with PathRoot
 	if strings.Contains(loc, ":"+types.PhotosFolder+"/") { return types.PhotosFolder } // legacy format without PathRoot
 	return types.FilesFolder
@@ -559,9 +559,9 @@ func (fs *fileServer) handleList(w http.ResponseWriter, r *http.Request) {
 		if d.Width == 0 || len(lqipData) == 0 {
 			go fs.lazyGenSidecars(fm.FileID, fm.Name)
 		}
-		// F1 dedup: alias FileMap has no Chunks — derive folder from canonical (one cached lookup).
+		// F1 dedup: alias FileMap has no Replicas — derive folder from canonical (one cached lookup).
 		folder := folderFromFileMap(fm)
-		if fm.LogicalAlias != "" && (len(fm.Chunks) == 0 || len(fm.Chunks[0].Shards) == 0) {
+		if fm.LogicalAlias != "" && len(fm.Replicas) == 0 {
 			if canonical, gerr := fs.p.GetFileMap(fm.LogicalAlias); gerr == nil { folder = folderFromFileMap(canonical) }
 		}
 		summaries = append(summaries, fileSummary{
@@ -636,8 +636,8 @@ func (fs *fileServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tmp.Close()
-	strategy := r.FormValue("strategy")
-	if strategy == "" { strategy = types.StrategyReplica } // default: replica (full file, no encryption)
+	// strategy form field is accepted for backward compat but ignored — single storage model since v0.21.0.
+	_ = r.FormValue("strategy")
 	// HEIC/HEIF conversion: convert to JPEG before upload so all clients can display the file.
 	ext := strings.ToLower(filepath.Ext(header.Filename))
 	if ext == ".heic" || ext == ".heif" || ext == ".hif" {
@@ -651,7 +651,7 @@ func (fs *fileServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 			log.Printf("⚠️  HEIC conversion: %v (uploading as-is)", err2)
 		}
 	}
-	fm, err := fs.p.Upload(tmpPath, strategy)
+	fm, err := fs.p.Upload(tmpPath)
 	if err != nil {
 		jsonErr(w, "upload: "+err.Error(), 500)
 		return
@@ -690,8 +690,7 @@ func (fs *fileServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 		"name":     header.Filename,
 		"size":     fm.Size,
 		"hash":     fm.Hash,
-		"strategy": fm.Strategy,
-		"chunks":   len(fm.Chunks),
+		"replicas": len(fm.Replicas),
 	})
 }
 
@@ -974,14 +973,14 @@ func (fs *fileServer) handleMeta(w http.ResponseWriter, r *http.Request, fileID 
 		if patch.TakenAtOverride != prev.TakenAtOverride && patch.TakenAtOverride != "" {
 			if t, perr := time.Parse(time.RFC3339, patch.TakenAtOverride); perr == nil {
 				fm, gerr := fs.p.GetFileMap(fileID)
-				if gerr == nil && len(fm.Chunks) > 0 && len(fm.Chunks[0].Shards) > 0 {
+				if gerr == nil && len(fm.Replicas) > 0 {
 					// Derive top folder (photos|files) from existing Location.
 					// Three location formats are recognized (matches folderFromFileMap):
 					//   v0.17.2+ Phase α:   "gdrive:<email>:dudenest/photos/2026/05/foo.jpg"
 					//   v0.11.0..v0.17.1:   "gdrive:<email>:photos/2026/05/foo.jpg"
 					//   pre-v0.11.0 legacy: "gdrive:<email>:files/<hash>/0/0"
 					// Scan for /<folder>/ (PathRoot present) or :<folder>/ (no PathRoot).
-					loc := fm.Chunks[0].Shards[0].Location
+					loc := fm.Replicas[0].Location
 					top := types.FilesFolder
 					for _, fold := range []string{types.PhotosFolder, types.FilesFolder} {
 						if strings.Contains(loc, "/"+fold+"/") || strings.Contains(loc, ":"+fold+"/") {

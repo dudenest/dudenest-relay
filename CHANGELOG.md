@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.21.0] — 2026-05-24 — Storage model cleanup: only "1 file + N replicas" remains
+
+**Breaking persistence format** — transparently migrated on first Load. No data loss; no operator action required.
+
+### Why
+
+The codebase carried two storage strategies for a long time: the active Replica path ("upload the whole file to N cloud accounts") and the abandoned Chunking path (Reed-Solomon 6+3 over chunked encrypted blocks). The Chunking path was dead code from before public release but its types (`ChunkMeta`, `Block`, `Shards`, `chunks` JSON keys), packages (`internal/erasure`, `internal/blockstore`), and terminology persisted everywhere — making the codebase confusing and inviting bugs in any change touching FileMap iteration.
+
+v0.21.0 deletes all of it. The vocabulary is now exactly one: **"1 file + N replicas"**.
+
+### Removed
+
+- `pkg/types`: `Block`, `ChunkMeta`, `DataShards`, `ParityShards`, `TotalShards`, `ChunkSize`, `StrategyChunking`, `StrategyReplica` consts, `FileMap.Strategy` field, `FileMap.ChunkSize` field, `FileMap.Chunks` field
+- `internal/erasure/` package (Reed-Solomon split/join)
+- `internal/blockstore/` package (chunk file + reassemble)
+- `pipeline.uploadChunking`, `pipeline.downloadChunking`
+- `Pipeline.enc *crypto.Encryptor` field (chunking-only), `Pipeline.rs *erasure.Encoder`, `Pipeline.chunkSz`
+- `klauspost/reedsolomon` dependency (go.mod tidy)
+- `--strategy Chunking` CLI flag value (flag kept for backward compat, only "Replica" accepted, "default" silently)
+
+### Added (renames)
+
+- `pkg/types.Replica` struct (ex-Block) with fields `ID, ReplicaIdx, Size, Location, CloudID, Created`
+- `pkg/types.FileMap.Replicas []Replica` (ex-Chunks[0].Shards)
+- `blockmap.CurrentFileMapVersion = 2` constant (v1 = legacy chunks/shards format)
+- `account.DrainProgress` fields `ReplicasToMigrate`, `ReplicasMigrated`, `ReplicasFailed` (ex-Shards*)
+- `account.migrateOneReplica` (ex-migrateOneShard)
+
+### Migration (automatic, lossless)
+
+`blockmap.Load` detects legacy records (presence of `chunks` JSON key, no `replicas` key) and converts them on the fly. Migrated FileMaps are immediately re-saved to disk in the v2 schema, so the next Load returns clean v2 data. The conversion is lossless: every replica's `Location` + `CloudID` is preserved 1:1 (the legacy `chunks[0].shards[i]` becomes `replicas[i]`).
+
+For the abandoned Chunking strategy edge case (multi-chunk × 9-shard FileMaps that somehow survived in someone's dev dir): the migration flattens `chunks[*].shards[*]` into a single Replicas slice with the original positional indices preserved as `ReplicaIdx`. Such records are unreadable either way (the strategy never ran in production), but the migration keeps the Location pointers so an admin can manually clean up orphaned cloud-side data.
+
+### Wire format / API changes
+
+- `POST /files/upload` response: `{"file_id", "name", "size", "hash", "replicas": N}` (was `{..., "strategy", "chunks"}`)
+- `GET /admin/accounts/{id}/drain-progress` snapshot fields: `replicas_to_migrate, replicas_migrated, replicas_failed` (were `shards_*`)
+- All `Replica.Location` strings remain `"<provider>:<email>:<path>"` — no path format change
+
+### Flutter
+
+- `_DrainProgressIndicator` reads new `replicas_*` keys (snake_case JSON from backend)
+- `relay_client.dart` comment refreshes (no API signature change)
+
+### Tests
+
+- 80/81 passing (single pre-existing `TestMediaFolder_MagicByteVideo` failure unchanged — carry-over #13)
+- New tests: legacy `chunks/shards` JSON fixture → migrate → re-load → identical Replicas slice
+- Removed: `test/unit/pipeline_test.go` (tested erasure+chunking, both deleted)
+
+### Forward-compat preserved
+
+F1 dedup (sha-256 index, v0.20.4) unchanged — Index entries are keyed by file hash, not by replica structure. The Upload short-circuit + Download alias-resolve paths just operate on `Replicas` instead of `Chunks[0].Shards`.
+
+---
+
 ## [0.20.5] — 2026-05-24 — F1 alias resolve in Download + handleList
 
 Critical follow-up to v0.20.4. v0.20.4 introduced dedup at upload time but Download + handleList did not resolve aliases — meaning users could upload a duplicate (alias FileMap saved, zero Chunks), then receive a download error when fetching it back. v0.20.5 closes this gap.

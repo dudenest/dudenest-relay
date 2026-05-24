@@ -54,7 +54,9 @@ func main() {
 	root.PersistentFlags().StringVar(&gdriveTokenPath, "gdrive-token", "", "path to gdrive_<id>.json token file")
 	root.PersistentFlags().StringVar(&gdriveSecretPath, "gdrive-secret", "/root/.config/dudenest/gdrive_client_secret.json", "path to client_secret.json")
 	root.PersistentFlags().StringVar(&gdriveBasePath, "gdrive-path", "dudenest", "Google Drive base folder name (v0.10.0+ default; legacy 'dudenest-relay' folders are read-aliased — see PHOTOS-FILES-REDESIGN.md §1.2)")
-	root.PersistentFlags().StringVar(&uploadStrategy, "strategy", types.StrategyChunking, "upload strategy: Chunking, Replica")
+	// uploadStrategy flag is now ignored — the only strategy is "1 file + N replicas". Kept for
+	// backward CLI compatibility (existing operator scripts pass --strategy). v0.21.0+.
+	root.PersistentFlags().StringVar(&uploadStrategy, "strategy", "Replica", "DEPRECATED: only Replica is supported")
 
 	root.Version = Version
 	authCmd := &cobra.Command{Use: "auth", Short: "Authenticate cloud provider accounts"}
@@ -140,20 +142,15 @@ func uploadCmd() *cobra.Command {
 				return err
 			}
 			start := time.Now()
-			fm, err := p.Upload(args[0], uploadStrategy)
+			fm, err := p.Upload(args[0])
 			if err != nil {
 				return fmt.Errorf("upload failed: %w", err)
 			}
 			elapsed := time.Since(start)
-			fmt.Printf("✅ Uploaded: %s (strategy: %s)\n", fm.Name, fm.Strategy)
+			fmt.Printf("✅ Uploaded: %s\n", fm.Name)
 			fmt.Printf("   File ID:  %s\n", fm.FileID)
 			fmt.Printf("   Size:     %d bytes (%.1f MB)\n", fm.Size, float64(fm.Size)/1024/1024)
-			fmt.Printf("   Chunks:   %d × %.0fMB\n", len(fm.Chunks), float64(fm.ChunkSize)/1024/1024)
-			if fm.Strategy == types.StrategyReplica {
-				fmt.Printf("   Replicas: 3 (1 main + 2 backups)\n")
-			} else {
-				fmt.Printf("   Shards:   %d per chunk (6 data + 3 parity)\n", 9)
-			}
+			fmt.Printf("   Replicas: %d (1 file replicated to %d cloud accounts)\n", len(fm.Replicas), len(fm.Replicas))
 			fmt.Printf("   SHA-256:  %s\n", fm.Hash)
 			fmt.Printf("   Time:     %s (%.1f MB/s)\n", elapsed, float64(fm.Size)/elapsed.Seconds()/1024/1024)
 			return nil
@@ -202,8 +199,7 @@ func infoCmd() *cobra.Command {
 				fmt.Printf("Cloud path: %s\n", cloudPath)
 			}
 			fmt.Printf("Map store:  %s\n", storePath)
-			fmt.Printf("Chunk size: 8 MB\n")
-			fmt.Printf("Strategies: Chunking (6+3 RS), Replica (1+2)\n")
+			fmt.Printf("Storage:    1 file + N replicas (per account.SelectReplicas policy)\n")
 			return nil
 		},
 	}
@@ -219,9 +215,9 @@ func benchCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Benchmarking %s (strategy: %s)...\n", args[0], uploadStrategy)
+			fmt.Printf("Benchmarking %s ...\n", args[0])
 			start := time.Now()
-			fm, err := p.Upload(args[0], uploadStrategy)
+			fm, err := p.Upload(args[0])
 			if err != nil {
 				return err
 			}
@@ -238,8 +234,7 @@ func benchCmd() *cobra.Command {
 			fmt.Printf("   File size:     %.1f MB\n", size)
 			fmt.Printf("   Upload:        %s (%.1f MB/s)\n", uploadTime, size/uploadTime.Seconds())
 			fmt.Printf("   Download:      %s (%.1f MB/s)\n", downloadTime, size/downloadTime.Seconds())
-			fmt.Printf("   Strategy:      %s\n", fm.Strategy)
-			fmt.Printf("   Chunks:        %d\n", len(fm.Chunks))
+			fmt.Printf("   Replicas:      %d\n", len(fm.Replicas))
 			return nil
 		},
 	}

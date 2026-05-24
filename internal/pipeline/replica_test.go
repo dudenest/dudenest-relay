@@ -49,7 +49,7 @@ func TestReplicaStrategy(t *testing.T) {
 	tmpFile := t.TempDir() + "/test-replica.txt"
 	os.WriteFile(tmpFile, content, 0600) //nolint:errcheck
 
-	fm, err := p.Upload(tmpFile, types.StrategyReplica)
+	fm, err := p.Upload(tmpFile)
 	if err != nil {
 		t.Fatalf("Upload failed: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestReplicaRoutesByContentType(t *testing.T) {
 	// Image upload — PNG magic bytes — must land under "photos/<hash>/..." in MockCloud.storage
 	imgPath := tmp + "/photo.png"
 	os.WriteFile(imgPath, append(pngHeader, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05), 0o600) //nolint:errcheck
-	imgFM, err := p.Upload(imgPath, types.StrategyReplica)
+	imgFM, err := p.Upload(imgPath)
 	if err != nil { t.Fatalf("image Upload: %v", err) }
 	foundImgPath := ""
 	for k := range c.storage {
@@ -103,7 +103,7 @@ func TestReplicaRoutesByContentType(t *testing.T) {
 	// Non-media upload — text — must land under "files/<hash>/..."
 	docPath := tmp + "/note.txt"
 	os.WriteFile(docPath, []byte("just text"), 0o600) //nolint:errcheck
-	if _, err := p.Upload(docPath, types.StrategyReplica); err != nil { t.Fatalf("text Upload: %v", err) }
+	if _, err := p.Upload(docPath); err != nil { t.Fatalf("text Upload: %v", err) }
 	foundDocPath := ""
 	for k := range c.storage {
 		if bytes.HasPrefix([]byte(k), []byte("files/")) { foundDocPath = k; break }
@@ -130,7 +130,7 @@ func TestReplicaSingleProvider(t *testing.T) {
 	tmpFile := t.TempDir() + "/single.txt"
 	os.WriteFile(tmpFile, content, 0600) //nolint:errcheck
 
-	fm, err := p.Upload(tmpFile, types.StrategyReplica)
+	fm, err := p.Upload(tmpFile)
 	if err != nil {
 		t.Fatalf("Upload with 1 provider failed: %v", err)
 	}

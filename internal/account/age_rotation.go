@@ -71,25 +71,23 @@ func (m *Manager) ageRotateOnePass(drainer PipelineDrainer, cfg types.AccountPol
 	sem := make(chan struct{}, max1(cfg.DrainMaxConcurrentMigrations)) // shared concurrency budget w/ drain
 	for _, fm := range files {
 		if fm.Modified.IsZero() || fm.Modified.After(cutoff) { continue } // not old enough or no timestamp
-		for ci := range fm.Chunks {
-			for si := range fm.Chunks[ci].Shards {
-				sh := &fm.Chunks[ci].Shards[si]
-				parts := strings.SplitN(sh.Location, ":", 3)
-				if len(parts) != 3 { continue } // malformed Location, skip silently
-				src, ok := activeByProviderEmail[parts[0]+":"+parts[1]]
-				if !ok || src.Role == types.RoleColdArchive { continue } // unknown source OR already cold
-				wg.Add(1); sem <- struct{}{}
-				fmCopy, ciCopy, siCopy, srcCopy := fm, ci, si, src
-				go func() {
-					fm, ci, si, src := fmCopy, ciCopy, siCopy, srcCopy
-					defer wg.Done(); defer func() { <-sem }()
-					if err := m.migrateOneShard(fm, ci, si, src, coldTargets, drainer, cfg); err != nil {
-						log.Printf("age-rotation: %s shard %d.%d → ColdArchive: %v", fm.FileID, ci, si, err)
-						return
-					}
-					mu.Lock(); migrated++; mu.Unlock()
-				}()
-			}
+		for ri := range fm.Replicas {
+			r := &fm.Replicas[ri]
+			parts := strings.SplitN(r.Location, ":", 3)
+			if len(parts) != 3 { continue } // malformed Location, skip silently
+			src, ok := activeByProviderEmail[parts[0]+":"+parts[1]]
+			if !ok || src.Role == types.RoleColdArchive { continue } // unknown source OR already cold
+			wg.Add(1); sem <- struct{}{}
+			fmCopy, riCopy, srcCopy := fm, ri, src
+			go func() {
+				fm, ri, src := fmCopy, riCopy, srcCopy
+				defer wg.Done(); defer func() { <-sem }()
+				if err := m.migrateOneReplica(fm, ri, src, coldTargets, drainer, cfg); err != nil {
+					log.Printf("age-rotation: %s replica %d → ColdArchive: %v", fm.FileID, ri, err)
+					return
+				}
+				mu.Lock(); migrated++; mu.Unlock()
+			}()
 		}
 	}
 	wg.Wait()

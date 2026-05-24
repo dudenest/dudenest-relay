@@ -1,4 +1,20 @@
-// Package pipeline orchestrates chunk → encrypt → erasure-code → upload and reverse.
+// Package pipeline orchestrates the upload/download lifecycle for files stored by the relay.
+//
+// Storage model (the only one — there is no other):
+//   - Every file is stored as a single whole on N independent cloud accounts (one file → N replicas).
+//   - account.SelectReplicas (policy: Priority / FreeBytes / Diversity / quota gates) picks which N.
+//   - FileMap.Replicas records where each copy lives.
+//   - Download fetches from the first available replica; FileMap.Hash verifies integrity.
+//   - No file splitting, no erasure coding, no encryption-at-rest (relay's RELAY_KEY only encrypts
+//     the backup blob sent to the hub, not the user files on their own cloud accounts).
+//
+// F1 dedup: before uploading, the SHA-256 of the file is looked up in the per-relay index. If a
+// canonical FileMap with the same hash already exists, the new FileMap is saved as a LogicalAlias
+// pointer with no replicas — zero cloud I/O happens. Download resolves aliases transparently.
+//
+// Historical note: pre-v0.21.0 the codebase carried legacy Reed-Solomon "chunking" structures
+// (FileMap.Chunks/Shards, internal/erasure, internal/blockstore). v0.21.0 deletes all of that —
+// every record is migrated to the Replica-only schema on first load (see blockmap.unmarshalWithMigration).
 package pipeline
 
 import (
@@ -13,19 +29,16 @@ import (
 
 	"github.com/dudenest/dudenest-relay/internal/account"
 	"github.com/dudenest/dudenest-relay/internal/blockmap"
-	"github.com/dudenest/dudenest-relay/internal/blockstore"
-	"github.com/dudenest/dudenest-relay/internal/crypto"
-	"github.com/dudenest/dudenest-relay/internal/erasure"
 	"github.com/dudenest/dudenest-relay/internal/index"
 	"github.com/dudenest/dudenest-relay/pkg/types"
 )
 
-// mediaFolder picks the cloud-side folder for a replica upload based on content type.
+// mediaFolder picks the cloud-side folder for an upload based on content type.
 // Primary detection: net/http.DetectContentType (magic-byte sniff of first 512B).
 // Fallback: file extension when DetectContentType returns the generic "application/octet-stream"
 // — covers HEIC/HEIF (Apple iPhone photos), MOV (legacy QuickTime), MKV, and common RAW formats
 // that Go's stdlib doesn't have signatures for. Anything not media goes to FilesFolder.
-// Decoupled from uploadReplica so it can be unit-tested in isolation.
+// Decoupled from upload so it can be unit-tested in isolation.
 func mediaFolder(name string, data []byte) string {
 	n := 512
 	if len(data) < n { n = len(data) }
@@ -44,205 +57,106 @@ func mediaFolder(name string, data []byte) string {
 	return types.FilesFolder
 }
 
-// Pipeline ties together all relay components.
+// Pipeline ties together blockmap (FileMap persistence), the configured cloud providers,
+// the account.Manager (replica selection policy), and the F1 dedup index.
 type Pipeline struct {
-	enc     *crypto.Encryptor
-	rs      *erasure.Encoder
-	bm      *blockmap.Manager
-	clouds  []types.CloudProvider // multiple providers for Replica strategy
-	accts   *account.Manager      // Phase α: nil → legacy first-2 selection; non-nil → SelectReplicas + policy.PathFor
-	idx     *index.Index          // F1 dedup: nil → no dedup (legacy); non-nil → Upload checks/inserts here
-	chunkSz int
+	bm     *blockmap.Manager
+	clouds []types.CloudProvider // cloud accounts the relay can write to
+	accts  *account.Manager      // nil → legacy first-2-in-slice fallback (only used by tests)
+	idx    *index.Index          // nil → dedup disabled (only used by tests)
 }
 
-// New creates a pipeline with a master key and cloud providers. accts may be nil — when nil,
-// uploads fall back to the legacy "first 2 providers in slice" behavior (kept for tests +
-// migration period). Production startup (cmd/relay/serve.go) always passes a real Manager.
-func New(masterKey []byte, clouds []types.CloudProvider, mapStorePath string, accts *account.Manager) (*Pipeline, error) {
-	enc, err := crypto.New(masterKey)
-	if err != nil {
-		return nil, fmt.Errorf("crypto init: %w", err)
-	}
-	rs, err := erasure.New()
-	if err != nil {
-		return nil, fmt.Errorf("erasure init: %w", err)
-	}
+// New creates a pipeline with cloud providers + an account.Manager (may be nil for legacy/test paths).
+// masterKey is reserved for the backup client's encryption; pipeline itself does no crypto.
+// Production startup wires accts + idx via SetAccountManager + SetIndex after construction.
+func New(_ []byte, clouds []types.CloudProvider, mapStorePath string, accts *account.Manager) (*Pipeline, error) {
 	return &Pipeline{
-		enc:     enc,
-		rs:      rs,
-		bm:      blockmap.New(mapStorePath),
-		clouds:  clouds,
-		accts:   accts,
-		chunkSz: types.ChunkSize,
+		bm:     blockmap.New(mapStorePath),
+		clouds: clouds,
+		accts:  accts,
 	}, nil
 }
 
 // SetAccountManager attaches/replaces the account.Manager used for replica selection.
-// Idempotent — safe to call multiple times. nil = revert to legacy "first 2 in slice" path.
-// Used by cmd/relay/serve.go to wire the long-lived Manager after pipeline construction.
-func (p *Pipeline) SetAccountManager(m *account.Manager) {
-	p.accts = m
-}
+// nil = legacy "first 2 providers in slice" fallback (tests only).
+func (p *Pipeline) SetAccountManager(m *account.Manager) { p.accts = m }
 
-// SetIndex attaches the F1 sha-256 dedup index. nil = dedup disabled (legacy path).
-// Called from serve.go after Index.Load() + bootstrap from existing FileMaps.
+// AccountManager returns the currently-attached Manager (may be nil).
+func (p *Pipeline) AccountManager() *account.Manager { return p.accts }
+
+// SetIndex attaches the F1 sha-256 dedup index. nil = dedup disabled.
 func (p *Pipeline) SetIndex(i *index.Index) { p.idx = i }
 
-// Index returns the attached dedup index (may be nil). Exposed for admin/ops queries.
+// Index returns the attached dedup index (may be nil).
 func (p *Pipeline) Index() *index.Index { return p.idx }
-
-// AccountManager returns the currently-attached Manager (may be nil). Exposed so admin
-// endpoints can mutate account policy + accounts without going through serve.go.
-func (p *Pipeline) AccountManager() *account.Manager {
-	return p.accts
-}
 
 // findProviderByAccount maps a CloudAccount → the CloudProvider that handles its uploads.
 // Match is on CloudProvider.ID() == "<provider>:<email>" (the format factory.go uses).
-// Returns nil if no provider is loaded for that account (e.g. account exists but its
-// gdrive_<email>.json was removed) — SelectReplicas already filtered for Active so this
-// should be rare; we log and skip the upload to that account.
+// Returns nil if no provider is loaded for that account.
 func (p *Pipeline) findProviderByAccount(a *types.CloudAccount) types.CloudProvider {
 	want := a.Provider + ":" + a.Email
 	for _, c := range p.clouds {
-		if c.ID() == want {
-			return c
-		}
+		if c.ID() == want { return c }
 	}
 	return nil
 }
 
-// Upload stores a file using the selected strategy.
-// StrategyReplica: stores full file (unencrypted) on 1-2 providers in parallel.
-// StrategyChunking (legacy): Reed-Solomon 6+3 shards, encrypted.
-//
+// Upload stores a file by writing it whole to N replicas chosen by account.SelectReplicas.
 // F1 dedup short-circuit: if Index is attached and fm.Hash matches an existing canonical entry,
-// returns a FileMap with LogicalAlias=existingFileID + zero Chunks — skipping all cloud I/O.
-// Saves user quota when same content uploaded from multiple devices. Caller checks LogicalAlias
-// before attempting downloads (download path resolves alias by loading target FileMap's Chunks).
-func (p *Pipeline) Upload(filePath string, strategy string) (*types.FileMap, error) {
+// returns a FileMap with LogicalAlias=existingFileID + empty Replicas — skipping all cloud I/O.
+// Saves user quota when same content is uploaded from multiple devices. Download resolves aliases
+// transparently via the canonical FileMap's Replicas.
+func (p *Pipeline) Upload(filePath string) (*types.FileMap, error) {
 	fm, err := blockmap.NewFileMap(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("new filemap: %w", err)
-	}
-	fm.Strategy = strategy
-	// F1: dedup short-circuit (only when Index attached AND hash is present)
+	if err != nil { return nil, fmt.Errorf("new filemap: %w", err) }
+	// F1 dedup short-circuit
 	if p.idx != nil && fm.Hash != "" {
 		if existing := p.idx.Lookup(fm.Hash); existing != "" && existing != fm.FileID {
 			fm.LogicalAlias = existing
-			fm.Chunks = nil // explicit: alias entries have no Chunks (caller resolves via target)
+			fm.Replicas = nil // alias FileMaps own no copies
 			if err := p.bm.Save(fm); err != nil { return nil, fmt.Errorf("save alias filemap: %w", err) }
 			if err := p.idx.InsertAlias(fm.Hash, fm.FileID); err != nil {
-				log.Printf("upload: dedup alias inserted but index update failed: %v (filemap saved)", err)
+				log.Printf("upload: dedup alias saved but index update failed: %v (filemap persisted)", err)
 			}
 			log.Printf("upload: ✅ dedup hit — %s aliased to %s (skipped %d bytes upload)", fm.FileID, existing, fm.Size)
 			return fm, nil
 		}
 	}
-	if strategy == types.StrategyReplica {
-		out, err := p.uploadReplica(fm, filePath)
-		if err == nil && p.idx != nil && fm.Hash != "" {
-			if ierr := p.idx.Insert(fm.Hash, fm.FileID); ierr != nil {
-				log.Printf("upload: index insert failed after successful upload: %v (non-fatal)", ierr)
-			}
+	out, err := p.uploadReplicas(fm, filePath)
+	if err == nil && p.idx != nil && fm.Hash != "" {
+		if ierr := p.idx.Insert(fm.Hash, fm.FileID); ierr != nil {
+			log.Printf("upload: index insert failed after successful upload: %v (non-fatal)", ierr)
 		}
-		return out, err
 	}
-	return p.uploadChunking(fm, filePath)
+	return out, err
 }
 
-func (p *Pipeline) uploadChunking(fm *types.FileMap, filePath string) (*types.FileMap, error) {
-	metas, chunks, err := blockstore.ChunkFile(filePath, p.chunkSz)
-	if err != nil {
-		return nil, fmt.Errorf("chunk: %w", err)
-	}
-	cloud := p.clouds[0] // Default to first cloud for legacy chunking
-	for i, chunk := range chunks {
-		shards, err := p.rs.Split(chunk)
-		if err != nil {
-			return nil, fmt.Errorf("chunk %d split: %w", i, err)
-		}
-		meta := &metas[i]
-		blocks := make([]types.Block, len(shards))
-		errs := make([]error, len(shards))
-		var wg sync.WaitGroup
-		for j, shard := range shards {
-			wg.Add(1)
-			go func(j int, shard []byte) {
-				defer wg.Done()
-				blockID := fmt.Sprintf("%s.%d.%d", fm.FileID, i, j)
-				encrypted, encErr := p.enc.Encrypt(blockID, shard)
-				if encErr != nil {
-					errs[j] = fmt.Errorf("encrypt chunk %d shard %d: %w", i, j, encErr)
-					return
-				}
-				cloudPath := fmt.Sprintf("blocks/%s/%d/%d", meta.Hash[:8], i, j)
-				if upErr := cloud.Upload(cloudPath, encrypted); upErr != nil {
-					errs[j] = fmt.Errorf("upload chunk %d shard %d: %w", i, j, upErr)
-					return
-				}
-				blocks[j] = types.Block{
-					ID: blockID, ShardIdx: j, Size: int64(len(encrypted)),
-					Location: fmt.Sprintf("%s:%s", cloud.ID(), cloudPath), Created: time.Now().UTC(),
-				}
-			}(j, shard)
-		}
-		wg.Wait()
-		for _, e := range errs {
-			if e != nil {
-				return nil, e
-			}
-		}
-		meta.Shards = blocks
-		fm.Chunks = append(fm.Chunks, metas[i])
-	}
-	if err := p.bm.Save(fm); err != nil {
-		return nil, fmt.Errorf("save filemap: %w", err)
-	}
-	return fm, nil
-}
-
-// uploadReplica stores the full file (unencrypted) on the providers chosen by
-// account.SelectReplicas. Phase α (s313): replaces the previous hardcoded "first 2 in slice"
-// behavior with a policy-driven choice (Priority / FreeBytes / Diversity / quota gates).
-// No chunking, no erasure coding — files are stored as-is for direct streaming.
-func (p *Pipeline) uploadReplica(fm *types.FileMap, filePath string) (*types.FileMap, error) {
-	if len(p.clouds) == 0 {
-		return nil, fmt.Errorf("no cloud providers available")
-	}
+// uploadReplicas writes the whole file to the N accounts chosen by SelectReplicas.
+// No chunking, no erasure coding, no encryption — bytes go to the cloud as-is.
+func (p *Pipeline) uploadReplicas(fm *types.FileMap, filePath string) (*types.FileMap, error) {
+	if len(p.clouds) == 0 { return nil, fmt.Errorf("no cloud providers available") }
 	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("read file: %w", err)
-	}
-	folder := mediaFolder(fm.Name, data) // P2: photos/ for media, files/ for everything else
+	if err != nil { return nil, fmt.Errorf("read file: %w", err) }
+	folder := mediaFolder(fm.Name, data) // photos/ for media, files/ for everything else
 	when := time.Now().UTC()
-	if !fm.Created.IsZero() {
-		when = fm.Created.UTC()
-	}
+	if !fm.Created.IsZero() { when = fm.Created.UTC() }
 
-	// Resolve which providers to write to.
-	// Phase α path: account.Manager + SelectReplicas drives the choice (policy-aware).
-	// Legacy fallback (accts==nil): keep the historical "first 2 in slice" behavior so
-	// existing tests don't break and so we can deploy the package incrementally.
 	type pick struct {
-		cloud   types.CloudProvider
-		accID   int64 // 0 in legacy mode
-		path    string
+		cloud types.CloudProvider
+		accID int64 // 0 in legacy mode
+		path  string
 	}
 	var picks []pick
 	if p.accts != nil {
 		cfg := p.accts.Policy()
 		all := p.accts.ActiveAccounts()
 		chosen, err := account.SelectReplicas(account.FileMeta{Size: int64(len(data)), ContentType: folder}, all, cfg)
-		if err != nil {
-			return nil, fmt.Errorf("select replicas: %w", err)
-		}
-		// Translate cloud path via the configured PathScheme.
+		if err != nil { return nil, fmt.Errorf("select replicas: %w", err) }
 		path := cfg.PathFor(folder, fm.Name, when)
 		for _, a := range chosen {
 			cloud := p.findProviderByAccount(a)
 			if cloud == nil {
-				log.Printf("uploadReplica: no provider loaded for account %s (provider=%s email=%s) — skip", a.DisplayID(), a.Provider, a.Email)
+				log.Printf("upload: no provider loaded for account %s (provider=%s email=%s) — skip", a.DisplayID(), a.Provider, a.Email)
 				continue
 			}
 			picks = append(picks, pick{cloud: cloud, accID: a.ID, path: path})
@@ -250,24 +164,20 @@ func (p *Pipeline) uploadReplica(fm *types.FileMap, filePath string) (*types.Fil
 		if len(picks) == 0 {
 			return nil, fmt.Errorf("select replicas returned %d accounts but none have a loaded provider", len(chosen))
 		}
-		// Inform caller if policy chose fewer than requested (e.g. only 1 account exists + AllowSingleReplicaWithWarning).
 		if len(picks) < cfg.ReplicationFactor {
-			log.Printf("uploadReplica: degraded redundancy — picked %d of %d requested replicas (policy.AllowSingleReplicaWithWarning may be true)", len(picks), cfg.ReplicationFactor)
+			log.Printf("upload: degraded redundancy — picked %d of %d requested replicas (policy.AllowSingleReplicaWithWarning may be true)", len(picks), cfg.ReplicationFactor)
 		}
 	} else {
-		// Legacy fallback for tests / cmd/relay paths that haven't been wired with account.Manager yet.
+		// Legacy fallback for tests / CLI paths where account.Manager isn't wired.
 		limit := 2
-		if len(p.clouds) < limit {
-			limit = len(p.clouds)
-		}
+		if len(p.clouds) < limit { limit = len(p.clouds) }
 		legacyPath := fmt.Sprintf("%s/%04d/%02d/%s", folder, when.Year(), int(when.Month()), fm.Name)
 		for j := 0; j < limit; j++ {
 			picks = append(picks, pick{cloud: p.clouds[j], path: legacyPath})
 		}
 	}
 
-	chunk := types.ChunkMeta{Index: 0, Offset: 0, Size: int64(len(data)), Hash: fm.Hash}
-	blocks := make([]types.Block, len(picks))
+	replicas := make([]types.Replica, len(picks))
 	errs := make([]error, len(picks))
 	var wg sync.WaitGroup
 	for j, pk := range picks {
@@ -281,123 +191,62 @@ func (p *Pipeline) uploadReplica(fm *types.FileMap, filePath string) (*types.Fil
 			} else {
 				upErr = pk.cloud.Upload(pk.path, data)
 			}
-			if upErr != nil {
-				errs[j] = upErr
-				return
-			}
-			blocks[j] = types.Block{
-				ID:       fmt.Sprintf("%s.r%d", fm.FileID, j),
-				ShardIdx: j,
-				Size:     int64(len(data)),
-				Location: fmt.Sprintf("%s:%s", pk.cloud.ID(), pk.path),
-				CloudID:  cloudID, // P5a: empty when provider doesn't implement CloudIDUploader; pipeline.Download then uses Location lookup
-				Created:  time.Now().UTC(),
+			if upErr != nil { errs[j] = upErr; return }
+			replicas[j] = types.Replica{
+				ID:         fmt.Sprintf("%s.r%d", fm.FileID, j),
+				ReplicaIdx: j,
+				Size:       int64(len(data)),
+				Location:   fmt.Sprintf("%s:%s", pk.cloud.ID(), pk.path),
+				CloudID:    cloudID, // empty when provider doesn't implement CloudIDUploader; Download falls back to Location
+				Created:    time.Now().UTC(),
 			}
 		}(j, pk)
 	}
 	wg.Wait()
-	var goodBlocks []types.Block
-	for _, b := range blocks {
-		if b.ID != "" {
-			goodBlocks = append(goodBlocks, b)
-		}
+	var good []types.Replica
+	for _, r := range replicas {
+		if r.ID != "" { good = append(good, r) }
 	}
-	if len(goodBlocks) == 0 {
-		return nil, fmt.Errorf("all replicas failed: %v", errs[0])
-	}
-	chunk.Shards = goodBlocks
-	fm.Chunks = []types.ChunkMeta{chunk}
-	if err := p.bm.Save(fm); err != nil {
-		return nil, fmt.Errorf("save filemap: %w", err)
-	}
+	if len(good) == 0 { return nil, fmt.Errorf("all replicas failed: %v", errs[0]) }
+	fm.Replicas = good
+	if err := p.bm.Save(fm); err != nil { return nil, fmt.Errorf("save filemap: %w", err) }
 	return fm, nil
 }
 
-// Download retrieves and reassembles a file from its FileMap.
-// Replica strategy: returns raw bytes (unencrypted).
-// Chunking strategy (legacy): decrypts and Reed-Solomon reconstructs.
+// Download fetches a file from any available replica and writes it to outputPath.
+// Verifies Hash after reassembly. F1: resolves LogicalAlias by loading the canonical FileMap and
+// borrowing its Replicas — user-visible Name + Hash stay from the alias (the original upload).
 func (p *Pipeline) Download(fileID, outputPath string) error {
 	fm, err := p.bm.Load(fileID)
-	if err != nil {
-		return fmt.Errorf("load filemap: %w", err)
-	}
-	// F1 dedup: resolve alias by loading target FileMap (max 1 hop — aliases never chain).
-	// Original filename + verify use ALIAS metadata so user sees the file under the name they uploaded;
-	// only Chunks come from canonical (cloud locations).
+	if err != nil { return fmt.Errorf("load filemap: %w", err) }
 	if fm.LogicalAlias != "" {
 		canonical, cerr := p.bm.Load(fm.LogicalAlias)
 		if cerr != nil { return fmt.Errorf("load alias target %s: %w", fm.LogicalAlias, cerr) }
 		if canonical.LogicalAlias != "" {
-			// Defensive: aliases should never chain (Upload only inserts alias to canonical), but guard anyway.
 			return fmt.Errorf("alias chain detected: %s → %s → %s (data integrity issue)", fileID, fm.LogicalAlias, canonical.LogicalAlias)
 		}
-		// Borrow Chunks + Strategy from canonical; keep alias's Name/Hash for Verify post-reassemble.
-		fm.Chunks = canonical.Chunks
-		fm.Strategy = canonical.Strategy
+		fm.Replicas = canonical.Replicas
 	}
-	var allChunks [][]byte
-	for _, meta := range fm.Chunks {
-		var chunk []byte
-		if fm.Strategy == types.StrategyReplica {
-			chunk, err = p.downloadReplica(meta) // unencrypted
-		} else {
-			chunk, err = p.downloadChunking(meta) // legacy encrypted
-		}
-		if err != nil {
-			return fmt.Errorf("chunk %d: %w", meta.Index, err)
-		}
-		allChunks = append(allChunks, chunk)
-	}
-	if err := blockstore.ReassembleFile(outputPath, allChunks); err != nil {
-		return fmt.Errorf("reassemble: %w", err)
-	}
+	if len(fm.Replicas) == 0 { return fmt.Errorf("no replicas recorded for %s", fileID) }
+	data, err := p.downloadFromAnyReplica(fm.Replicas)
+	if err != nil { return fmt.Errorf("download: %w", err) }
+	if err := os.WriteFile(outputPath, data, 0o600); err != nil { return fmt.Errorf("write output: %w", err) }
 	return blockmap.Verify(outputPath, fm)
 }
 
-func (p *Pipeline) downloadChunking(meta types.ChunkMeta) ([]byte, error) {
-	shards := make([][]byte, types.TotalShards)
-	var wg sync.WaitGroup
-	for _, block := range meta.Shards {
-		wg.Add(1)
-		go func(block types.Block) {
-			defer wg.Done()
-			cloud := p.getCloudByName(block.Location)
-			if cloud == nil {
-				return
-			}
-			data, dlErr := cloud.Download(parseCloudPath(block.Location))
-			if dlErr != nil {
-				return
-			}
-			plain, decErr := p.enc.Decrypt(block.ID, data)
-			if decErr == nil {
-				shards[block.ShardIdx] = plain
-			}
-		}(block)
-	}
-	wg.Wait()
-	return p.rs.Join(shards, int(meta.Size))
-}
-
-// downloadReplica downloads the first available unencrypted replica.
-// P5a addressing priority per block: (1) Block.CloudID via DownloadByID — one Drive API call,
-// survives user-side renames. (2) fallback to Location-based Download (parseCloudPath +
-// Provider.Download) for pre-P5a entries without CloudID.
-func (p *Pipeline) downloadReplica(meta types.ChunkMeta) ([]byte, error) {
+// downloadFromAnyReplica tries each replica in order. Prefers CloudID lookup (survives cloud-side
+// rename/move); falls back to Location-based Download. Returns the first successful read.
+func (p *Pipeline) downloadFromAnyReplica(replicas []types.Replica) ([]byte, error) {
 	var lastErr error
-	for _, block := range meta.Shards {
-		cloud := p.getCloudByName(block.Location)
+	for _, r := range replicas {
+		cloud := p.getCloudByLocation(r.Location)
 		if cloud == nil { continue }
-		if block.CloudID != "" {
+		if r.CloudID != "" {
 			if idd, ok := cloud.(types.CloudIDDownloader); ok {
-				data, dlErr := idd.DownloadByID(block.CloudID)
-				if dlErr == nil { return data, nil }
-				lastErr = dlErr // fall through to path-based as last resort
+				if data, dlErr := idd.DownloadByID(r.CloudID); dlErr == nil { return data, nil } else { lastErr = dlErr }
 			}
 		}
-		data, dlErr := cloud.Download(parseCloudPath(block.Location))
-		if dlErr != nil { lastErr = dlErr; continue }
-		return data, nil // raw bytes, no decryption
+		if data, dlErr := cloud.Download(parseCloudPath(r.Location)); dlErr == nil { return data, nil } else { lastErr = dlErr }
 	}
 	return nil, fmt.Errorf("all replicas unavailable: %v", lastErr)
 }
@@ -405,14 +254,12 @@ func (p *Pipeline) downloadReplica(meta types.ChunkMeta) ([]byte, error) {
 // GetFileMap returns a specific FileMap by ID from local storage.
 func (p *Pipeline) GetFileMap(fileID string) (*types.FileMap, error) { return p.bm.Load(fileID) }
 
-// SaveFileMap persists an externally-mutated FileMap. Used by the drain worker to rewrite
-// Shard.Location after migrating data to a different account. Atomic via the underlying
-// blockmap.Manager (tmp+rename).
+// SaveFileMap persists an externally-mutated FileMap. Used by the drain + age-rotation workers
+// to rewrite Replica.Location after migrating data to a different account.
 func (p *Pipeline) SaveFileMap(fm *types.FileMap) error { return p.bm.Save(fm) }
 
 // CloudByID looks up a CloudProvider by its ID() string ("gdrive:user@x.com"). Returns nil
-// if no provider with that ID is loaded. Used by the drain worker so it can act on arbitrary
-// accounts without holding a *account.CloudAccount → *types.CloudProvider map of its own.
+// if no provider with that ID is loaded.
 func (p *Pipeline) CloudByID(providerID string) types.CloudProvider {
 	for _, c := range p.clouds {
 		if c.ID() == providerID { return c }
@@ -423,97 +270,84 @@ func (p *Pipeline) CloudByID(providerID string) types.CloudProvider {
 // ListFiles returns all uploaded FileMaps from local storage.
 func (p *Pipeline) ListFiles() ([]*types.FileMap, error) { return p.bm.List() }
 
-// DeleteFile removes all cloud blocks for a file and its local FileMap.
-// P5a addressing priority per block: DeleteByID first (one API call, ID-stable), Location fallback.
+// DeleteFile removes every replica from its cloud provider and deletes the local FileMap entry.
+// Per-replica addressing priority: DeleteByID first (one API call, ID-stable), Location fallback.
 func (p *Pipeline) DeleteFile(fileID string) error {
 	fm, err := p.bm.Load(fileID)
 	if err != nil { return fmt.Errorf("load filemap: %w", err) }
 	var firstErr error
-	for _, meta := range fm.Chunks {
-		for _, block := range meta.Shards {
-			cloud := p.getCloudByName(block.Location)
-			if cloud == nil { continue }
-			var dErr error
-			if block.CloudID != "" {
-				if idd, ok := cloud.(types.CloudIDDownloader); ok { dErr = idd.DeleteByID(block.CloudID) }
-			}
-			if block.CloudID == "" || dErr != nil { // path-based fallback
-				if e := cloud.Delete(parseCloudPath(block.Location)); e != nil { dErr = e }
-			}
-			if dErr != nil && firstErr == nil { firstErr = fmt.Errorf("delete block %s: %w", block.ID, dErr) }
+	for _, r := range fm.Replicas {
+		cloud := p.getCloudByLocation(r.Location)
+		if cloud == nil { continue }
+		var dErr error
+		if r.CloudID != "" {
+			if idd, ok := cloud.(types.CloudIDDownloader); ok { dErr = idd.DeleteByID(r.CloudID) }
 		}
+		if r.CloudID == "" || dErr != nil { // path-based fallback
+			if e := cloud.Delete(parseCloudPath(r.Location)); e != nil { dErr = e }
+		}
+		if dErr != nil && firstErr == nil { firstErr = fmt.Errorf("delete replica %s: %w", r.ID, dErr) }
 	}
 	return firstErr
 }
 
-// RegisterForeign creates a new FileMap with Strategy=Foreign pointing at an existing file
-// in a cloud provider (discovered by the scan engine). The cloud file is NOT touched — we
-// just record its existence in our index so it shows up in /files. Download uses CloudID,
-// no decryption happens (Foreign means user-uploaded, not encrypted by us).
-//
-// fileID is generated from CloudID (deterministic dedup — re-registering the same CloudID
-// twice produces the same FileMap entry, idempotent for repeated scans).
+// RegisterForeign creates a FileMap with Strategy=Foreign pointing at an existing cloud file
+// (discovered by the scan engine). We never touched the bytes — we only record their location so
+// they show up in /files. Download uses CloudID. fileID is derived from CloudID for idempotency
+// across re-scans.
 func (p *Pipeline) RegisterForeign(providerID, cloudID, name, path string, size int64, mtime time.Time) error {
 	if cloudID == "" { return fmt.Errorf("cloudID required") }
 	fileID := "foreign-" + cloudID // deterministic; safe across re-scans
 	fm := &types.FileMap{
-		Version:  1,
+		Version:  blockmap.CurrentFileMapVersion,
 		FileID:   fileID,
-		Strategy: types.StrategyForeign,
 		Name:     name,
 		Size:     size,
 		Created:  mtime,
 		Modified: mtime,
-		Chunks: []types.ChunkMeta{{
-			Index: 0, Offset: 0, Size: size,
-			Shards: []types.Block{{
-				ID: fileID + ".0", ShardIdx: 0, Size: size,
-				Location: providerID + ":" + path,
-				CloudID:  cloudID,
-				Created:  time.Now().UTC(),
-			}},
+		Replicas: []types.Replica{{
+			ID:         fileID + ".r0",
+			ReplicaIdx: 0,
+			Size:       size,
+			Location:   providerID + ":" + path,
+			CloudID:    cloudID,
+			Created:    time.Now().UTC(),
 		}},
 	}
 	return p.bm.Save(fm)
 }
 
 // MoveFile relocates every replica of a file to a new folder on its cloud provider, using
-// CloudMover.MoveByID (one Drive API call per shard, no data transfer). Block.CloudID stays
-// the same after the move — Drive's file ID is permanent. Block.Location is rewritten to
+// CloudMover.MoveByID (one Drive API call per replica, no data transfer). Replica.CloudID stays
+// the same after the move — Drive's file ID is permanent. Replica.Location is rewritten to
 // reflect the new path so legacy path-based access still works.
 //
-// newDir is the folder path RELATIVE to the provider's base folder, e.g. "photos/2026/05".
+// newDir is the folder path RELATIVE to the provider's base folder (e.g. "photos/2026/05").
 // The leaf filename is preserved from the existing Location.
 //
-// Skips shards where: (a) Block.CloudID is empty (path-only legacy entry — needs backfill
-// first), or (b) the matching provider doesn't implement CloudMover. Returns the first
-// error encountered but continues attempting the rest; FileMap is saved only if at least
-// one shard moved successfully (atomicity isn't guaranteed across multi-replica moves —
-// out-of-sync replicas are recovered on next download attempt).
+// Skips replicas where: (a) CloudID is empty (path-only legacy entry — needs backfill first),
+// or (b) the provider doesn't implement CloudMover. Returns the first error but continues with
+// the rest; FileMap is saved only if at least one replica moved successfully.
 func (p *Pipeline) MoveFile(fileID, newDir string) error {
 	fm, err := p.bm.Load(fileID)
 	if err != nil { return fmt.Errorf("load: %w", err) }
 	var firstErr error
 	anyMoved := false
-	for ci, meta := range fm.Chunks {
-		for si, block := range meta.Shards {
-			cloud := p.getCloudByName(block.Location)
-			if cloud == nil { continue }
-			if block.CloudID == "" { continue }
-			mover, ok := cloud.(types.CloudMover)
-			if !ok { continue }
-			if mErr := mover.MoveByID(block.CloudID, newDir); mErr != nil {
-				if firstErr == nil { firstErr = fmt.Errorf("move shard %d/%d: %w", ci, si, mErr) }
-				continue
-			}
-			// Rewrite Location: "<provider>:<newDir>/<filename>"
-			parts := strings.SplitN(block.Location, ":", 2)
-			if len(parts) == 2 {
-				oldPath := parts[1]
-				leaf := filepath.Base(oldPath)
-				fm.Chunks[ci].Shards[si].Location = parts[0] + ":" + newDir + "/" + leaf
-				anyMoved = true
-			}
+	for i, r := range fm.Replicas {
+		cloud := p.getCloudByLocation(r.Location)
+		if cloud == nil { continue }
+		if r.CloudID == "" { continue }
+		mover, ok := cloud.(types.CloudMover)
+		if !ok { continue }
+		if mErr := mover.MoveByID(r.CloudID, newDir); mErr != nil {
+			if firstErr == nil { firstErr = fmt.Errorf("move replica %d: %w", i, mErr) }
+			continue
+		}
+		parts := strings.SplitN(r.Location, ":", 2)
+		if len(parts) == 2 {
+			leaf := filepath.Base(parts[1])
+			fm.Replicas[i].Location = parts[0] + ":" + newDir + "/" + leaf
+			anyMoved = true
 		}
 	}
 	if anyMoved {
@@ -522,15 +356,11 @@ func (p *Pipeline) MoveFile(fileID, newDir string) error {
 	return firstErr
 }
 
-// BackfillCloudIDs walks every FileMap in the blockmap and, for each Block missing CloudID,
-// asks the corresponding provider's CloudIDResolver to translate the Block.Location path
-// into the permanent file ID, then persists the FileMap. Idempotent; safe to run repeatedly.
-// Called at relay startup (proactive backfill, user decision 2026-05-20) so legacy entries get
-// migrated to ID-based addressing within minutes of v0.17.0 deploy.
-//
-// Returns counts so the caller can log a summary. Errors per FileMap are logged but don't abort
-// the whole pass — one missing/renamed file shouldn't stop migration of the rest.
+// BackfillCloudIDs walks every FileMap and, for each Replica missing CloudID, asks the
+// corresponding provider's CloudIDResolver to translate the Location path into the permanent
+// file ID, then persists the FileMap. Idempotent.
 type BackfillStats struct{ Scanned, Backfilled, Skipped, Errors int }
+
 func (p *Pipeline) BackfillCloudIDs() (BackfillStats, error) {
 	var stats BackfillStats
 	maps, err := p.bm.List()
@@ -538,18 +368,16 @@ func (p *Pipeline) BackfillCloudIDs() (BackfillStats, error) {
 	for _, fm := range maps {
 		stats.Scanned++
 		changed := false
-		for ci, meta := range fm.Chunks {
-			for si, block := range meta.Shards {
-				if block.CloudID != "" { continue }
-				cloud := p.getCloudByName(block.Location)
-				if cloud == nil { stats.Skipped++; continue }
-				resolver, ok := cloud.(types.CloudIDResolver)
-				if !ok { stats.Skipped++; continue }
-				id, rErr := resolver.ResolvePathToID(parseCloudPath(block.Location))
-				if rErr != nil { stats.Errors++; continue }
-				fm.Chunks[ci].Shards[si].CloudID = id
-				changed = true
-			}
+		for i, r := range fm.Replicas {
+			if r.CloudID != "" { continue }
+			cloud := p.getCloudByLocation(r.Location)
+			if cloud == nil { stats.Skipped++; continue }
+			resolver, ok := cloud.(types.CloudIDResolver)
+			if !ok { stats.Skipped++; continue }
+			id, rErr := resolver.ResolvePathToID(parseCloudPath(r.Location))
+			if rErr != nil { stats.Errors++; continue }
+			fm.Replicas[i].CloudID = id
+			changed = true
 		}
 		if changed {
 			if sErr := p.bm.Save(fm); sErr != nil { stats.Errors++; continue }
@@ -559,43 +387,30 @@ func (p *Pipeline) BackfillCloudIDs() (BackfillStats, error) {
 	return stats, nil
 }
 
-// getCloudByName resolves a block location to its cloud provider.
-// Handles two location formats:
-//   - new: "gdrive:email@domain.com:path/to/file"  (3 parts)
-//   - legacy: "gdrive:blocks/hash/chunk/shard"      (2 parts, no email)
-func (p *Pipeline) getCloudByName(location string) types.CloudProvider {
+// getCloudByLocation resolves a Replica.Location string to its cloud provider.
+// Location format: "<provider>:<email>:<path>" (current), "<provider>:<path>" (legacy single-account uploads).
+func (p *Pipeline) getCloudByLocation(location string) types.CloudProvider {
 	parts := strings.SplitN(location, ":", 3)
-	if len(parts) < 2 {
-		return nil
-	}
-	if len(parts) == 3 { // new format: scheme:email:path
+	if len(parts) < 2 { return nil }
+	if len(parts) == 3 { // current format: scheme:email:path
 		id := parts[0] + ":" + parts[1]
 		for _, c := range p.clouds {
-			if c.ID() == id {
-				return c
-			}
+			if c.ID() == id { return c }
 		}
 	}
-	// legacy format or fallback: find first provider matching scheme prefix
-	scheme := parts[0]
+	scheme := parts[0] // legacy or fallback: first provider matching scheme prefix
 	for _, c := range p.clouds {
-		if c.ID() == scheme || strings.HasPrefix(c.ID(), scheme+":") {
-			return c
-		}
+		if c.ID() == scheme || strings.HasPrefix(c.ID(), scheme+":") { return c }
 	}
 	return nil
 }
 
-// parseCloudPath extracts the cloud-side path from a location string.
-// "gdrive:email:blocks/x/0/1" → "blocks/x/0/1"
-// "gdrive:blocks/x/0/1"       → "blocks/x/0/1"  (legacy)
+// parseCloudPath extracts the cloud-side path from a Location string.
+// "gdrive:email:photos/2026/05/foo.jpg" → "photos/2026/05/foo.jpg"
+// "gdrive:photos/2026/05/foo.jpg"       → "photos/2026/05/foo.jpg"  (legacy)
 func parseCloudPath(location string) string {
 	parts := strings.SplitN(location, ":", 3)
-	if len(parts) == 3 {
-		return parts[2]
-	}
-	if len(parts) == 2 {
-		return parts[1]
-	}
+	if len(parts) == 3 { return parts[2] }
+	if len(parts) == 2 { return parts[1] }
 	return location
 }
