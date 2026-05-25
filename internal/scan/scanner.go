@@ -336,20 +336,21 @@ func (s *Scanner) IncrementalPoll(providerID string) error {
 	if !ok { return nil }
 	st, _ := s.loadStatus(providerID)
 	if st == nil { st = &Status{ProviderID: providerID} }
+	// s321: trigger one-shot Drive-wide bootstrap whenever flag is false — covers BOTH first ever poll
+	// AND upgrade path from v0.22.0 (where flag didn't exist yet). Async — bootstrap can take minutes
+	// for accounts with 10k+ files; we don't want to block the poll loop. RegisterForeign is idempotent
+	// (dedup by CloudID) so this is safe to call before/in-parallel with regular changes poll.
+	if !st.WholeDriveBootstrapped {
+		go func(pid string) {
+			if err := s.BootstrapWholeDrive(pid); err != nil { log.Printf("bootstrap-whole-drive %s: %v", pid, err) }
+		}(providerID)
+	}
 	// Seed pageToken on first ever poll for this provider.
 	if st.ChangesPageToken == "" {
 		seed, err := poller.GetStartPageToken()
 		if err != nil { return fmt.Errorf("seed pageToken: %w", err) }
 		st.ChangesPageToken = seed
 		_ = s.saveStatus(st)
-		// s321: trigger one-shot Drive-wide bootstrap to catch files that existed BEFORE seed
-		// (Phase 2 alone misses them since GetStartPageToken returns high-water mark).
-		// Async — bootstrap can take minutes for accounts with 10k+ files; we don't want to block the poll loop.
-		if !st.WholeDriveBootstrapped {
-			go func(pid string) {
-				if err := s.BootstrapWholeDrive(pid); err != nil { log.Printf("bootstrap-whole-drive %s: %v", pid, err) }
-			}(providerID)
-		}
 		return nil // nothing to poll yet — next tick starts surfacing changes
 	}
 	changes, newTok, err := poller.GetChanges(st.ChangesPageToken)
