@@ -347,6 +347,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		mux.HandleFunc("/admin/scan/status", requireAuthWithReg(lr, sh.handleStatus))
 		mux.HandleFunc("/admin/scan/start",  requireAuthWithReg(lr, sh.handleStart))
 		mux.HandleFunc("/admin/scan/pause",  requireAuthWithReg(lr, sh.handlePause))
+		mux.HandleFunc("/admin/scan/bootstrap", requireAuthWithReg(lr, sh.handleBootstrapWholeDrive)) // s321 Drive-wide retro-index
 		mux.HandleFunc("/admin/scan/config", requireAuthWithReg(lr, sh.handleConfig))
 		// auth_done → kick scan for every currently-loaded provider (newly authorized one is among them)
 		wsHub.SetOnAuthDone(func() {

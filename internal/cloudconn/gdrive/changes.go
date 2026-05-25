@@ -10,8 +10,37 @@ import (
 	"github.com/dudenest/dudenest-relay/pkg/types"
 )
 
-// Compile-time assertion: Provider satisfies CloudChangesPoller.
-var _ types.CloudChangesPoller = (*Provider)(nil)
+// Compile-time assertions: Provider satisfies CloudChangesPoller (Phase 2) + CloudFullLister (s321 bootstrap).
+var (
+	_ types.CloudChangesPoller = (*Provider)(nil)
+	_ types.CloudFullLister    = (*Provider)(nil)
+)
+
+// ListAll iterates EVERY file owned by the user across the whole Drive (not just under base folder).
+// Filters: trashed=false, owned by 'me', non-folder. One-shot bootstrap for s321 Drive-wide indexing.
+// Callback receives one Drive API page at a time (up to 1000 entries) — return false to stop early.
+func (p *Provider) ListAll(perPage func(entries []types.Entry) bool) error {
+	const q = "trashed=false and 'me' in owners and mimeType != 'application/vnd.google-apps.folder'"
+	pageToken := ""
+	for {
+		call := p.svc.Files.List().Q(q).PageSize(1000).
+			Fields("nextPageToken, files(id, name, mimeType, size, modifiedTime)")
+		if pageToken != "" { call = call.PageToken(pageToken) }
+		resp, err := call.Do()
+		if err != nil { return fmt.Errorf("files.list at token=%s: %w", pageToken, err) }
+		out := make([]types.Entry, 0, len(resp.Files))
+		for _, f := range resp.Files {
+			mt, _ := time.Parse(time.RFC3339, f.ModifiedTime)
+			out = append(out, types.Entry{
+				Path: f.Name, Name: f.Name, Size: f.Size, MTime: mt,
+				IsDir: false, CloudID: f.Id,
+			})
+		}
+		if !perPage(out) { return nil } // caller signaled stop
+		if resp.NextPageToken == "" { return nil }
+		pageToken = resp.NextPageToken
+	}
+}
 
 // GetStartPageToken returns Drive's current high-water-mark. The poller persists this on first run;
 // the first GetChanges call will then return only changes that happened AFTER this token was issued.

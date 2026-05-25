@@ -104,6 +104,61 @@ func TestIncrementalPoll_DrainsChangesAndUpdatesToken(t *testing.T) {
 	}
 }
 
+// fakeFullLister adds CloudFullLister capability to a poller for bootstrap testing.
+type fakeFullLister struct {
+	*fakePoller
+	pages [][]types.Entry
+}
+func (f *fakeFullLister) ListAll(perPage func(entries []types.Entry) bool) error {
+	for _, page := range f.pages {
+		if !perPage(page) { return nil }
+	}
+	return nil
+}
+
+// BootstrapWholeDrive registers every file via RegisterForeign, sets WholeDriveBootstrapped flag,
+// and is idempotent — second call is a no-op until ResetWholeDriveBootstrap clears the flag.
+func TestBootstrapWholeDrive_IndexesAllPagesIdempotent(t *testing.T) {
+	fp := &fakePipeline{}
+	now := time.Now().UTC()
+	fl := &fakeFullLister{
+		fakePoller: &fakePoller{id: "gdrive:wholedrive@example.com"},
+		pages: [][]types.Entry{
+			{
+				{CloudID: "a", Name: "outside1.jpg", Path: "outside1.jpg", Size: 100, MTime: now},
+				{CloudID: "b", Name: "outside2.pdf", Path: "outside2.pdf", Size: 200, MTime: now},
+			},
+			{
+				{CloudID: "c", Name: "outside3.mp4", Path: "outside3.mp4", Size: 999, MTime: now},
+			},
+		},
+	}
+	s, err := New(fp, makeProviderFn(fl), t.TempDir())
+	if err != nil { t.Fatalf("scanner.New: %v", err) }
+	if err := s.BootstrapWholeDrive(fl.ID()); err != nil { t.Fatalf("BootstrapWholeDrive: %v", err) }
+	if len(fp.registerCalls) != 3 { t.Fatalf("want 3 RegisterForeign, got %d", len(fp.registerCalls)) }
+	st, _ := s.loadStatus(fl.ID())
+	if !st.WholeDriveBootstrapped { t.Fatalf("flag not set after success") }
+	if st.WholeDriveBootstrapIndexed != 3 { t.Fatalf("WholeDriveBootstrapIndexed=%d, want 3", st.WholeDriveBootstrapIndexed) }
+	// Second call must NO-OP (no new RegisterForeign).
+	if err := s.BootstrapWholeDrive(fl.ID()); err != nil { t.Fatalf("re-run: %v", err) }
+	if len(fp.registerCalls) != 3 { t.Fatalf("re-run added register calls: want 3, got %d", len(fp.registerCalls)) }
+	// After reset, third call should re-index.
+	if err := s.ResetWholeDriveBootstrap(fl.ID()); err != nil { t.Fatalf("reset: %v", err) }
+	if err := s.BootstrapWholeDrive(fl.ID()); err != nil { t.Fatalf("post-reset: %v", err) }
+	if len(fp.registerCalls) != 6 { t.Fatalf("post-reset: want 6 total (fake pipeline doesn't dedup), got %d", len(fp.registerCalls)) }
+}
+
+// Providers without CloudFullLister (only CloudChangesPoller, or none) skip bootstrap silently.
+func TestBootstrapWholeDrive_SkipsProvidersWithoutFullLister(t *testing.T) {
+	fp := &fakePipeline{}
+	pp := &fakePoller{id: "gdrive:onlypoller@example.com"} // has poller but not full lister
+	s, err := New(fp, makeProviderFn(pp), t.TempDir())
+	if err != nil { t.Fatalf("scanner.New: %v", err) }
+	if err := s.BootstrapWholeDrive(pp.ID()); err != nil { t.Fatalf("expected nil err, got %v", err) }
+	if len(fp.registerCalls) != 0 { t.Fatalf("should skip silently, got %d Register calls", len(fp.registerCalls)) }
+}
+
 // Providers without CloudChangesPoller (e.g. mega/local) are skipped silently — returns nil, no error.
 type plainProvider struct{ id string }
 func (p *plainProvider) ID() string                               { return p.id }

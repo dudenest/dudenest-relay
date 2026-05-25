@@ -64,6 +64,12 @@ type Status struct {
 	ChangesLastPollAt   time.Time `json:"changes_last_poll_at,omitempty"`
 	ChangesIndexedTotal int       `json:"changes_indexed_total,omitempty"`  // cumulative across all polls
 	ChangesRemovedTotal int       `json:"changes_removed_total,omitempty"`
+	// s321: Drive-wide bootstrap — one-shot retro-index of files that existed BEFORE Phase 2 pageToken seed.
+	// Triggered automatically on first IncrementalPoll (when ChangesPageToken transitions empty → set).
+	// Idempotent re-run safe (RegisterForeign dedup-skips known CloudIDs); reset to re-trigger via manual endpoint.
+	WholeDriveBootstrapped     bool      `json:"whole_drive_bootstrapped,omitempty"`
+	WholeDriveBootstrapAt      time.Time `json:"whole_drive_bootstrap_at,omitempty"`
+	WholeDriveBootstrapIndexed int       `json:"whole_drive_bootstrap_indexed,omitempty"`
 }
 
 // Config governs auto-rescan behavior across all providers.
@@ -265,6 +271,56 @@ func (s *Scanner) findProvider(providerID string) types.CloudProvider {
 	return nil
 }
 
+// BootstrapWholeDrive performs a one-shot full-scope walk via CloudFullLister, registering every
+// file as Foreign FileMap (idempotent — RegisterForeign dedup-skips known CloudIDs). Triggered
+// automatically on first IncrementalPoll seed; can be re-triggered manually via /admin/scan/bootstrap-whole-drive.
+//
+// Purpose: Phase 2 Changes API only captures changes AFTER pageToken seed — pre-existing files
+// uploaded directly to Drive (outside dudenest folder) never showed in /Files. This pass catches them.
+// s321 (carry-over from s320).
+//
+// Skip cases (return nil silently):
+//   - provider not loaded
+//   - provider doesn't implement CloudFullLister (e.g. mega/local)
+//   - status.WholeDriveBootstrapped already true (use ResetWholeDriveBootstrap to re-trigger)
+func (s *Scanner) BootstrapWholeDrive(providerID string) error {
+	prov := s.findProvider(providerID)
+	if prov == nil { return nil }
+	lister, ok := prov.(types.CloudFullLister)
+	if !ok { return nil }
+	st, _ := s.loadStatus(providerID)
+	if st == nil { st = &Status{ProviderID: providerID} }
+	if st.WholeDriveBootstrapped { return nil }
+	total := 0
+	err := lister.ListAll(func(entries []types.Entry) bool {
+		for _, e := range entries {
+			if e.IsDir { continue }
+			if err := s.pipeline.RegisterForeign(providerID, e.CloudID, e.Name, e.Path, e.Size, e.MTime); err == nil { total++ }
+		}
+		return true // continue paginating
+	})
+	if err != nil { return fmt.Errorf("listall: %w", err) }
+	st.WholeDriveBootstrapped = true
+	st.WholeDriveBootstrapAt = time.Now().UTC()
+	st.WholeDriveBootstrapIndexed = total
+	if err := s.saveStatus(st); err != nil { log.Printf("save status after bootstrap %s: %v", providerID, err) }
+	s.mu.Lock(); s.statuses[providerID] = st; s.mu.Unlock()
+	log.Printf("bootstrap-whole-drive %s: indexed %d files across entire Drive", providerID, total)
+	return nil
+}
+
+// ResetWholeDriveBootstrap clears the bootstrapped flag so the next IncrementalPoll seed (or manual
+// /admin/scan/bootstrap-whole-drive call) re-runs the full walk. Used when files are removed externally
+// in bulk or after policy changes — RegisterForeign remains idempotent so this is safe.
+func (s *Scanner) ResetWholeDriveBootstrap(providerID string) error {
+	st, _ := s.loadStatus(providerID)
+	if st == nil { return nil }
+	st.WholeDriveBootstrapped = false
+	st.WholeDriveBootstrapAt = time.Time{}
+	st.WholeDriveBootstrapIndexed = 0
+	return s.saveStatus(st)
+}
+
 // IncrementalPoll drains Drive changes since the last persisted pageToken via CloudChangesPoller.
 // One call covers add/edit (RegisterForeign — dedup-skips known CloudIDs) + delete (DeleteByCloudID).
 // Persists the new pageToken so the next call resumes from where we left off — bounded API usage
@@ -286,6 +342,14 @@ func (s *Scanner) IncrementalPoll(providerID string) error {
 		if err != nil { return fmt.Errorf("seed pageToken: %w", err) }
 		st.ChangesPageToken = seed
 		_ = s.saveStatus(st)
+		// s321: trigger one-shot Drive-wide bootstrap to catch files that existed BEFORE seed
+		// (Phase 2 alone misses them since GetStartPageToken returns high-water mark).
+		// Async — bootstrap can take minutes for accounts with 10k+ files; we don't want to block the poll loop.
+		if !st.WholeDriveBootstrapped {
+			go func(pid string) {
+				if err := s.BootstrapWholeDrive(pid); err != nil { log.Printf("bootstrap-whole-drive %s: %v", pid, err) }
+			}(providerID)
+		}
 		return nil // nothing to poll yet — next tick starts surfacing changes
 	}
 	changes, newTok, err := poller.GetChanges(st.ChangesPageToken)

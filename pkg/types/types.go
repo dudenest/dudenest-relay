@@ -116,6 +116,19 @@ type CloudIDResolver interface {
 	ResolvePathToID(path string) (cloudID string, err error)
 }
 
+// CloudFullLister is an OPTIONAL sub-interface for providers that can enumerate EVERY file in the
+// entire account (not just under a base folder). One-shot bootstrap for retro-indexing pre-existing
+// files which the user uploaded directly to the cloud BEFORE dudenest was connected — Phase 2's
+// Changes API only captures changes AFTER the pageToken seed, so without this bootstrap those files
+// would never appear in /Files.
+//
+// Memory-friendly callback API: each Drive API page (up to 1000 entries) is delivered to perPage
+// callback. Callback returns true to continue, false to stop early. Implementation auto-pages via
+// provider's native cursor (nextPageToken). s321.
+type CloudFullLister interface {
+	ListAll(perPage func(entries []Entry) bool) error
+}
+
 // CloudChangesPoller is an OPTIONAL sub-interface for providers supporting incremental change polling
 // (the cheap alternative to repeated full-tree List walks). Used by scan engine's IncrementalPoll loop to
 // surface files added/edited/deleted DIRECTLY on the cloud side (outside dudenest uploads).
