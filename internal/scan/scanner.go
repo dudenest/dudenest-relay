@@ -58,6 +58,12 @@ type Status struct {
 	FilesSkipped      int       `json:"files_skipped"`            // CloudID already known (dedup hit)
 	Errors            int       `json:"errors"`
 	LastError         string    `json:"last_error,omitempty"`
+	// s320 Phase 2: incremental changes polling state. Tracked separately from full-walk scan above
+	// so a 60s changes poll doesn't reset/disturb the 24h auto-rescan ledger.
+	ChangesPageToken    string    `json:"changes_page_token,omitempty"`     // opaque token from Drive changes.list; empty → need GetStartPageToken
+	ChangesLastPollAt   time.Time `json:"changes_last_poll_at,omitempty"`
+	ChangesIndexedTotal int       `json:"changes_indexed_total,omitempty"`  // cumulative across all polls
+	ChangesRemovedTotal int       `json:"changes_removed_total,omitempty"`
 }
 
 // Config governs auto-rescan behavior across all providers.
@@ -73,6 +79,7 @@ type Config struct {
 type Pipeliner interface {
 	ListFiles() ([]*types.FileMap, error)
 	RegisterForeign(providerID, cloudID, name, path string, size int64, mtime time.Time) error
+	DeleteByCloudID(providerID, cloudID string) error // s320 Phase 2: remove FileMaps whose only replica points at a deleted Drive file
 }
 
 // Scanner owns all per-provider goroutines + state files. One Scanner per relay process.
@@ -227,21 +234,28 @@ func (s *Scanner) StatusAll() map[string]*Status {
 // Every 5 minutes it checks each provider's last_finished_at + interval; triggers Start if due.
 // Cheap (just os.Stat + math); safe to leave running for the relay lifetime.
 func (s *Scanner) AutoRescanLoop(stop <-chan struct{}) {
+	// s320 Phase 1: initial sweep 30s after startup — was 5min, which delayed first-restart visibility of cloud changes.
+	// 30s gives the relay time to register providers + finish backup register before kicking heavy Drive API work.
+	initialDelay := time.NewTimer(30 * time.Second)
 	t := time.NewTicker(5 * time.Minute)
 	defer t.Stop()
+	defer initialDelay.Stop()
+	sweep := func() {
+		cfg := s.GetConfig()
+		if !cfg.AutoRescanEnabled { return }
+		interval := time.Duration(cfg.AutoRescanIntervalHours) * time.Hour
+		for _, prov := range s.providersFn() {
+			st, _ := s.loadStatus(prov.ID())
+			if st == nil || st.LastFinishedAt.IsZero() || time.Since(st.LastFinishedAt) >= interval {
+				if _, err := s.Start(prov.ID()); err != nil { log.Printf("auto-rescan start %s: %v", prov.ID(), err) } else { log.Printf("auto-rescan: kicked scan for %s (last_finished=%v, interval=%v)", prov.ID(), st, interval) }
+			}
+		}
+	}
 	for {
 		select {
 		case <-stop: return
-		case <-t.C:
-			cfg := s.GetConfig()
-			if !cfg.AutoRescanEnabled { continue }
-			interval := time.Duration(cfg.AutoRescanIntervalHours) * time.Hour
-			for _, prov := range s.providersFn() {
-				st, _ := s.loadStatus(prov.ID())
-				if st == nil || st.LastFinishedAt.IsZero() || time.Since(st.LastFinishedAt) >= interval {
-					if _, err := s.Start(prov.ID()); err != nil { log.Printf("auto-rescan start %s: %v", prov.ID(), err) }
-				}
-			}
+		case <-initialDelay.C: sweep()
+		case <-t.C: sweep()
 		}
 	}
 }
@@ -249,6 +263,76 @@ func (s *Scanner) AutoRescanLoop(stop <-chan struct{}) {
 func (s *Scanner) findProvider(providerID string) types.CloudProvider {
 	for _, p := range s.providersFn() { if p.ID() == providerID { return p } }
 	return nil
+}
+
+// IncrementalPoll drains Drive changes since the last persisted pageToken via CloudChangesPoller.
+// One call covers add/edit (RegisterForeign — dedup-skips known CloudIDs) + delete (DeleteByCloudID).
+// Persists the new pageToken so the next call resumes from where we left off — bounded API usage
+// (one Changes.List roundtrip + N pages if changes >1000). s320 Phase 2.
+//
+// Skip cases (return nil, no error):
+//   - provider not loaded yet
+//   - provider doesn't implement CloudChangesPoller (e.g. mega/local) — fall back to AutoRescanLoop only
+func (s *Scanner) IncrementalPoll(providerID string) error {
+	prov := s.findProvider(providerID)
+	if prov == nil { return nil }
+	poller, ok := prov.(types.CloudChangesPoller)
+	if !ok { return nil }
+	st, _ := s.loadStatus(providerID)
+	if st == nil { st = &Status{ProviderID: providerID} }
+	// Seed pageToken on first ever poll for this provider.
+	if st.ChangesPageToken == "" {
+		seed, err := poller.GetStartPageToken()
+		if err != nil { return fmt.Errorf("seed pageToken: %w", err) }
+		st.ChangesPageToken = seed
+		_ = s.saveStatus(st)
+		return nil // nothing to poll yet — next tick starts surfacing changes
+	}
+	changes, newTok, err := poller.GetChanges(st.ChangesPageToken)
+	if err != nil { return fmt.Errorf("poll: %w", err) }
+	added := 0
+	removed := 0
+	for _, c := range changes {
+		if c.Removed {
+			if err := s.pipeline.DeleteByCloudID(providerID, c.CloudID); err == nil { removed++ }
+			continue
+		}
+		if c.IsDir { continue }
+		// RegisterForeign is idempotent — dedup-skips by CloudID, so re-edits of already-tracked files are no-ops.
+		if err := s.pipeline.RegisterForeign(providerID, c.CloudID, c.Name, c.Path, c.Size, c.MTime); err == nil { added++ }
+	}
+	st.ChangesPageToken = newTok
+	st.ChangesLastPollAt = time.Now().UTC()
+	st.ChangesIndexedTotal += added
+	st.ChangesRemovedTotal += removed
+	if err := s.saveStatus(st); err != nil { log.Printf("save status after poll %s: %v", providerID, err) }
+	s.mu.Lock(); s.statuses[providerID] = st; s.mu.Unlock()
+	if added > 0 || removed > 0 {
+		log.Printf("incremental-poll %s: +%d files, -%d removed (new token persisted)", providerID, added, removed)
+	}
+	return nil
+}
+
+// StartIncrementalPollLoop runs IncrementalPoll for every provider every `interval` (default 60s in serve.go).
+// Cheap — one Drive API call per provider per tick when no changes pending. Surfaces direct-to-Drive uploads
+// in ≤interval seconds without waiting for the 24h full-rescan. s320 Phase 2.
+func (s *Scanner) StartIncrementalPollLoop(interval time.Duration, stop <-chan struct{}) {
+	if interval < 30*time.Second { interval = 30 * time.Second } // floor — protects Drive API quota
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	// First tick after `interval`; initial 10s delay so we don't race against provider auth.
+	time.Sleep(10 * time.Second)
+	for {
+		for _, prov := range s.providersFn() {
+			if err := s.IncrementalPoll(prov.ID()); err != nil {
+				log.Printf("incremental-poll %s: %v", prov.ID(), err)
+			}
+		}
+		select {
+		case <-stop: return
+		case <-t.C:
+		}
+	}
 }
 
 // runScan is the walker goroutine. Calls itself recursively via walkFolder. Each folder

@@ -116,6 +116,35 @@ type CloudIDResolver interface {
 	ResolvePathToID(path string) (cloudID string, err error)
 }
 
+// CloudChangesPoller is an OPTIONAL sub-interface for providers supporting incremental change polling
+// (the cheap alternative to repeated full-tree List walks). Used by scan engine's IncrementalPoll loop to
+// surface files added/edited/deleted DIRECTLY on the cloud side (outside dudenest uploads).
+//
+// Drive API: changes.getStartPageToken + changes.list. One pageToken roundtrip per provider per tick,
+// covers the ENTIRE Drive scope (not just our base folder) — so a user's photos uploaded straight to
+// Drive web UI also appear in /Files. s320 Phase 2.
+type CloudChangesPoller interface {
+	// GetStartPageToken seeds the polling loop. Call once when no token has ever been persisted
+	// for this provider. Returns an opaque token to use as the first GetChanges() arg.
+	GetStartPageToken() (string, error)
+	// GetChanges drains the change log starting at pageToken. Auto-pages through Drive's nextPageToken
+	// until newStartPageToken is set (end-of-log marker). Caller persists newStartPageToken for next tick.
+	GetChanges(pageToken string) (changes []ChangedEntry, newStartPageToken string, err error)
+}
+
+// ChangedEntry is one entry from CloudChangesPoller.GetChanges. Removed==true → file was deleted/trashed
+// (delete from blockmap if known). Otherwise → add/update as Foreign FileMap (RegisterForeign dedup-skips
+// already-known CloudIDs, so re-edit events are no-ops). s320 Phase 2.
+type ChangedEntry struct {
+	CloudID string    `json:"cloud_id"`           // permanent Drive file id
+	Name    string    `json:"name"`               // leaf name (path resolution deferred to F2 — best-effort)
+	Path    string    `json:"path"`               // current best-effort relative path (often == Name in v1)
+	Size    int64     `json:"size"`               // bytes; 0 for folders
+	MTime   time.Time `json:"mtime"`              // provider's modifiedTime
+	Removed bool      `json:"removed,omitempty"`  // true → file was deleted or trashed
+	IsDir   bool      `json:"is_dir,omitempty"`   // true → skip (caller filters folder events)
+}
+
 // CloudMover is an OPTIONAL sub-interface for providers that can move a file between folders
 // by ID without re-uploading the data. Used by editable-date logic: when user changes a
 // file's date in the meta sheet, dudenest-relay moves the file to the new YYYY/MM date bucket

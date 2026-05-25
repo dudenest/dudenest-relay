@@ -292,6 +292,26 @@ func (p *Pipeline) DeleteFile(fileID string) error {
 	return firstErr
 }
 
+// DeleteByCloudID removes the local FileMap whose foreign replica matches (providerID, cloudID).
+// Used by scan engine when Drive Changes API reports a file was trashed/deleted on the cloud side —
+// drops it from /files listing without touching cloud (no DeleteByID call). No-op if not found.
+// s320 Phase 2.
+func (p *Pipeline) DeleteByCloudID(providerID, cloudID string) error {
+	if cloudID == "" { return nil }
+	maps, err := p.bm.List()
+	if err != nil { return fmt.Errorf("list filemaps: %w", err) }
+	providerPrefix := providerID + ":"
+	for _, fm := range maps {
+		for _, r := range fm.Replicas {
+			if r.CloudID == cloudID && strings.HasPrefix(r.Location, providerPrefix) {
+				if dErr := p.bm.Delete(fm.FileID); dErr != nil { return fmt.Errorf("delete filemap %s: %w", fm.FileID, dErr) }
+				return nil
+			}
+		}
+	}
+	return nil // not found — already removed or never tracked
+}
+
 // RegisterForeign creates a FileMap with Strategy=Foreign pointing at an existing cloud file
 // (discovered by the scan engine). We never touched the bytes — we only record their location so
 // they show up in /files. Download uses CloudID. fileID is derived from CloudID for idempotency

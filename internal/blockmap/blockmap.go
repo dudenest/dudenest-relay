@@ -71,6 +71,15 @@ func (m *Manager) Save(fm *types.FileMap) error {
 	return os.WriteFile(path, data, 0600)
 }
 
+// Delete removes a FileMap from local storage. Idempotent: missing file is not an error.
+// s320 Phase 2: used by pipeline.DeleteByCloudID to drop foreign FileMaps when Drive reports
+// the underlying cloud file was trashed/deleted.
+func (m *Manager) Delete(fileID string) error {
+	path := fmt.Sprintf("%s/%s.json", m.storePath, fileID)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) { return err }
+	return nil
+}
+
 // Load reads a FileMap from local storage. Transparently migrates legacy v1 records to v2
 // (Replicas) and rewrites them on disk — so the next Load returns clean v2 data.
 func (m *Manager) Load(fileID string) (*types.FileMap, error) {

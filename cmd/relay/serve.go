@@ -358,6 +358,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 		})
 		// 24h auto-rescan loop (configurable in <configDir>/scan/config.json — default enabled)
 		go scanner.AutoRescanLoop(make(chan struct{}))
+		// s320 Phase 2: 60s incremental polling via Drive Changes API — surfaces direct-to-Drive
+		// uploads within a minute (no full walk; one Drive API call per provider per tick).
+		go scanner.StartIncrementalPollLoop(60*time.Second, make(chan struct{}))
+		log.Printf("scan engine wired: P5c full-walk (auto-rescan) + Phase 2 incremental poll (60s) — F1 dedup active")
 	}
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }) //nolint:errcheck
 	fmt.Printf("relay serve listening on %s (provider: %s, ws: /ws)\n", cfg.Server.Listen, provider)
