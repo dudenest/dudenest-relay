@@ -29,9 +29,11 @@ type tokenFile struct {
 	Expiry       time.Time `json:"expiry"`
 }
 
+const legacyBasePath = "dudenest-relay"
+
 // Provider stores files on Google Drive under a single base folder (default "dudenest" since v0.10.0).
 // Thread-safe: folderCache protected by mu (parallel replica uploads use same Provider).
-// Legacy "dudenest-relay" base support REMOVED in v0.12.0 — see CHANGELOG.
+// Legacy "dudenest-relay" base is read-only fallback for old FileMaps; new writes stay under baseFolderID.
 type Provider struct {
 	id           string
 	svc          *drive.Service
@@ -182,12 +184,20 @@ func (p *Provider) resolveFilePath(path string) (string, error) {
 		err = fmt.Errorf("find dir %s: %w", dir, err)
 	}
 	legacyParentID, legacyErr := p.findRootPath(dir)
-	if legacyErr != nil {
-		return "", fmt.Errorf("%w; legacy root fallback: find dir %s: %w", err, dir, legacyErr)
+	if legacyErr == nil {
+		id, findErr := p.findFile(name, legacyParentID)
+		if findErr == nil {
+			return id, nil
+		}
+		legacyErr = fmt.Errorf("find file %s: %w", name, findErr)
 	}
-	id, legacyErr := p.findFile(name, legacyParentID)
-	if legacyErr != nil {
-		return "", fmt.Errorf("%w; legacy root fallback: find file %s: %w", err, name, legacyErr)
+	legacyBaseParentID, legacyBaseErr := p.findLegacyBasePath(dir)
+	if legacyBaseErr != nil {
+		return "", fmt.Errorf("%w; legacy root fallback: %w; legacy base fallback: find dir %s: %w", err, legacyErr, dir, legacyBaseErr)
+	}
+	id, legacyBaseErr := p.findFile(name, legacyBaseParentID)
+	if legacyBaseErr != nil {
+		return "", fmt.Errorf("%w; legacy root fallback: %w; legacy base fallback: find file %s: %w", err, legacyErr, name, legacyBaseErr)
 	}
 	return id, nil
 }
@@ -340,6 +350,14 @@ func (p *Provider) findPath(dir string) (string, error) {
 
 func (p *Provider) findRootPath(dir string) (string, error) {
 	return p.findPathFrom(dir, "root", "root:")
+}
+
+func (p *Provider) findLegacyBasePath(dir string) (string, error) {
+	legacyBaseID, err := p.findFolder(legacyBasePath, "root")
+	if err != nil {
+		return "", err
+	}
+	return p.findPathFrom(dir, legacyBaseID, legacyBasePath+":")
 }
 
 func (p *Provider) findPathFrom(dir, startID, cachePrefix string) (string, error) {
