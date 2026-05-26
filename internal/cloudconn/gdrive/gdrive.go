@@ -120,7 +120,7 @@ func (p *Provider) UploadAndReturnID(path string, data []byte) (string, error) {
 // — pre-v0.10.0 this method called ensurePath which silently provisioned empty trees for every missing
 // FileMap, leaking folders on Drive).
 func (p *Provider) Download(path string) ([]byte, error) {
-	fileID, err := p.resolveFilePath(path)
+	fileID, err := p.resolveFilePath(path, true)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +136,7 @@ func (p *Provider) Download(path string) ([]byte, error) {
 
 // Delete removes the file at path. Same read-only findPath as Download — never creates folders.
 func (p *Provider) Delete(path string) error {
-	fileID, err := p.resolveFilePath(path)
+	fileID, err := p.resolveFilePath(path, false)
 	if err != nil {
 		return err
 	}
@@ -168,10 +168,10 @@ func (p *Provider) DeleteByID(cloudID string) error {
 // pre-CloudID FileMaps. Performs the same path walk as findPath + findFile but returns
 // the Drive file ID without touching content. Cheap (1-2 Drive API calls per file).
 func (p *Provider) ResolvePathToID(path string) (string, error) {
-	return p.resolveFilePath(path)
+	return p.resolveFilePath(path, false)
 }
 
-func (p *Provider) resolveFilePath(path string) (string, error) {
+func (p *Provider) resolveFilePath(path string, allowNameFallback bool) (string, error) {
 	dir, name := filepath.Dir(path), filepath.Base(path)
 	parentID, err := p.findPath(dir)
 	if err == nil {
@@ -197,6 +197,11 @@ func (p *Provider) resolveFilePath(path string) (string, error) {
 	}
 	id, legacyBaseErr := p.findFile(name, legacyBaseParentID)
 	if legacyBaseErr != nil {
+		if allowNameFallback {
+			if anyID, anyErr := p.findFileAnywhere(name); anyErr == nil {
+				return anyID, nil
+			}
+		}
 		return "", fmt.Errorf("%w; legacy root fallback: %w; legacy base fallback: find file %s: %w", err, legacyErr, name, legacyBaseErr)
 	}
 	return id, nil
@@ -437,6 +442,18 @@ func (p *Provider) ensureFolder(name, parentID string) (string, error) {
 func (p *Provider) findFile(name, parentID string) (string, error) {
 	q := fmt.Sprintf("name=%q and %q in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'", name, parentID)
 	list, err := p.svc.Files.List().Q(q).Fields("files(id)").Do()
+	if err != nil {
+		return "", fmt.Errorf("list files: %w", err)
+	}
+	if len(list.Files) == 0 {
+		return "", fmt.Errorf("not found: %s", name)
+	}
+	return list.Files[0].Id, nil
+}
+
+func (p *Provider) findFileAnywhere(name string) (string, error) {
+	q := fmt.Sprintf("name=%q and trashed=false and mimeType!='application/vnd.google-apps.folder'", name)
+	list, err := p.svc.Files.List().Q(q).PageSize(10).Fields("files(id)").Do()
 	if err != nil {
 		return "", fmt.Errorf("list files: %w", err)
 	}
