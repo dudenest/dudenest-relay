@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/dudenest/dudenest-relay/pkg/types"
 )
@@ -20,8 +21,8 @@ func NewMockCloud(name string) *MockCloud {
 	return &MockCloud{name: name, storage: make(map[string][]byte), available: true}
 }
 
-func (m *MockCloud) ID() string                             { return m.name }
-func (m *MockCloud) Upload(path string, data []byte) error  { m.storage[path] = data; return nil }
+func (m *MockCloud) ID() string                            { return m.name }
+func (m *MockCloud) Upload(path string, data []byte) error { m.storage[path] = data; return nil }
 func (m *MockCloud) Download(path string) ([]byte, error) {
 	if !m.available {
 		return nil, fmt.Errorf("cloud %s is offline", m.name)
@@ -89,24 +90,36 @@ func TestReplicaRoutesByContentType(t *testing.T) {
 	imgPath := tmp + "/photo.png"
 	os.WriteFile(imgPath, append(pngHeader, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05), 0o600) //nolint:errcheck
 	imgFM, err := p.Upload(imgPath)
-	if err != nil { t.Fatalf("image Upload: %v", err) }
+	if err != nil {
+		t.Fatalf("image Upload: %v", err)
+	}
 	foundImgPath := ""
 	for k := range c.storage {
-		if bytes.HasPrefix([]byte(k), []byte("photos/")) { foundImgPath = k; break }
+		if bytes.HasPrefix([]byte(k), []byte("photos/")) {
+			foundImgPath = k
+			break
+		}
 	}
 	if foundImgPath == "" {
 		t.Errorf("image was not stored under photos/ — got keys: %v", keysOf(c.storage))
 	}
 	// And Download must resolve via the stored Location
 	outImg := tmp + "/photo-out.png"
-	if err := p.Download(imgFM.FileID, outImg); err != nil { t.Fatalf("image Download: %v", err) }
+	if err := p.Download(imgFM.FileID, outImg); err != nil {
+		t.Fatalf("image Download: %v", err)
+	}
 	// Non-media upload — text — must land under "files/<hash>/..."
 	docPath := tmp + "/note.txt"
 	os.WriteFile(docPath, []byte("just text"), 0o600) //nolint:errcheck
-	if _, err := p.Upload(docPath); err != nil { t.Fatalf("text Upload: %v", err) }
+	if _, err := p.Upload(docPath); err != nil {
+		t.Fatalf("text Upload: %v", err)
+	}
 	foundDocPath := ""
 	for k := range c.storage {
-		if bytes.HasPrefix([]byte(k), []byte("files/")) { foundDocPath = k; break }
+		if bytes.HasPrefix([]byte(k), []byte("files/")) {
+			foundDocPath = k
+			break
+		}
 	}
 	if foundDocPath == "" {
 		t.Errorf("text was not stored under files/ — got keys: %v", keysOf(c.storage))
@@ -116,7 +129,9 @@ func TestReplicaRoutesByContentType(t *testing.T) {
 // keysOf is a small helper used by TestReplicaRoutesByContentType for error messages.
 func keysOf(m map[string][]byte) []string {
 	out := make([]string, 0, len(m))
-	for k := range m { out = append(out, k) }
+	for k := range m {
+		out = append(out, k)
+	}
 	return out
 }
 
@@ -143,4 +158,22 @@ func TestReplicaSingleProvider(t *testing.T) {
 		t.Errorf("Content mismatch")
 	}
 	fmt.Println("✅ Single provider replica test passed")
+}
+
+func TestDownloadForeignFileWithoutHash(t *testing.T) {
+	c := NewMockCloud("cloud1")
+	content := []byte("foreign cloud file")
+	c.storage["files/report.txt"] = content
+	p, _ := New(make([]byte, 32), []types.CloudProvider{c}, t.TempDir(), nil)
+	if err := p.RegisterForeign("cloud1", "cloud-id-1", "report.txt", "files/report.txt", int64(len(content)), time.Now().UTC()); err != nil {
+		t.Fatalf("RegisterForeign: %v", err)
+	}
+	out := t.TempDir() + "/report.txt"
+	if err := p.Download("foreign-cloud-id-1", out); err != nil {
+		t.Fatalf("Download foreign without hash: %v", err)
+	}
+	got, _ := os.ReadFile(out)
+	if !bytes.Equal(got, content) {
+		t.Fatalf("content mismatch: %q", got)
+	}
 }

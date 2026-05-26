@@ -369,7 +369,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	mux := http.NewServeMux()
 	authSrv.RegisterRoutes(mux)
 	mux.Handle("/ws", wsHub) // WebSocket: Flutter connects for relay→Flutter auth requests
-	fs := &fileServer{p: p, thumbCache: tc, backupClient: bc, maxUploadBytes: cfg.MaxUploadBytes(), metaDir: metaDir, manifestMaxFiles: cfg.Cache.ManifestMaxFiles}
+	fs := &fileServer{p: p, thumbCache: tc, backupClient: bc, maxUploadBytes: cfg.MaxUploadBytes(), metaDir: metaDir, manifestMaxFiles: cfg.Cache.ManifestMaxFiles, lazySidecarsOnList: cfg.Cache.LazySidecarsOnList}
 	lr := &lazyRegistrar{configDir: authConfigDir, masterKey: key, fs: fs, backupURL: cfg.Backup.URL, publicURL: cfg.Backup.PublicURL, debounce: cfg.Debounce()}
 	if ownerFromCreds != "" {
 		lr.setOwner(ownerFromCreds)
@@ -430,12 +430,13 @@ type fileServer struct {
 		MoveFile(fileID, newDir string) error // re-bucket a file when its TakenAtOverride changes; no data transfer
 		AccountManager() *account.Manager     // Phase α (v0.17.2+): may return nil for CLI/test paths; handleMeta uses it to read PathRoot policy when computing MoveFile destination directory
 	}
-	thumbCache       *thumbnail.Cache
-	backupMu         sync.RWMutex
-	backupClient     *backup.Client // nil = backup disabled; may be set lazily after JWT registration
-	maxUploadBytes   int64          // max multipart upload size (from config)
-	metaDir          string         // directory for per-file meta.json (favorites, albums, captions)
-	manifestMaxFiles int
+	thumbCache         *thumbnail.Cache
+	backupMu           sync.RWMutex
+	backupClient       *backup.Client // nil = backup disabled; may be set lazily after JWT registration
+	maxUploadBytes     int64          // max multipart upload size (from config)
+	metaDir            string         // directory for per-file meta.json (favorites, albums, captions)
+	manifestMaxFiles   int
+	lazySidecarsOnList bool
 }
 
 // fileMeta stores user-editable metadata per file (favorites, albums, location, caption, date override).
@@ -625,8 +626,8 @@ func (fs *fileServer) fileSummaries() ([]fileSummary, string, error) {
 			}
 		}
 		lqipData, _ := os.ReadFile(fs.thumbCache.LQIPPath(fm.FileID))
-		// Kick off lazy sidecar generation for files missing dims or LQIP (async, non-blocking)
-		if d.Width == 0 || len(lqipData) == 0 {
+		// Optional background sidecar generation; disabled by default so list/manifest stays metadata-only.
+		if fs.lazySidecarsOnList && (d.Width == 0 || len(lqipData) == 0) && isMediaExt(filepath.Ext(fm.Name)) {
 			go fs.lazyGenSidecars(fm.FileID, fm.Name)
 		}
 		// F1 dedup: alias FileMap has no Replicas — derive folder from canonical (one cached lookup).
@@ -1209,6 +1210,18 @@ func fileExists(path string) bool { _, err := os.Stat(path); return err == nil }
 func isVideoExt(ext string) bool {
 	switch ext {
 	case ".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".3gp", ".wmv", ".flv":
+		return true
+	}
+	return false
+}
+
+func isMediaExt(ext string) bool {
+	ext = strings.ToLower(ext)
+	if isVideoExt(ext) {
+		return true
+	}
+	switch ext {
+	case ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".heif":
 		return true
 	}
 	return false

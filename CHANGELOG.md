@@ -12,11 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `GET /files/manifest?since=<revision>` returns a cache-friendly tile manifest with `revision`, `unchanged`, and `files`.
 - `cache.manifest_max_files` relay config field caps manifest size when an operator wants bounded API payloads.
+- `cache.lazy_sidecars_on_list` relay config field controls whether `/files` and `/files/manifest` may download originals to generate thumbnails/dims in the background; default is `false`.
 - Manifest regression test covers first snapshot and unchanged revision response.
 
 ### Changed
 - `GET /files` keeps the legacy response; Flutter can adopt the manifest endpoint without breaking older clients.
 - Relay-poc GitHub workflows restart the current `dudenest-relay` systemd unit instead of legacy `relay.service`.
+- Downloads for scanner-indexed `Foreign FileMap` records skip SHA-256 verification when no Dudenest upload hash exists, fixing false `hash mismatch` errors for cloud-native files.
+- File listing is metadata-only by default, preventing large `/Files` views from starting hundreds of cloud downloads during render.
 
 ---
 

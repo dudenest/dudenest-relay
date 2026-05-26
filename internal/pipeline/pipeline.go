@@ -41,7 +41,9 @@ import (
 // Decoupled from upload so it can be unit-tested in isolation.
 func mediaFolder(name string, data []byte) string {
 	n := 512
-	if len(data) < n { n = len(data) }
+	if len(data) < n {
+		n = len(data)
+	}
 	mime := http.DetectContentType(data[:n])
 	if strings.HasPrefix(mime, "image/") || strings.HasPrefix(mime, "video/") {
 		return types.PhotosFolder
@@ -97,7 +99,9 @@ func (p *Pipeline) Index() *index.Index { return p.idx }
 func (p *Pipeline) findProviderByAccount(a *types.CloudAccount) types.CloudProvider {
 	want := a.Provider + ":" + a.Email
 	for _, c := range p.clouds {
-		if c.ID() == want { return c }
+		if c.ID() == want {
+			return c
+		}
 	}
 	return nil
 }
@@ -109,13 +113,17 @@ func (p *Pipeline) findProviderByAccount(a *types.CloudAccount) types.CloudProvi
 // transparently via the canonical FileMap's Replicas.
 func (p *Pipeline) Upload(filePath string) (*types.FileMap, error) {
 	fm, err := blockmap.NewFileMap(filePath)
-	if err != nil { return nil, fmt.Errorf("new filemap: %w", err) }
+	if err != nil {
+		return nil, fmt.Errorf("new filemap: %w", err)
+	}
 	// F1 dedup short-circuit
 	if p.idx != nil && fm.Hash != "" {
 		if existing := p.idx.Lookup(fm.Hash); existing != "" && existing != fm.FileID {
 			fm.LogicalAlias = existing
 			fm.Replicas = nil // alias FileMaps own no copies
-			if err := p.bm.Save(fm); err != nil { return nil, fmt.Errorf("save alias filemap: %w", err) }
+			if err := p.bm.Save(fm); err != nil {
+				return nil, fmt.Errorf("save alias filemap: %w", err)
+			}
 			if err := p.idx.InsertAlias(fm.Hash, fm.FileID); err != nil {
 				log.Printf("upload: dedup alias saved but index update failed: %v (filemap persisted)", err)
 			}
@@ -135,12 +143,18 @@ func (p *Pipeline) Upload(filePath string) (*types.FileMap, error) {
 // uploadReplicas writes the whole file to the N accounts chosen by SelectReplicas.
 // No splitting, no erasure coding, no encryption — bytes go to the cloud as-is.
 func (p *Pipeline) uploadReplicas(fm *types.FileMap, filePath string) (*types.FileMap, error) {
-	if len(p.clouds) == 0 { return nil, fmt.Errorf("no cloud providers available") }
+	if len(p.clouds) == 0 {
+		return nil, fmt.Errorf("no cloud providers available")
+	}
 	data, err := os.ReadFile(filePath)
-	if err != nil { return nil, fmt.Errorf("read file: %w", err) }
+	if err != nil {
+		return nil, fmt.Errorf("read file: %w", err)
+	}
 	folder := mediaFolder(fm.Name, data) // photos/ for media, files/ for everything else
 	when := time.Now().UTC()
-	if !fm.Created.IsZero() { when = fm.Created.UTC() }
+	if !fm.Created.IsZero() {
+		when = fm.Created.UTC()
+	}
 
 	type pick struct {
 		cloud types.CloudProvider
@@ -152,7 +166,9 @@ func (p *Pipeline) uploadReplicas(fm *types.FileMap, filePath string) (*types.Fi
 		cfg := p.accts.Policy()
 		all := p.accts.ActiveAccounts()
 		chosen, err := account.SelectReplicas(account.FileMeta{Size: int64(len(data)), ContentType: folder}, all, cfg)
-		if err != nil { return nil, fmt.Errorf("select replicas: %w", err) }
+		if err != nil {
+			return nil, fmt.Errorf("select replicas: %w", err)
+		}
 		path := cfg.PathFor(folder, fm.Name, when)
 		for _, a := range chosen {
 			cloud := p.findProviderByAccount(a)
@@ -171,7 +187,9 @@ func (p *Pipeline) uploadReplicas(fm *types.FileMap, filePath string) (*types.Fi
 	} else {
 		// Legacy fallback for tests / CLI paths where account.Manager isn't wired.
 		limit := 2
-		if len(p.clouds) < limit { limit = len(p.clouds) }
+		if len(p.clouds) < limit {
+			limit = len(p.clouds)
+		}
 		legacyPath := fmt.Sprintf("%s/%04d/%02d/%s", folder, when.Year(), int(when.Month()), fm.Name)
 		for j := 0; j < limit; j++ {
 			picks = append(picks, pick{cloud: p.clouds[j], path: legacyPath})
@@ -192,7 +210,10 @@ func (p *Pipeline) uploadReplicas(fm *types.FileMap, filePath string) (*types.Fi
 			} else {
 				upErr = pk.cloud.Upload(pk.path, data)
 			}
-			if upErr != nil { errs[j] = upErr; return }
+			if upErr != nil {
+				errs[j] = upErr
+				return
+			}
 			replicas[j] = types.Replica{
 				ID:         fmt.Sprintf("%s.r%d", fm.FileID, j),
 				ReplicaIdx: j,
@@ -206,11 +227,17 @@ func (p *Pipeline) uploadReplicas(fm *types.FileMap, filePath string) (*types.Fi
 	wg.Wait()
 	var good []types.Replica
 	for _, r := range replicas {
-		if r.ID != "" { good = append(good, r) }
+		if r.ID != "" {
+			good = append(good, r)
+		}
 	}
-	if len(good) == 0 { return nil, fmt.Errorf("all replicas failed: %v", errs[0]) }
+	if len(good) == 0 {
+		return nil, fmt.Errorf("all replicas failed: %v", errs[0])
+	}
 	fm.Replicas = good
-	if err := p.bm.Save(fm); err != nil { return nil, fmt.Errorf("save filemap: %w", err) }
+	if err := p.bm.Save(fm); err != nil {
+		return nil, fmt.Errorf("save filemap: %w", err)
+	}
 	return fm, nil
 }
 
@@ -219,19 +246,32 @@ func (p *Pipeline) uploadReplicas(fm *types.FileMap, filePath string) (*types.Fi
 // borrowing its Replicas — user-visible Name + Hash stay from the alias (the original upload).
 func (p *Pipeline) Download(fileID, outputPath string) error {
 	fm, err := p.bm.Load(fileID)
-	if err != nil { return fmt.Errorf("load filemap: %w", err) }
+	if err != nil {
+		return fmt.Errorf("load filemap: %w", err)
+	}
 	if fm.LogicalAlias != "" {
 		canonical, cerr := p.bm.Load(fm.LogicalAlias)
-		if cerr != nil { return fmt.Errorf("load alias target %s: %w", fm.LogicalAlias, cerr) }
+		if cerr != nil {
+			return fmt.Errorf("load alias target %s: %w", fm.LogicalAlias, cerr)
+		}
 		if canonical.LogicalAlias != "" {
 			return fmt.Errorf("alias chain detected: %s → %s → %s (data integrity issue)", fileID, fm.LogicalAlias, canonical.LogicalAlias)
 		}
 		fm.Replicas = canonical.Replicas
 	}
-	if len(fm.Replicas) == 0 { return fmt.Errorf("no replicas recorded for %s", fileID) }
+	if len(fm.Replicas) == 0 {
+		return fmt.Errorf("no replicas recorded for %s", fileID)
+	}
 	data, err := p.downloadFromAnyReplica(fm.Replicas)
-	if err != nil { return fmt.Errorf("download: %w", err) }
-	if err := os.WriteFile(outputPath, data, 0o600); err != nil { return fmt.Errorf("write output: %w", err) }
+	if err != nil {
+		return fmt.Errorf("download: %w", err)
+	}
+	if err := os.WriteFile(outputPath, data, 0o600); err != nil {
+		return fmt.Errorf("write output: %w", err)
+	}
+	if fm.Hash == "" {
+		return nil
+	} // Foreign FileMaps are indexed cloud files; no Dudenest SHA-256 exists yet
 	return blockmap.Verify(outputPath, fm)
 }
 
@@ -241,13 +281,23 @@ func (p *Pipeline) downloadFromAnyReplica(replicas []types.Replica) ([]byte, err
 	var lastErr error
 	for _, r := range replicas {
 		cloud := p.getCloudByLocation(r.Location)
-		if cloud == nil { continue }
+		if cloud == nil {
+			continue
+		}
 		if r.CloudID != "" {
 			if idd, ok := cloud.(types.CloudIDDownloader); ok {
-				if data, dlErr := idd.DownloadByID(r.CloudID); dlErr == nil { return data, nil } else { lastErr = dlErr }
+				if data, dlErr := idd.DownloadByID(r.CloudID); dlErr == nil {
+					return data, nil
+				} else {
+					lastErr = dlErr
+				}
 			}
 		}
-		if data, dlErr := cloud.Download(parseCloudPath(r.Location)); dlErr == nil { return data, nil } else { lastErr = dlErr }
+		if data, dlErr := cloud.Download(parseCloudPath(r.Location)); dlErr == nil {
+			return data, nil
+		} else {
+			lastErr = dlErr
+		}
 	}
 	return nil, fmt.Errorf("all replicas unavailable: %v", lastErr)
 }
@@ -263,7 +313,9 @@ func (p *Pipeline) SaveFileMap(fm *types.FileMap) error { return p.bm.Save(fm) }
 // if no provider with that ID is loaded.
 func (p *Pipeline) CloudByID(providerID string) types.CloudProvider {
 	for _, c := range p.clouds {
-		if c.ID() == providerID { return c }
+		if c.ID() == providerID {
+			return c
+		}
 	}
 	return nil
 }
@@ -275,19 +327,29 @@ func (p *Pipeline) ListFiles() ([]*types.FileMap, error) { return p.bm.List() }
 // Per-replica addressing priority: DeleteByID first (one API call, ID-stable), Location fallback.
 func (p *Pipeline) DeleteFile(fileID string) error {
 	fm, err := p.bm.Load(fileID)
-	if err != nil { return fmt.Errorf("load filemap: %w", err) }
+	if err != nil {
+		return fmt.Errorf("load filemap: %w", err)
+	}
 	var firstErr error
 	for _, r := range fm.Replicas {
 		cloud := p.getCloudByLocation(r.Location)
-		if cloud == nil { continue }
+		if cloud == nil {
+			continue
+		}
 		var dErr error
 		if r.CloudID != "" {
-			if idd, ok := cloud.(types.CloudIDDownloader); ok { dErr = idd.DeleteByID(r.CloudID) }
+			if idd, ok := cloud.(types.CloudIDDownloader); ok {
+				dErr = idd.DeleteByID(r.CloudID)
+			}
 		}
 		if r.CloudID == "" || dErr != nil { // path-based fallback
-			if e := cloud.Delete(parseCloudPath(r.Location)); e != nil { dErr = e }
+			if e := cloud.Delete(parseCloudPath(r.Location)); e != nil {
+				dErr = e
+			}
 		}
-		if dErr != nil && firstErr == nil { firstErr = fmt.Errorf("delete replica %s: %w", r.ID, dErr) }
+		if dErr != nil && firstErr == nil {
+			firstErr = fmt.Errorf("delete replica %s: %w", r.ID, dErr)
+		}
 	}
 	return firstErr
 }
@@ -297,14 +359,20 @@ func (p *Pipeline) DeleteFile(fileID string) error {
 // drops it from /files listing without touching cloud (no DeleteByID call). No-op if not found.
 // s320 Phase 2.
 func (p *Pipeline) DeleteByCloudID(providerID, cloudID string) error {
-	if cloudID == "" { return nil }
+	if cloudID == "" {
+		return nil
+	}
 	maps, err := p.bm.List()
-	if err != nil { return fmt.Errorf("list filemaps: %w", err) }
+	if err != nil {
+		return fmt.Errorf("list filemaps: %w", err)
+	}
 	providerPrefix := providerID + ":"
 	for _, fm := range maps {
 		for _, r := range fm.Replicas {
 			if r.CloudID == cloudID && strings.HasPrefix(r.Location, providerPrefix) {
-				if dErr := p.bm.Delete(fm.FileID); dErr != nil { return fmt.Errorf("delete filemap %s: %w", fm.FileID, dErr) }
+				if dErr := p.bm.Delete(fm.FileID); dErr != nil {
+					return fmt.Errorf("delete filemap %s: %w", fm.FileID, dErr)
+				}
 				return nil
 			}
 		}
@@ -317,7 +385,9 @@ func (p *Pipeline) DeleteByCloudID(providerID, cloudID string) error {
 // they show up in /files. Download uses CloudID. fileID is derived from CloudID for idempotency
 // across re-scans.
 func (p *Pipeline) RegisterForeign(providerID, cloudID, name, path string, size int64, mtime time.Time) error {
-	if cloudID == "" { return fmt.Errorf("cloudID required") }
+	if cloudID == "" {
+		return fmt.Errorf("cloudID required")
+	}
 	fileID := "foreign-" + cloudID // deterministic; safe across re-scans
 	fm := &types.FileMap{
 		Version:  blockmap.CurrentFileMapVersion,
@@ -351,17 +421,27 @@ func (p *Pipeline) RegisterForeign(providerID, cloudID, name, path string, size 
 // the rest; FileMap is saved only if at least one replica moved successfully.
 func (p *Pipeline) MoveFile(fileID, newDir string) error {
 	fm, err := p.bm.Load(fileID)
-	if err != nil { return fmt.Errorf("load: %w", err) }
+	if err != nil {
+		return fmt.Errorf("load: %w", err)
+	}
 	var firstErr error
 	anyMoved := false
 	for i, r := range fm.Replicas {
 		cloud := p.getCloudByLocation(r.Location)
-		if cloud == nil { continue }
-		if r.CloudID == "" { continue }
+		if cloud == nil {
+			continue
+		}
+		if r.CloudID == "" {
+			continue
+		}
 		mover, ok := cloud.(types.CloudMover)
-		if !ok { continue }
+		if !ok {
+			continue
+		}
 		if mErr := mover.MoveByID(r.CloudID, newDir); mErr != nil {
-			if firstErr == nil { firstErr = fmt.Errorf("move replica %d: %w", i, mErr) }
+			if firstErr == nil {
+				firstErr = fmt.Errorf("move replica %d: %w", i, mErr)
+			}
 			continue
 		}
 		parts := strings.SplitN(r.Location, ":", 2)
@@ -372,7 +452,9 @@ func (p *Pipeline) MoveFile(fileID, newDir string) error {
 		}
 	}
 	if anyMoved {
-		if sErr := p.bm.Save(fm); sErr != nil && firstErr == nil { firstErr = fmt.Errorf("save filemap after move: %w", sErr) }
+		if sErr := p.bm.Save(fm); sErr != nil && firstErr == nil {
+			firstErr = fmt.Errorf("save filemap after move: %w", sErr)
+		}
 	}
 	return firstErr
 }
@@ -385,23 +467,39 @@ type BackfillStats struct{ Scanned, Backfilled, Skipped, Errors int }
 func (p *Pipeline) BackfillCloudIDs() (BackfillStats, error) {
 	var stats BackfillStats
 	maps, err := p.bm.List()
-	if err != nil { return stats, fmt.Errorf("list filemaps: %w", err) }
+	if err != nil {
+		return stats, fmt.Errorf("list filemaps: %w", err)
+	}
 	for _, fm := range maps {
 		stats.Scanned++
 		changed := false
 		for i, r := range fm.Replicas {
-			if r.CloudID != "" { continue }
+			if r.CloudID != "" {
+				continue
+			}
 			cloud := p.getCloudByLocation(r.Location)
-			if cloud == nil { stats.Skipped++; continue }
+			if cloud == nil {
+				stats.Skipped++
+				continue
+			}
 			resolver, ok := cloud.(types.CloudIDResolver)
-			if !ok { stats.Skipped++; continue }
+			if !ok {
+				stats.Skipped++
+				continue
+			}
 			id, rErr := resolver.ResolvePathToID(parseCloudPath(r.Location))
-			if rErr != nil { stats.Errors++; continue }
+			if rErr != nil {
+				stats.Errors++
+				continue
+			}
 			fm.Replicas[i].CloudID = id
 			changed = true
 		}
 		if changed {
-			if sErr := p.bm.Save(fm); sErr != nil { stats.Errors++; continue }
+			if sErr := p.bm.Save(fm); sErr != nil {
+				stats.Errors++
+				continue
+			}
 			stats.Backfilled++
 		}
 	}
@@ -412,16 +510,22 @@ func (p *Pipeline) BackfillCloudIDs() (BackfillStats, error) {
 // Location format: "<provider>:<email>:<path>" (current), "<provider>:<path>" (legacy single-account uploads).
 func (p *Pipeline) getCloudByLocation(location string) types.CloudProvider {
 	parts := strings.SplitN(location, ":", 3)
-	if len(parts) < 2 { return nil }
+	if len(parts) < 2 {
+		return nil
+	}
 	if len(parts) == 3 { // current format: scheme:email:path
 		id := parts[0] + ":" + parts[1]
 		for _, c := range p.clouds {
-			if c.ID() == id { return c }
+			if c.ID() == id {
+				return c
+			}
 		}
 	}
 	scheme := parts[0] // legacy or fallback: first provider matching scheme prefix
 	for _, c := range p.clouds {
-		if c.ID() == scheme || strings.HasPrefix(c.ID(), scheme+":") { return c }
+		if c.ID() == scheme || strings.HasPrefix(c.ID(), scheme+":") {
+			return c
+		}
 	}
 	return nil
 }
@@ -431,7 +535,11 @@ func (p *Pipeline) getCloudByLocation(location string) types.CloudProvider {
 // "gdrive:photos/2026/05/foo.jpg"       → "photos/2026/05/foo.jpg"  (legacy)
 func parseCloudPath(location string) string {
 	parts := strings.SplitN(location, ":", 3)
-	if len(parts) == 3 { return parts[2] }
-	if len(parts) == 2 { return parts[1] }
+	if len(parts) == 3 {
+		return parts[2]
+	}
+	if len(parts) == 2 {
+		return parts[1]
+	}
 	return location
 }

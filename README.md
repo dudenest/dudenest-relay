@@ -162,6 +162,10 @@ Priority chain: **CLI flag > env var > relay.json > built-in defaults**
   },
   "upload": {
     "max_size_mb": 32
+  },
+  "cache": {
+    "manifest_max_files": 0,
+    "lazy_sidecars_on_list": false
   }
 }
 ```

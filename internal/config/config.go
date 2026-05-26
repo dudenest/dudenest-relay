@@ -44,7 +44,8 @@ type UploadConfig struct {
 	MaxSizeMB int `json:"max_size_mb"` // maximum single file upload size
 }
 type CacheConfig struct {
-	ManifestMaxFiles int `json:"manifest_max_files"` // 0 = no server-side cap
+	ManifestMaxFiles   int  `json:"manifest_max_files"`    // 0 = no server-side cap
+	LazySidecarsOnList bool `json:"lazy_sidecars_on_list"` // false = list/manifest never downloads originals
 }
 
 // Defaults returns the hardcoded production defaults.
@@ -56,7 +57,7 @@ func Defaults() *Config {
 		Backup:  BackupConfig{URL: "https://backup.dudenest.com", DebounceSeconds: 3},
 		NoVNC:   NoVNCConfig{BackendAddr: "127.0.0.1:6080"},
 		Upload:  UploadConfig{MaxSizeMB: 32},
-		Cache:   CacheConfig{ManifestMaxFiles: 0},
+		Cache:   CacheConfig{ManifestMaxFiles: 0, LazySidecarsOnList: false},
 	}
 }
 
