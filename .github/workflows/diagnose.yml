@@ -52,7 +52,7 @@ jobs:
           chmod 644 /tmp/diag-ssh/known_hosts
           echo "=== relay-poc: systemd service status ===" && \
             ssh -i /tmp/diag-ssh/id_relay -o UserKnownHostsFile=/tmp/diag-ssh/known_hosts -o StrictHostKeyChecking=yes root@10.51.1.119 \
-              'systemctl is-active relay.service && systemctl status relay.service --no-pager -l | tail -20' 2>&1 || echo "ssh failed"
+              'systemctl is-active dudenest-relay && systemctl status dudenest-relay --no-pager -l | tail -20' 2>&1 || echo "ssh failed"
           echo "=== relay-poc: relay binary version ===" && \
             ssh -i /tmp/diag-ssh/id_relay -o UserKnownHostsFile=/tmp/diag-ssh/known_hosts -o StrictHostKeyChecking=yes root@10.51.1.119 \
               'ls -lh /usr/local/bin/relay && /usr/local/bin/relay version 2>/dev/null || echo "no version flag"' 2>&1 || echo "ssh failed"
@@ -67,7 +67,7 @@ jobs:
               'cat /root/.config/dudenest/relay.env 2>/dev/null | sed "s/=.*/=REDACTED/" || echo "no relay.env"' 2>&1 || echo "ssh failed"
           echo "=== relay-poc: last 30 journal lines ===" && \
             ssh -i /tmp/diag-ssh/id_relay -o UserKnownHostsFile=/tmp/diag-ssh/known_hosts -o StrictHostKeyChecking=yes root@10.51.1.119 \
-              'journalctl -u relay.service -n 30 --no-pager 2>/dev/null || tail -30 /var/log/relay.log 2>/dev/null || echo "no logs"' 2>&1 || echo "ssh failed"
+              'journalctl -u dudenest-relay -n 30 --no-pager 2>/dev/null || tail -30 /var/log/relay.log 2>/dev/null || echo "no logs"' 2>&1 || echo "ssh failed"
           rm -rf /tmp/diag-ssh
 
       - name: JWT live test (relay-poc + Swarm)

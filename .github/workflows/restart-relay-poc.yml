@@ -5,7 +5,7 @@ jobs:
   restart:
     runs-on: [self-hosted, netol-swarm]
     steps:
-      - name: Restart relay.service on relay-poc via SSH
+      - name: Restart dudenest-relay on relay-poc via SSH
         run: |
           mkdir -p /tmp/restart-ssh
           printf '%s\n' "${{ secrets.SSH_RELAY_KEY }}" > /tmp/restart-ssh/id_relay
@@ -20,5 +20,5 @@ jobs:
               -o UserKnownHostsFile=/tmp/restart-ssh/known_hosts \
               -o StrictHostKeyChecking=yes \
               root@10.51.1.119 \
-              'rm -f /root/.config/dudenest/relay_creds.json && echo "relay_creds.json removed" && systemctl restart relay.service && sleep 2 && systemctl is-active relay.service && journalctl -u relay.service -n 15 --no-pager'
+              'rm -f /root/.config/dudenest/relay_creds.json && echo "relay_creds.json removed" && systemctl restart dudenest-relay && sleep 2 && systemctl is-active dudenest-relay && journalctl -u dudenest-relay -n 15 --no-pager'
           rm -rf /tmp/restart-ssh

@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - `GET /files` keeps the legacy response; Flutter can adopt the manifest endpoint without breaking older clients.
+- Relay-poc GitHub workflows restart the current `dudenest-relay` systemd unit instead of legacy `relay.service`.
 
 ---
 
