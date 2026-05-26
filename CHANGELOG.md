@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased] — 2026-05-26 — Tile manifest for instant gallery cache
+
+### Added
+- `GET /files/manifest?since=<revision>` returns a cache-friendly tile manifest with `revision`, `unchanged`, and `files`.
+- `cache.manifest_max_files` relay config field caps manifest size when an operator wants bounded API payloads.
+- Manifest regression test covers first snapshot and unchanged revision response.
+
+### Changed
+- `GET /files` keeps the legacy response; Flutter can adopt the manifest endpoint without breaking older clients.
+
+---
+
 ## [0.21.0] — 2026-05-24 — Storage model cleanup: only "1 file + N replicas" remains
 
 **Breaking persistence format** — transparently migrated on first Load. No data loss; no operator action required.

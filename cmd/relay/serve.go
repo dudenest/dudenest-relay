@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,16 +29,16 @@ import (
 	"github.com/dudenest/dudenest-relay/internal/index"
 	"github.com/dudenest/dudenest-relay/internal/pipeline"
 	"github.com/dudenest/dudenest-relay/internal/register"
-	"github.com/dudenest/dudenest-relay/internal/scan"
 	"github.com/dudenest/dudenest-relay/internal/relaytoken"
+	"github.com/dudenest/dudenest-relay/internal/scan"
 	"github.com/dudenest/dudenest-relay/internal/thumbnail"
 	"github.com/dudenest/dudenest-relay/internal/ws"
 	"github.com/dudenest/dudenest-relay/pkg/types"
 )
 
 var (
-	serveListen      string
-	relayConfigPath  string
+	serveListen     string
+	relayConfigPath string
 )
 
 func serveCmd() *cobra.Command {
@@ -73,13 +74,17 @@ func degradedServerWithAuth(listen, reason, configDir string, authSrv interface{
 		defer t.Stop()
 		for {
 			select {
-			case <-tickerCtx.Done(): return
-			case <-t.C: log.Printf("⚠️  relay: STANDBY (%s) — use /auth/url to re-authorize", reason)
+			case <-tickerCtx.Done():
+				return
+			case <-t.C:
+				log.Printf("⚠️  relay: STANDBY (%s) — use /auth/url to re-authorize", reason)
 			}
 		}
 	}()
 	standbyFile := func(w http.ResponseWriter, r *http.Request) { // validate JWT + trigger registration even in standby
-		if tryReg != nil { tryReg(r.Header.Get("Authorization")) }
+		if tryReg != nil {
+			tryReg(r.Header.Get("Authorization"))
+		}
 		jsonErr(w, "relay in standby: "+reason, http.StatusServiceUnavailable)
 	}
 	mux := http.NewServeMux()
@@ -92,21 +97,25 @@ func degradedServerWithAuth(listen, reason, configDir string, authSrv interface{
 	})
 	mux.HandleFunc("/files", standbyFile)
 	mux.HandleFunc("/files/", standbyFile)
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { jsonErr(w, "relay in standby: "+reason, http.StatusServiceUnavailable) })
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		jsonErr(w, "relay in standby: "+reason, http.StatusServiceUnavailable)
+	})
 	srv := &http.Server{Addr: listen, Handler: corsMiddleware(mux)}
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
 	log.Printf("⚠️  relay: standby server with auth listening on %s", listen)
 	select {
 	case err := <-errCh:
-		if err == http.ErrServerClosed { return nil }
+		if err == http.ErrServerClosed {
+			return nil
+		}
 		return err
 	case <-reload:
 		log.Printf("✅ relay: standby reload triggered (auth_done event) — shutting down to re-init pipeline")
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(ctx) //nolint:errcheck
-		return nil // signal to caller: retry getPipeline()
+		return nil            // signal to caller: retry getPipeline()
 	}
 }
 
@@ -115,11 +124,17 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	if serveListen != "" { cfg.Server.Listen = serveListen }         // --listen overrides config
-	if authDisplay != "" { cfg.Server.Display = authDisplay }        // --display overrides config
+	if serveListen != "" {
+		cfg.Server.Listen = serveListen
+	} // --listen overrides config
+	if authDisplay != "" {
+		cfg.Server.Display = authDisplay
+	} // --display overrides config
 	// --client-secret (browser auth flow) and --gdrive-secret (provider token refresh in getClouds()) refer to the SAME OAuth client_secret.json file.
 	// Historically declared as two separate flags with different defaults; systemd units only pass --client-secret, so getClouds() was reading the stale --gdrive-secret default (/root/.config/dudenest/...) which doesn't exist on installs that use /etc/dudenest. Sync them here so provider init can find the file.
-	if gdriveSecretPath != authClientSecret { gdriveSecretPath = authClientSecret }
+	if gdriveSecretPath != authClientSecret {
+		gdriveSecretPath = authClientSecret
+	}
 	cs, err := browser.LoadClientSecret(authClientSecret) // load auth config before pipeline — needed for standby mode too
 	if err != nil {
 		return fmt.Errorf("load client_secret: %w", err)
@@ -130,8 +145,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 		webCfg = browser.BuildWebOAuthConfig(id, secret, cfg.OAuth.WebRedirectURL)
 		fmt.Println("relay serve: web OAuth client loaded (GDRIVE_WEB_CLIENT_ID)")
 	}
-	register.LoadJWTSecret(authConfigDir)         // ZT bootstrap: restore jwt_secret from jwt_secret.txt if present
-	maybeAnnounce(authConfigDir, cfg.Backup.URL)  // ZT provisioning: announce to hub if no creds and ZT_ANNOUNCE=true
+	register.LoadJWTSecret(authConfigDir)        // ZT bootstrap: restore jwt_secret from jwt_secret.txt if present
+	maybeAnnounce(authConfigDir, cfg.Backup.URL) // ZT provisioning: announce to hub if no creds and ZT_ANNOUNCE=true
 	wsHub := ws.NewHub()
 	bm := blockmap.New(storePath) // blockmap for file_count in /auth/providers
 	authSrv := browser.NewServer(cfg.Server.Display, cfg.Server.Listen, browser.BuildAuthURL(cfg2), cfg2, webCfg, authConfigDir, wsHub, bm, cfg.OAuth.CallbackPort, cfg.NoVNC.BackendAddr, cfg.SessionTimeout())
@@ -140,10 +155,14 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// Does not need pipeline/fileServer — only configDir + backupURL.
 	var standbyRegOnce sync.Once
 	tryReg := func(authHeader string) {
-		if !strings.HasPrefix(authHeader, "Bearer ") { return }
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			return
+		}
 		token := strings.TrimPrefix(authHeader, "Bearer ")
 		claims, err := auth.ValidateJWT(token)
-		if err != nil || claims == nil || claims.Sub == "" { return }
+		if err != nil || claims == nil || claims.Sub == "" {
+			return
+		}
 		go standbyRegOnce.Do(func() {
 			creds2, err2 := register.RegisterOnceWithUserID(authConfigDir, claims.Sub, cfg.Backup.URL, cfg.Backup.PublicURL)
 			if err2 != nil {
@@ -170,13 +189,25 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// below — no process restart, no Flutter disconnect storm. Pre-v0.9.1 behavior required a manual
 	// systemctl restart at this point.
 	reload := make(chan struct{}, 1)
-	wsHub.SetOnAuthDone(func() { select { case reload <- struct{}{}: default: } })
+	wsHub.SetOnAuthDone(func() {
+		select {
+		case reload <- struct{}{}:
+		default:
+		}
+	})
 	var p *pipeline.Pipeline
 	for {
 		p, err = getPipeline()
-		if err == nil { break }
-		if !isCredentialError(err) { return fmt.Errorf("pipeline init: %w", err) }
-		select { case <-reload: default: } // drain stale signal so we wait fresh on the next standby cycle
+		if err == nil {
+			break
+		}
+		if !isCredentialError(err) {
+			return fmt.Errorf("pipeline init: %w", err)
+		}
+		select {
+		case <-reload:
+		default:
+		} // drain stale signal so we wait fresh on the next standby cycle
 		if serr := degradedServerWithAuth(cfg.Server.Listen, fmt.Sprintf("pipeline init: %v", err), authConfigDir, authSrv, wsHub, tryReg, reload); serr != nil {
 			return serr
 		}
@@ -216,13 +247,23 @@ func runServe(cmd *cobra.Command, args []string) error {
 		// rebuild from FileMaps. Inserting fm.LogicalAlias="" (canonical) and !="" (alias) is handled
 		// by BootstrapFromList. After this, p.SetIndex makes Upload short-circuit on duplicate hashes.
 		shaIdx := index.New(authConfigDir)
-		if err := shaIdx.Load(); err != nil { log.Printf("⚠️  sha_index load: %v (rebuilding from FileMaps)", err) }
+		if err := shaIdx.Load(); err != nil {
+			log.Printf("⚠️  sha_index load: %v (rebuilding from FileMaps)", err)
+		}
 		if maps, err := p.ListFiles(); err == nil {
-			boot := make([]struct{ FileID, Hash string; IsAlias bool }, 0, len(maps))
+			boot := make([]struct {
+				FileID, Hash string
+				IsAlias      bool
+			}, 0, len(maps))
 			for _, fm := range maps {
-				boot = append(boot, struct{ FileID, Hash string; IsAlias bool }{fm.FileID, fm.Hash, fm.LogicalAlias != ""})
+				boot = append(boot, struct {
+					FileID, Hash string
+					IsAlias      bool
+				}{fm.FileID, fm.Hash, fm.LogicalAlias != ""})
 			}
-			if err := shaIdx.BootstrapFromList(boot); err != nil { log.Printf("⚠️  sha_index bootstrap: %v", err) }
+			if err := shaIdx.BootstrapFromList(boot); err != nil {
+				log.Printf("⚠️  sha_index bootstrap: %v", err)
+			}
 		}
 		p.SetIndex(shaIdx)
 		hashCount, entryCount, aliasCount := shaIdx.Stats()
@@ -274,7 +315,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 	go func() {
 		log.Printf("✅ P5a: starting CloudID backfill pass over blockmap…")
 		stats, bfErr := p.BackfillCloudIDs()
-		if bfErr != nil { log.Printf("⚠️  P5a backfill: %v", bfErr); return }
+		if bfErr != nil {
+			log.Printf("⚠️  P5a backfill: %v", bfErr)
+			return
+		}
 		log.Printf("✅ P5a backfill done: scanned=%d backfilled=%d skipped=%d errors=%d", stats.Scanned, stats.Backfilled, stats.Skipped, stats.Errors)
 	}()
 	tc, err := thumbnail.NewCache(authConfigDir)
@@ -290,8 +334,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 			log.Printf("⚠️  ffmpeg: %v", err2)
 		}
 	}()
-	key, _ := getKey() // key already validated in getPipeline(), safe to ignore error here
-	var ownerFromCreds string // Layer 2: relay owner known at startup if relay was previously registered
+	key, _ := getKey()                                                                                              // key already validated in getPipeline(), safe to ignore error here
+	var ownerFromCreds string                                                                                       // Layer 2: relay owner known at startup if relay was previously registered
 	if creds, err2 := register.EnsureRegistered(authConfigDir, cfg.Backup.URL, cfg.Backup.PublicURL); err2 != nil { // auto-register with backup on first start
 		log.Printf("⚠️  register: %v (backup disabled)", err2)
 	} else if creds != nil {
@@ -325,9 +369,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 	mux := http.NewServeMux()
 	authSrv.RegisterRoutes(mux)
 	mux.Handle("/ws", wsHub) // WebSocket: Flutter connects for relay→Flutter auth requests
-	fs := &fileServer{p: p, thumbCache: tc, backupClient: bc, maxUploadBytes: cfg.MaxUploadBytes(), metaDir: metaDir}
+	fs := &fileServer{p: p, thumbCache: tc, backupClient: bc, maxUploadBytes: cfg.MaxUploadBytes(), metaDir: metaDir, manifestMaxFiles: cfg.Cache.ManifestMaxFiles}
 	lr := &lazyRegistrar{configDir: authConfigDir, masterKey: key, fs: fs, backupURL: cfg.Backup.URL, publicURL: cfg.Backup.PublicURL, debounce: cfg.Debounce()}
-	if ownerFromCreds != "" { lr.setOwner(ownerFromCreds) } // preload owner from creds (set before ListenAndServe, no races)
+	if ownerFromCreds != "" {
+		lr.setOwner(ownerFromCreds)
+	} // preload owner from creds (set before ListenAndServe, no races)
 	mux.HandleFunc("/relay/bootstrap", makeBootstrapHandler(authConfigDir)) // ZT provisioner delivers creds via ZT network
 	mux.HandleFunc("/files", requireAuthWithReg(lr, fs.handleList))
 	mux.HandleFunc("/files/", requireAuthWithReg(lr, fs.handleFile))
@@ -341,19 +387,23 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// P5c scan engine — Flutter Settings → Sync Status surface
 	getCloudsLive := func() []types.CloudProvider { cs, _ := getClouds(); return cs }
 	scanner, scErr := scan.New(p, getCloudsLive, filepath.Join(authConfigDir, "scan"))
-	if scErr != nil { log.Printf("⚠️  scan engine init: %v", scErr) }
+	if scErr != nil {
+		log.Printf("⚠️  scan engine init: %v", scErr)
+	}
 	if scanner != nil {
 		sh := &scanHandlers{scanner: scanner}
 		mux.HandleFunc("/admin/scan/status", requireAuthWithReg(lr, sh.handleStatus))
-		mux.HandleFunc("/admin/scan/start",  requireAuthWithReg(lr, sh.handleStart))
-		mux.HandleFunc("/admin/scan/pause",  requireAuthWithReg(lr, sh.handlePause))
+		mux.HandleFunc("/admin/scan/start", requireAuthWithReg(lr, sh.handleStart))
+		mux.HandleFunc("/admin/scan/pause", requireAuthWithReg(lr, sh.handlePause))
 		mux.HandleFunc("/admin/scan/bootstrap", requireAuthWithReg(lr, sh.handleBootstrapWholeDrive)) // s321 Drive-wide retro-index
 		mux.HandleFunc("/admin/scan/config", requireAuthWithReg(lr, sh.handleConfig))
 		// auth_done → kick scan for every currently-loaded provider (newly authorized one is among them)
 		wsHub.SetOnAuthDone(func() {
 			for _, cp := range getCloudsLive() {
 				go func(pid string) {
-					if _, err := scanner.Start(pid); err != nil { log.Printf("scan auto-start %s: %v", pid, err) }
+					if _, err := scanner.Start(pid); err != nil {
+						log.Printf("scan auto-start %s: %v", pid, err)
+					}
 				}(cp.ID())
 			}
 		})
@@ -377,14 +427,15 @@ type fileServer struct {
 		ListFiles() ([]*types.FileMap, error)
 		GetFileMap(fileID string) (*types.FileMap, error)
 		DeleteFile(fileID string) error
-		MoveFile(fileID, newDir string) error  // re-bucket a file when its TakenAtOverride changes; no data transfer
-		AccountManager() *account.Manager      // Phase α (v0.17.2+): may return nil for CLI/test paths; handleMeta uses it to read PathRoot policy when computing MoveFile destination directory
+		MoveFile(fileID, newDir string) error // re-bucket a file when its TakenAtOverride changes; no data transfer
+		AccountManager() *account.Manager     // Phase α (v0.17.2+): may return nil for CLI/test paths; handleMeta uses it to read PathRoot policy when computing MoveFile destination directory
 	}
-	thumbCache     *thumbnail.Cache
-	backupMu       sync.RWMutex
-	backupClient   *backup.Client // nil = backup disabled; may be set lazily after JWT registration
-	maxUploadBytes int64          // max multipart upload size (from config)
-	metaDir        string         // directory for per-file meta.json (favorites, albums, captions)
+	thumbCache       *thumbnail.Cache
+	backupMu         sync.RWMutex
+	backupClient     *backup.Client // nil = backup disabled; may be set lazily after JWT registration
+	maxUploadBytes   int64          // max multipart upload size (from config)
+	metaDir          string         // directory for per-file meta.json (favorites, albums, captions)
+	manifestMaxFiles int
 }
 
 // fileMeta stores user-editable metadata per file (favorites, albums, location, caption, date override).
@@ -416,7 +467,7 @@ func (fs *fileServer) setBackup(bc *backup.Client) {
 type lazyRegistrar struct {
 	once        sync.Once
 	mu          sync.RWMutex
-	ownerUserID string        // relay owner's JWT sub — set once (startup or first request), never changes
+	ownerUserID string // relay owner's JWT sub — set once (startup or first request), never changes
 	configDir   string
 	masterKey   []byte
 	fs          *fileServer
@@ -443,12 +494,16 @@ func (lr *lazyRegistrar) tryRegister(userID string) {
 			log.Printf("⚠️  lazy register: %v (backup disabled)", err)
 			return
 		}
-		if creds == nil { return }
+		if creds == nil {
+			return
+		}
 		os.Setenv("RELAY_ID", creds.RelayID)         //nolint:errcheck
 		os.Setenv("RELAY_SECRET", creds.RelaySecret) //nolint:errcheck
 		// Layer 2: set owner — from saved creds (new format) or from current JWT (old relay_creds.json without user_id)
 		ownerID := creds.UserID
-		if ownerID == "" { ownerID = userID }
+		if ownerID == "" {
+			ownerID = userID
+		}
 		lr.setOwner(ownerID)
 		// Backfill user_id in relay_creds.json and CRDB for old registrations that predate this field
 		if creds.UserID == "" {
@@ -467,7 +522,9 @@ func (lr *lazyRegistrar) tryRegister(userID string) {
 		if bc != nil {
 			lr.fs.setBackup(bc)
 			log.Printf("✅ lazy register: backup enabled (relay_id=%s owner=%s)", creds.RelayID, ownerID)
-			if maps, err2 := lr.fs.p.ListFiles(); err2 == nil { bc.Trigger(maps) } // initial snapshot
+			if maps, err2 := lr.fs.p.ListFiles(); err2 == nil {
+				bc.Trigger(maps)
+			} // initial snapshot
 			bc.StartPingLoop(30 * time.Second) // s313 Phase 0: 30s default; hub adapts to 3s during release burst window via next_ping_seconds
 		}
 	})
@@ -483,9 +540,13 @@ func (fs *fileServer) dimsPath(fileID string) string {
 // Returns zero Dims if file does not exist or is malformed.
 func (fs *fileServer) readDims(fileID string) thumbnail.Dims {
 	data, err := os.ReadFile(fs.dimsPath(fileID))
-	if err != nil { return thumbnail.Dims{} }
+	if err != nil {
+		return thumbnail.Dims{}
+	}
 	parts := strings.Fields(string(data))
-	if len(parts) < 2 { return thumbnail.Dims{} }
+	if len(parts) < 2 {
+		return thumbnail.Dims{}
+	}
 	w, _ := strconv.Atoi(parts[0])
 	h, _ := strconv.Atoi(parts[1])
 	d := thumbnail.Dims{Width: w, Height: h}
@@ -501,7 +562,9 @@ func (fs *fileServer) readDims(fileID string) thumbnail.Dims {
 // writeDims writes image metadata to a .dims sidecar file.
 func (fs *fileServer) writeDims(fileID string, d thumbnail.Dims) {
 	unix := int64(0)
-	if d.TakenAt != nil { unix = d.TakenAt.Unix() }
+	if d.TakenAt != nil {
+		unix = d.TakenAt.Unix()
+	}
 	content := strconv.Itoa(d.Width) + " " + strconv.Itoa(d.Height) + " " + strconv.FormatInt(unix, 10)
 	os.WriteFile(fs.dimsPath(fileID), []byte(content), 0o644) //nolint:errcheck
 }
@@ -519,35 +582,36 @@ func (fs *fileServer) writeDims(fileID string, d thumbnail.Dims) {
 // Default "files" preserves the pre-v0.11.0 behavior where everything was under files/ regardless
 // of content type — the Flutter side may further re-classify by extension as a secondary signal.
 func folderFromFileMap(fm *types.FileMap) string {
-	if len(fm.Replicas) == 0 { return types.FilesFolder }
+	if len(fm.Replicas) == 0 {
+		return types.FilesFolder
+	}
 	loc := fm.Replicas[0].Location // "<provider>:<email>:<relative_path>"
-	if strings.Contains(loc, "/"+types.PhotosFolder+"/") { return types.PhotosFolder } // new format with PathRoot
-	if strings.Contains(loc, ":"+types.PhotosFolder+"/") { return types.PhotosFolder } // legacy format without PathRoot
+	if strings.Contains(loc, "/"+types.PhotosFolder+"/") {
+		return types.PhotosFolder
+	} // new format with PathRoot
+	if strings.Contains(loc, ":"+types.PhotosFolder+"/") {
+		return types.PhotosFolder
+	} // legacy format without PathRoot
 	return types.FilesFolder
 }
 
-// handleList handles GET /files — returns list of uploaded FileMaps.
-func (fs *fileServer) handleList(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "GET only", http.StatusMethodNotAllowed)
-		return
-	}
+type fileSummary struct {
+	FileID  string     `json:"file_id"`
+	Name    string     `json:"name"`
+	Size    int64      `json:"size"`
+	Hash    string     `json:"hash"`
+	Created time.Time  `json:"created"`
+	Folder  string     `json:"folder"`             // P2/P3 redesign: "photos" (media) or "files" (non-media) — sourced from Replica.Location path prefix; Flutter Photos vs Files tabs filter on this
+	Width   int        `json:"width,omitempty"`    // original image width (0 = unknown/non-image)
+	Height  int        `json:"height,omitempty"`   // original image height
+	TakenAt *time.Time `json:"taken_at,omitempty"` // EXIF DateTimeOriginal; null if absent
+	LQIP    string     `json:"lqip,omitempty"`     // data:image/jpeg;base64,... tiny blur placeholder
+}
+
+func (fs *fileServer) fileSummaries() ([]fileSummary, string, error) {
 	maps, err := fs.p.ListFiles()
 	if err != nil {
-		jsonErr(w, "list files: "+err.Error(), 500)
-		return
-	}
-	type fileSummary struct {
-		FileID  string     `json:"file_id"`
-		Name    string     `json:"name"`
-		Size    int64      `json:"size"`
-		Hash    string     `json:"hash"`
-		Created time.Time  `json:"created"`
-		Folder  string     `json:"folder"`             // P2/P3 redesign: "photos" (media) or "files" (non-media) — sourced from Replica.Location path prefix; Flutter Photos vs Files tabs filter on this
-		Width   int        `json:"width,omitempty"`    // original image width (0 = unknown/non-image)
-		Height  int        `json:"height,omitempty"`   // original image height
-		TakenAt *time.Time `json:"taken_at,omitempty"` // EXIF DateTimeOriginal; null if absent
-		LQIP    string     `json:"lqip,omitempty"`     // data:image/jpeg;base64,... tiny blur placeholder
+		return nil, "", err
 	}
 	summaries := make([]fileSummary, 0, len(maps))
 	for _, fm := range maps {
@@ -555,7 +619,8 @@ func (fs *fileServer) handleList(w http.ResponseWriter, r *http.Request) {
 		// Fast path: read dims from cached medium preview if .dims sidecar is missing
 		if d.Width == 0 && fs.thumbCache.MediumExists(fm.FileID) {
 			if md, err2 := thumbnail.ReadDims(fs.thumbCache.MediumPath(fm.FileID)); err2 == nil && md.Width > 0 {
-				d.Width = md.Width; d.Height = md.Height
+				d.Width = md.Width
+				d.Height = md.Height
 				fs.writeDims(fm.FileID, d) // persist so next list is instant
 			}
 		}
@@ -567,22 +632,67 @@ func (fs *fileServer) handleList(w http.ResponseWriter, r *http.Request) {
 		// F1 dedup: alias FileMap has no Replicas — derive folder from canonical (one cached lookup).
 		folder := folderFromFileMap(fm)
 		if fm.LogicalAlias != "" && len(fm.Replicas) == 0 {
-			if canonical, gerr := fs.p.GetFileMap(fm.LogicalAlias); gerr == nil { folder = folderFromFileMap(canonical) }
+			if canonical, gerr := fs.p.GetFileMap(fm.LogicalAlias); gerr == nil {
+				folder = folderFromFileMap(canonical)
+			}
 		}
 		summaries = append(summaries, fileSummary{
 			FileID: fm.FileID, Name: fm.Name, Size: fm.Size, Hash: fm.Hash, Created: fm.Created,
 			Folder: folder,
-			Width: d.Width, Height: d.Height, TakenAt: d.TakenAt, LQIP: string(lqipData),
+			Width:  d.Width, Height: d.Height, TakenAt: d.TakenAt, LQIP: string(lqipData),
 		})
+	}
+	if fs.manifestMaxFiles > 0 && len(summaries) > fs.manifestMaxFiles {
+		summaries = summaries[:fs.manifestMaxFiles]
+	}
+	raw, _ := json.Marshal(summaries)
+	sum := sha256.Sum256(raw)
+	return summaries, fmt.Sprintf("sha256:%x", sum[:12]), nil
+}
+
+// handleList handles GET /files — returns list of uploaded FileMaps.
+func (fs *fileServer) handleList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	summaries, _, err := fs.fileSummaries()
+	if err != nil {
+		jsonErr(w, "list files: "+err.Error(), 500)
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"files": summaries}) //nolint:errcheck
+}
+
+// handleManifest returns a cache-friendly tile manifest. If ?since=<revision> matches
+// the current revision, the response omits files so Flutter can keep its local snapshot.
+func (fs *fileServer) handleManifest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	summaries, rev, err := fs.fileSummaries()
+	if err != nil {
+		jsonErr(w, "manifest: "+err.Error(), 500)
+		return
+	}
+	unchanged := r.URL.Query().Get("since") == rev
+	resp := map[string]any{"revision": rev, "unchanged": unchanged, "files": []fileSummary{}}
+	if !unchanged {
+		resp["files"] = summaries
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(resp) //nolint:errcheck
 }
 
 // handleFile dispatches /files/{id}, /files/{id}/thumbnail, and /files/upload.
 func (fs *fileServer) handleFile(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/files/")
 	switch {
+	case path == "manifest" && r.Method == http.MethodGet:
+		fs.handleManifest(w, r)
 	case path == "upload" && r.Method == http.MethodPost:
 		fs.handleUpload(w, r)
 	case strings.HasSuffix(path, "/thumbnail") && r.Method == http.MethodGet:
@@ -611,6 +721,7 @@ func (fs *fileServer) handleGetMap(w http.ResponseWriter, r *http.Request, fileI
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(fm) //nolint:errcheck
 }
+
 // handleUpload accepts multipart/form-data with field "file", uploads via pipeline.
 func (fs *fileServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(fs.maxUploadBytes); err != nil {
@@ -680,7 +791,9 @@ func (fs *fileServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 			}
 			// LQIP from medium preview (aspect-preserving) — fallback to square thumbnail
 			lqipSrc := fs.thumbCache.MediumPath(fm.FileID)
-			if !fs.thumbCache.MediumExists(fm.FileID) { lqipSrc = thumbPath }
+			if !fs.thumbCache.MediumExists(fm.FileID) {
+				lqipSrc = thumbPath
+			}
 			if lqip := thumbnail.LQIPBase64(lqipSrc); lqip != "" {
 				os.WriteFile(fs.thumbCache.LQIPPath(fm.FileID), []byte(lqip), 0o644) //nolint:errcheck
 			}
@@ -739,7 +852,9 @@ func (fs *fileServer) handleThumbnail(w http.ResponseWriter, r *http.Request, fi
 	if !fs.thumbCache.Exists(fileID) { // lazy-generate: download full file once, then cache
 		fm, _ := fs.p.GetFileMap(fileID)
 		ext := ""
-		if fm != nil { ext = strings.ToLower(filepath.Ext(fm.Name)) }
+		if fm != nil {
+			ext = strings.ToLower(filepath.Ext(fm.Name))
+		}
 		tmp, err := os.CreateTemp("", "relay-thumb-*"+ext) // preserve extension so ffmpeg detects format
 		if err != nil {
 			jsonErr(w, "tmp file: "+err.Error(), 500)
@@ -762,11 +877,15 @@ func (fs *fileServer) handleThumbnail(w http.ResponseWriter, r *http.Request, fi
 				jsonErr(w, "generate thumbnail: "+err2.Error(), 500)
 				return
 			}
-			if dims.Width > 0 { fs.writeDims(fileID, dims) } // cache dims on lazy generation
+			if dims.Width > 0 {
+				fs.writeDims(fileID, dims)
+			} // cache dims on lazy generation
 		}
 		// Generate LQIP lazily after thumbnail is ready (best-effort, non-blocking)
 		name := fileID
-		if fm != nil { name = fm.Name }
+		if fm != nil {
+			name = fm.Name
+		}
 		go fs.lazyGenSidecars(fileID, name)
 	}
 	data, err := os.ReadFile(thumbPath)
@@ -793,9 +912,11 @@ func (fs *fileServer) handleDelete(w http.ResponseWriter, r *http.Request, fileI
 }
 
 // requireAuthWithReg validates JWT Bearer token and enforces three security layers:
-//   Layer 1 — network isolation (separate relay VM per user; enforced at infrastructure level)
-//   Layer 2 — JWT sub must match relay owner's user_id (stored in relay_creds.json)
-//   Layer 3 — X-Relay-Token must be a valid HMAC signed by backup using relay_secret
+//
+//	Layer 1 — network isolation (separate relay VM per user; enforced at infrastructure level)
+//	Layer 2 — JWT sub must match relay owner's user_id (stored in relay_creds.json)
+//	Layer 3 — X-Relay-Token must be a valid HMAC signed by backup using relay_secret
+//
 // Also triggers lazy relay registration on first valid request (sync.Once).
 func requireAuthWithReg(lr *lazyRegistrar, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -849,6 +970,7 @@ func requireAuthWithReg(lr *lazyRegistrar, next http.HandlerFunc) http.HandlerFu
 		next.ServeHTTP(w, r)
 	}
 }
+
 // corsMiddleware adds CORS headers for Flutter web clients.
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -862,30 +984,50 @@ func corsMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
 // makeBootstrapHandler returns a handler for POST /relay/bootstrap.
 // Called by relay-provisioner via ZT network after ZT member is authorized.
 // Validates X-Announce-Token, writes relay_creds.json, sets RELAY_ID + RELAY_SECRET env vars.
 // Auth: one-time token saved at announce time (announce_token.tmp) — deleted after use.
 func makeBootstrapHandler(configDir string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost { http.Error(w, "POST only", http.StatusMethodNotAllowed); return }
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
 		token := r.Header.Get("X-Announce-Token")
-		if token == "" { jsonErr(w, "X-Announce-Token required", http.StatusUnauthorized); return }
+		if token == "" {
+			jsonErr(w, "X-Announce-Token required", http.StatusUnauthorized)
+			return
+		}
 		saved, err := register.LoadAnnounceToken(configDir)
-		if err != nil { jsonErr(w, "no pending announce (not in ZT provisioning mode)", http.StatusBadRequest); return }
-		if token != saved { jsonErr(w, "invalid announce token", http.StatusUnauthorized); return }
+		if err != nil {
+			jsonErr(w, "no pending announce (not in ZT provisioning mode)", http.StatusBadRequest)
+			return
+		}
+		if token != saved {
+			jsonErr(w, "invalid announce token", http.StatusUnauthorized)
+			return
+		}
 		var payload register.BootstrapPayload
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil { jsonErr(w, "bad json: "+err.Error(), 400); return }
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			jsonErr(w, "bad json: "+err.Error(), 400)
+			return
+		}
 		if payload.RelayID == "" || payload.RelaySecret == "" || payload.JWTSecret == "" {
-			jsonErr(w, "relay_id, relay_secret, jwt_secret required", 400); return
+			jsonErr(w, "relay_id, relay_secret, jwt_secret required", 400)
+			return
 		}
 		if _, err := register.WriteBootstrapCreds(configDir, &payload); err != nil {
-			jsonErr(w, "write creds: "+err.Error(), 500); return
+			jsonErr(w, "write creds: "+err.Error(), 500)
+			return
 		}
 		os.Setenv("RELAY_ID", payload.RelayID)         //nolint:errcheck
 		os.Setenv("RELAY_SECRET", payload.RelaySecret) //nolint:errcheck
 		os.Setenv("JWT_SECRET", payload.JWTSecret)     //nolint:errcheck — sets for current process; relay.env updated by install script
-		if payload.BackupURL != "" { os.Setenv("BACKUP_URL", payload.BackupURL) } //nolint:errcheck
+		if payload.BackupURL != "" {
+			os.Setenv("BACKUP_URL", payload.BackupURL)
+		} //nolint:errcheck
 		register.ClearAnnounceToken(configDir) // one-time use — delete after success
 		log.Printf("✅ relay bootstrapped: relay_id=%s relay_url=%s", payload.RelayID, payload.RelayURL)
 		w.Header().Set("Content-Type", "application/json")
@@ -897,8 +1039,12 @@ func makeBootstrapHandler(configDir string) http.HandlerFunc {
 // Relay-pull arch: after announce, polls GET /relay/bootstrap?announce_token=<token> in background.
 // Non-fatal — relay enters standby and waits for bootstrap credentials.
 func maybeAnnounce(configDir, hubURL string) {
-	if os.Getenv("ZT_ANNOUNCE") != "true" { return } // ZT provisioning mode must be explicitly enabled
-	if _, err := os.ReadFile(filepath.Join(configDir, "relay_creds.json")); err == nil { return } // already registered
+	if os.Getenv("ZT_ANNOUNCE") != "true" {
+		return
+	} // ZT provisioning mode must be explicitly enabled
+	if _, err := os.ReadFile(filepath.Join(configDir, "relay_creds.json")); err == nil {
+		return
+	} // already registered
 	log.Printf("relay: ZT provisioning mode — announcing to %s ...", hubURL)
 	token, err := register.Announce(configDir, hubURL)
 	if err != nil {
@@ -925,14 +1071,23 @@ func isCredentialError(err error) bool {
 // handlePreview serves an 800px medium JPEG preview; lazy-generates from the original if missing.
 // Falls back to the 200px thumbnail for video files or unsupported image formats.
 func (fs *fileServer) handlePreview(w http.ResponseWriter, r *http.Request, fileID string) {
-	if fileID == "" { http.NotFound(w, r); return }
+	if fileID == "" {
+		http.NotFound(w, r)
+		return
+	}
 	mediumPath := fs.thumbCache.MediumPath(fileID)
 	if !fs.thumbCache.MediumExists(fileID) {
 		tmp, err := os.CreateTemp("", "relay-preview-*")
-		if err != nil { jsonErr(w, "tmp: "+err.Error(), 500); return }
+		if err != nil {
+			jsonErr(w, "tmp: "+err.Error(), 500)
+			return
+		}
 		tmp.Close()
 		defer os.Remove(tmp.Name())
-		if err := fs.p.Download(fileID, tmp.Name()); err != nil { jsonErr(w, "download: "+err.Error(), 500); return }
+		if err := fs.p.Download(fileID, tmp.Name()); err != nil {
+			jsonErr(w, "download: "+err.Error(), 500)
+			return
+		}
 		if err := thumbnail.GenerateMedium(tmp.Name(), mediumPath); err != nil {
 			// Not a supported image (e.g. video) — fall back to thumbnail; generate video thumb if missing
 			thumbPath := fs.thumbCache.Path(fileID)
@@ -953,7 +1108,10 @@ func (fs *fileServer) handlePreview(w http.ResponseWriter, r *http.Request, file
 		}
 	}
 	data, err := os.ReadFile(mediumPath)
-	if err != nil { jsonErr(w, "read preview: "+err.Error(), 500); return }
+	if err != nil {
+		jsonErr(w, "read preview: "+err.Error(), 500)
+		return
+	}
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	w.Write(data) //nolint:errcheck
@@ -961,7 +1119,10 @@ func (fs *fileServer) handlePreview(w http.ResponseWriter, r *http.Request, file
 
 // handleMeta handles GET/PATCH /files/{id}/meta for favorites, albums, location, caption.
 func (fs *fileServer) handleMeta(w http.ResponseWriter, r *http.Request, fileID string) {
-	if fileID == "" { http.NotFound(w, r); return }
+	if fileID == "" {
+		http.NotFound(w, r)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		m := fs.readMeta(fileID)
@@ -969,9 +1130,15 @@ func (fs *fileServer) handleMeta(w http.ResponseWriter, r *http.Request, fileID 
 		json.NewEncoder(w).Encode(m) //nolint:errcheck
 	case http.MethodPatch:
 		var patch fileMeta
-		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil { jsonErr(w, "bad json: "+err.Error(), 400); return }
+		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+			jsonErr(w, "bad json: "+err.Error(), 400)
+			return
+		}
 		prev := fs.readMeta(fileID)
-		if err := fs.writeMeta(fileID, patch); err != nil { jsonErr(w, "write meta: "+err.Error(), 500); return }
+		if err := fs.writeMeta(fileID, patch); err != nil {
+			jsonErr(w, "write meta: "+err.Error(), 500)
+			return
+		}
 		// P5b: TakenAtOverride changed → re-bucket file into new YYYY/MM folder via MoveByID.
 		// CloudID stays the same; only path changes. Best-effort — failure here doesn't fail the PATCH
 		// (meta is persisted regardless; user can retry move via re-PATCH same value or admin endpoint).
@@ -1015,11 +1182,15 @@ func (fs *fileServer) handleMeta(w http.ResponseWriter, r *http.Request, fileID 
 	}
 }
 
-func (fs *fileServer) metaPath(fileID string) string { return filepath.Join(fs.metaDir, fileID+".json") }
+func (fs *fileServer) metaPath(fileID string) string {
+	return filepath.Join(fs.metaDir, fileID+".json")
+}
 
 func (fs *fileServer) readMeta(fileID string) fileMeta {
 	data, err := os.ReadFile(fs.metaPath(fileID))
-	if err != nil { return fileMeta{} }
+	if err != nil {
+		return fileMeta{}
+	}
 	var m fileMeta
 	json.Unmarshal(data, &m) //nolint:errcheck
 	return m
@@ -1027,7 +1198,9 @@ func (fs *fileServer) readMeta(fileID string) fileMeta {
 
 func (fs *fileServer) writeMeta(fileID string, m fileMeta) error {
 	data, err := json.Marshal(m)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	return os.WriteFile(fs.metaPath(fileID), data, 0o644)
 }
 
@@ -1048,7 +1221,9 @@ var lazyGenMu sync.Map
 // thumbnail (images+videos), dims, medium preview (800px), and LQIP.
 // Called from handleList and handleThumbnail; safe to call concurrently — deduplicated.
 func (fs *fileServer) lazyGenSidecars(fileID, nameOrExt string) {
-	if _, loaded := lazyGenMu.LoadOrStore(fileID, true); loaded { return }
+	if _, loaded := lazyGenMu.LoadOrStore(fileID, true); loaded {
+		return
+	}
 	defer lazyGenMu.Delete(fileID)
 
 	ext := strings.ToLower(filepath.Ext(nameOrExt))
@@ -1057,14 +1232,19 @@ func (fs *fileServer) lazyGenSidecars(fileID, nameOrExt string) {
 	mediumPath := fs.thumbCache.MediumPath(fileID)
 	lqipPath := fs.thumbCache.LQIPPath(fileID)
 
-	needThumb  := !fs.thumbCache.Exists(fileID)
-	needDims   := !fileExists(fs.dimsPath(fileID))
+	needThumb := !fs.thumbCache.Exists(fileID)
+	needDims := !fileExists(fs.dimsPath(fileID))
 	needMedium := !isVideo && !fs.thumbCache.MediumExists(fileID)
-	needLQIP   := !fs.thumbCache.LQIPExists(fileID)
-	if !needThumb && !needDims && !needMedium && !needLQIP { return }
+	needLQIP := !fs.thumbCache.LQIPExists(fileID)
+	if !needThumb && !needDims && !needMedium && !needLQIP {
+		return
+	}
 
 	tmp, err := os.CreateTemp("", "relay-lazy-*"+ext)
-	if err != nil { log.Printf("⚠️  lazyGenSidecars %s: tmp: %v", fileID, err); return }
+	if err != nil {
+		log.Printf("⚠️  lazyGenSidecars %s: tmp: %v", fileID, err)
+		return
+	}
 	tmp.Close()
 	defer os.Remove(tmp.Name())
 	if err := fs.p.Download(fileID, tmp.Name()); err != nil {
@@ -1096,7 +1276,9 @@ func (fs *fileServer) lazyGenSidecars(fileID, nameOrExt string) {
 	if needLQIP {
 		// Prefer medium preview (aspect-preserving); fall back to thumbnail (square)
 		lqipSrc := mediumPath
-		if !fs.thumbCache.MediumExists(fileID) { lqipSrc = thumbPath }
+		if !fs.thumbCache.MediumExists(fileID) {
+			lqipSrc = thumbPath
+		}
 		if lqip := thumbnail.LQIPBase64(lqipSrc); lqip != "" {
 			os.WriteFile(lqipPath, []byte(lqip), 0o644) //nolint:errcheck
 		}

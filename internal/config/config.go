@@ -19,6 +19,7 @@ type Config struct {
 	Backup  BackupConfig  `json:"backup"`
 	NoVNC   NoVNCConfig   `json:"novnc"`
 	Upload  UploadConfig  `json:"upload"`
+	Cache   CacheConfig   `json:"cache"`
 }
 type ServerConfig struct {
 	Listen  string `json:"listen"`  // HTTP listen address
@@ -42,6 +43,9 @@ type NoVNCConfig struct {
 type UploadConfig struct {
 	MaxSizeMB int `json:"max_size_mb"` // maximum single file upload size
 }
+type CacheConfig struct {
+	ManifestMaxFiles int `json:"manifest_max_files"` // 0 = no server-side cap
+}
 
 // Defaults returns the hardcoded production defaults.
 func Defaults() *Config {
@@ -52,6 +56,7 @@ func Defaults() *Config {
 		Backup:  BackupConfig{URL: "https://backup.dudenest.com", DebounceSeconds: 3},
 		NoVNC:   NoVNCConfig{BackendAddr: "127.0.0.1:6080"},
 		Upload:  UploadConfig{MaxSizeMB: 32},
+		Cache:   CacheConfig{ManifestMaxFiles: 0},
 	}
 }
 
@@ -85,10 +90,18 @@ func Load(path string) (*Config, error) {
 // applyEnvOverrides applies environment variable overrides on top of file config.
 // Only non-sensitive values are overridable via env; secrets stay in CI/CD vars.
 func applyEnvOverrides(cfg *Config) {
-	if v := os.Getenv("BACKUP_URL"); v != "" { cfg.Backup.URL = v }
-	if v := os.Getenv("RELAY_PUBLIC_URL"); v != "" { cfg.Backup.PublicURL = v } // public URL of this relay — set per-deployment in relay.env
-	if v := os.Getenv("RELAY_LISTEN"); v != "" { cfg.Server.Listen = v }
-	if v := os.Getenv("RELAY_DISPLAY"); v != "" { cfg.Server.Display = v }
+	if v := os.Getenv("BACKUP_URL"); v != "" {
+		cfg.Backup.URL = v
+	}
+	if v := os.Getenv("RELAY_PUBLIC_URL"); v != "" {
+		cfg.Backup.PublicURL = v
+	} // public URL of this relay — set per-deployment in relay.env
+	if v := os.Getenv("RELAY_LISTEN"); v != "" {
+		cfg.Server.Listen = v
+	}
+	if v := os.Getenv("RELAY_DISPLAY"); v != "" {
+		cfg.Server.Display = v
+	}
 }
 
 // SessionTimeout returns browser session expiry duration.
