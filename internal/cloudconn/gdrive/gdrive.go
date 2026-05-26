@@ -101,12 +101,16 @@ func (p *Provider) UploadAndReturnID(path string, data []byte) (string, error) {
 	body := bytes.NewReader(data)
 	if existingID != "" {
 		f, err := p.svc.Files.Update(existingID, meta).Media(body).Fields("id").Do()
-		if err != nil { return "", err }
+		if err != nil {
+			return "", err
+		}
 		return f.Id, nil
 	}
 	meta.Parents = []string{parentID}
 	f, err := p.svc.Files.Create(meta).Media(body).Fields("id").Do()
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 	return f.Id, nil
 }
 
@@ -114,14 +118,9 @@ func (p *Provider) UploadAndReturnID(path string, data []byte) (string, error) {
 // — pre-v0.10.0 this method called ensurePath which silently provisioned empty trees for every missing
 // FileMap, leaking folders on Drive).
 func (p *Provider) Download(path string) ([]byte, error) {
-	dir, name := filepath.Dir(path), filepath.Base(path)
-	parentID, err := p.findPath(dir)
+	fileID, err := p.resolveFilePath(path)
 	if err != nil {
-		return nil, fmt.Errorf("find dir %s: %w", dir, err)
-	}
-	fileID, err := p.findFile(name, parentID)
-	if err != nil {
-		return nil, fmt.Errorf("find file %s: %w", name, err)
+		return nil, err
 	}
 	resp, err := p.svc.Files.Get(fileID).Download()
 	if err != nil {
@@ -135,14 +134,9 @@ func (p *Provider) Download(path string) ([]byte, error) {
 
 // Delete removes the file at path. Same read-only findPath as Download — never creates folders.
 func (p *Provider) Delete(path string) error {
-	dir, name := filepath.Dir(path), filepath.Base(path)
-	parentID, err := p.findPath(dir)
+	fileID, err := p.resolveFilePath(path)
 	if err != nil {
-		return fmt.Errorf("find dir %s: %w", dir, err)
-	}
-	fileID, err := p.findFile(name, parentID)
-	if err != nil {
-		return fmt.Errorf("find file %s: %w", name, err)
+		return err
 	}
 	return p.svc.Files.Delete(fileID).Do()
 }
@@ -154,7 +148,9 @@ func (p *Provider) Delete(path string) error {
 // stays valid even if the path our blockmap remembers is stale.
 func (p *Provider) DownloadByID(cloudID string) ([]byte, error) {
 	resp, err := p.svc.Files.Get(cloudID).Download()
-	if err != nil { return nil, fmt.Errorf("download id %s: %w", cloudID, err) }
+	if err != nil {
+		return nil, fmt.Errorf("download id %s: %w", cloudID, err)
+	}
 	defer resp.Body.Close()
 	buf := new(bytes.Buffer)
 	_, err = buf.ReadFrom(resp.Body)
@@ -170,11 +166,29 @@ func (p *Provider) DeleteByID(cloudID string) error {
 // pre-CloudID FileMaps. Performs the same path walk as findPath + findFile but returns
 // the Drive file ID without touching content. Cheap (1-2 Drive API calls per file).
 func (p *Provider) ResolvePathToID(path string) (string, error) {
+	return p.resolveFilePath(path)
+}
+
+func (p *Provider) resolveFilePath(path string) (string, error) {
 	dir, name := filepath.Dir(path), filepath.Base(path)
 	parentID, err := p.findPath(dir)
-	if err != nil { return "", fmt.Errorf("find dir %s: %w", dir, err) }
-	id, err := p.findFile(name, parentID)
-	if err != nil { return "", fmt.Errorf("find file %s: %w", name, err) }
+	if err == nil {
+		if id, ferr := p.findFile(name, parentID); ferr == nil {
+			return id, nil
+		} else {
+			err = fmt.Errorf("find file %s: %w", name, ferr)
+		}
+	} else {
+		err = fmt.Errorf("find dir %s: %w", dir, err)
+	}
+	legacyParentID, legacyErr := p.findRootPath(dir)
+	if legacyErr != nil {
+		return "", fmt.Errorf("%w; legacy root fallback: find dir %s: %w", err, dir, legacyErr)
+	}
+	id, legacyErr := p.findFile(name, legacyParentID)
+	if legacyErr != nil {
+		return "", fmt.Errorf("%w; legacy root fallback: find file %s: %w", err, name, legacyErr)
+	}
 	return id, nil
 }
 
@@ -185,18 +199,25 @@ func (p *Provider) ResolvePathToID(path string) (string, error) {
 //
 // Drive's files.update natively supports parent reparenting via addParents + removeParents.
 // We:
-//   1. ensurePath(newPath) → resolves/creates target folder, returns its ID
-//   2. Get current file metadata (specifically the parents field)
-//   3. files.update(id, addParents=newParent, removeParents=oldParents)
+//  1. ensurePath(newPath) → resolves/creates target folder, returns its ID
+//  2. Get current file metadata (specifically the parents field)
+//  3. files.update(id, addParents=newParent, removeParents=oldParents)
+//
 // All in 3 API calls. No data transfer.
 func (p *Provider) MoveByID(cloudID, newPath string) error {
 	newParentID, err := p.ensurePath(newPath)
-	if err != nil { return fmt.Errorf("ensure dest %s: %w", newPath, err) }
+	if err != nil {
+		return fmt.Errorf("ensure dest %s: %w", newPath, err)
+	}
 	cur, err := p.svc.Files.Get(cloudID).Fields("parents").Do()
-	if err != nil { return fmt.Errorf("get parents %s: %w", cloudID, err) }
+	if err != nil {
+		return fmt.Errorf("get parents %s: %w", cloudID, err)
+	}
 	addParents := newParentID
 	removeParents := strings.Join(cur.Parents, ",")
-	if removeParents == newParentID { return nil } // already there — no-op
+	if removeParents == newParentID {
+		return nil
+	} // already there — no-op
 	_, err = p.svc.Files.Update(cloudID, &drive.File{}).
 		AddParents(addParents).
 		RemoveParents(removeParents).
@@ -234,26 +255,36 @@ func (p *Provider) Available() bool {
 // and must throttle (P6 user-aware scan-engine throttling).
 func (p *Provider) List(prefix string) ([]types.Entry, error) {
 	parentID, err := p.findPath(prefix)
-	if err != nil { return nil, fmt.Errorf("find prefix %q: %w", prefix, err) }
+	if err != nil {
+		return nil, fmt.Errorf("find prefix %q: %w", prefix, err)
+	}
 	q := fmt.Sprintf("%q in parents and trashed=false", parentID)
 	out := make([]types.Entry, 0, 64)
 	pageToken := ""
 	for {
 		call := p.svc.Files.List().Q(q).PageSize(1000).Fields("nextPageToken, files(id, name, mimeType, size, modifiedTime)")
-		if pageToken != "" { call = call.PageToken(pageToken) }
+		if pageToken != "" {
+			call = call.PageToken(pageToken)
+		}
 		resp, lerr := call.Do()
-		if lerr != nil { return nil, fmt.Errorf("list under %q: %w", prefix, lerr) }
+		if lerr != nil {
+			return nil, fmt.Errorf("list under %q: %w", prefix, lerr)
+		}
 		for _, f := range resp.Files {
 			isDir := f.MimeType == "application/vnd.google-apps.folder"
 			childPath := f.Name
-			if prefix != "" && prefix != "." { childPath = strings.TrimRight(prefix, "/") + "/" + f.Name }
+			if prefix != "" && prefix != "." {
+				childPath = strings.TrimRight(prefix, "/") + "/" + f.Name
+			}
 			mt, _ := time.Parse(time.RFC3339, f.ModifiedTime) // empty/parse-failure → zero time, callers treat as "unknown"
 			out = append(out, types.Entry{
 				Path: childPath, Name: f.Name, Size: f.Size, MTime: mt, IsDir: isDir,
 				CloudID: f.Id, // P5a: capture permanent Drive file ID for scan engine + backfill use
 			})
 		}
-		if resp.NextPageToken == "" { break }
+		if resp.NextPageToken == "" {
+			break
+		}
 		pageToken = resp.NextPageToken
 	}
 	return out, nil
@@ -271,19 +302,29 @@ func (p *Provider) ensurePath(dir string) (string, error) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if id, ok := p.folderCache[dir]; ok { return id, nil } // fast path: full path cached
+	if id, ok := p.folderCache[dir]; ok {
+		return id, nil
+	} // fast path: full path cached
 	parts := strings.Split(strings.Trim(dir, "/"), "/")
 	parentID := p.baseFolderID
 	accumulated := ""
 	for _, part := range parts {
-		if part == "" || part == "." { continue }
-		if accumulated != "" { accumulated += "/" + part } else { accumulated = part }
+		if part == "" || part == "." {
+			continue
+		}
+		if accumulated != "" {
+			accumulated += "/" + part
+		} else {
+			accumulated = part
+		}
 		if id, ok := p.folderCache[accumulated]; ok { // partial path cached
 			parentID = id
 			continue
 		}
 		id, err := p.ensureFolder(part, parentID)
-		if err != nil { return "", fmt.Errorf("folder %s: %w", accumulated, err) }
+		if err != nil {
+			return "", fmt.Errorf("folder %s: %w", accumulated, err)
+		}
 		p.folderCache[accumulated] = id
 		parentID = id
 	}
@@ -294,23 +335,45 @@ func (p *Provider) ensurePath(dir string) (string, error) {
 // creating anything. Returns an error if any intermediate folder doesn't exist — callers (Download
 // and Delete) propagate this as a clean miss rather than silently creating empty folder trees.
 func (p *Provider) findPath(dir string) (string, error) {
-	if dir == "" || dir == "." { return p.baseFolderID, nil }
+	return p.findPathFrom(dir, p.baseFolderID, "")
+}
+
+func (p *Provider) findRootPath(dir string) (string, error) {
+	return p.findPathFrom(dir, "root", "root:")
+}
+
+func (p *Provider) findPathFrom(dir, startID, cachePrefix string) (string, error) {
+	if dir == "" || dir == "." {
+		return startID, nil
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if id, ok := p.folderCache[dir]; ok { return id, nil }
+	cacheKey := cachePrefix + dir
+	if id, ok := p.folderCache[cacheKey]; ok {
+		return id, nil
+	}
 	parts := strings.Split(strings.Trim(dir, "/"), "/")
-	parentID := p.baseFolderID
+	parentID := startID
 	accumulated := ""
 	for _, part := range parts {
-		if part == "" || part == "." { continue }
-		if accumulated != "" { accumulated += "/" + part } else { accumulated = part }
-		if id, ok := p.folderCache[accumulated]; ok {
+		if part == "" || part == "." {
+			continue
+		}
+		if accumulated != "" {
+			accumulated += "/" + part
+		} else {
+			accumulated = part
+		}
+		key := cachePrefix + accumulated
+		if id, ok := p.folderCache[key]; ok {
 			parentID = id
 			continue
 		}
 		id, err := p.findFolder(part, parentID)
-		if err != nil { return "", fmt.Errorf("find folder %s: %w", accumulated, err) }
-		p.folderCache[accumulated] = id
+		if err != nil {
+			return "", fmt.Errorf("find folder %s: %w", accumulated, err)
+		}
+		p.folderCache[key] = id
 		parentID = id
 	}
 	return parentID, nil
@@ -321,8 +384,12 @@ func (p *Provider) findPath(dir string) (string, error) {
 func (p *Provider) findFolder(name, parentID string) (string, error) {
 	q := fmt.Sprintf("name=%q and mimeType='application/vnd.google-apps.folder' and %q in parents and trashed=false", name, parentID)
 	list, err := p.svc.Files.List().Q(q).Fields("files(id)").Do()
-	if err != nil { return "", fmt.Errorf("list folders: %w", err) }
-	if len(list.Files) == 0 { return "", fmt.Errorf("folder not found: %s", name) }
+	if err != nil {
+		return "", fmt.Errorf("list folders: %w", err)
+	}
+	if len(list.Files) == 0 {
+		return "", fmt.Errorf("folder not found: %s", name)
+	}
 	return list.Files[0].Id, nil
 }
 
