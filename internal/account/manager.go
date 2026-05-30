@@ -613,24 +613,42 @@ func (m *Manager) StartReconcileLoop(ctx context.Context) {
 	}()
 }
 
-// BootstrapFromProviders auto-creates CloudAccount entries for each existing CloudProvider
-// when accounts.json is empty. Runs once on first relay start after Phase α deploy — for
-// existing relays (poc1, poc2) with providers/*.json but no accounts.json yet.
+// BootstrapFromProviders auto-creates CloudAccount entries for each existing CloudProvider that
+// is NOT already represented in accounts.json. Idempotent — safe to run on every relay startup.
+//
+// Two distinct paths:
+//
+//  1. Fresh accounts.json (zero accounts): first provider in slice → PrimaryWrite/Priority 0,
+//     rest → ReplicaWrite/Priority 1..N. Matches original Phase α behavior.
+//
+//  2. Existing accounts.json (≥1 account, some providers may be missing): each missing provider
+//     is appended as ReplicaWrite with Priority = max(existing) + 1 (descending by file order).
+//     Existing accounts are NEVER mutated — their role, priority, status, pinned flag, soft/hard
+//     caps, etc. are preserved. This protects user-configured priorities + manual overrides.
+//
+// Why two paths instead of always-fresh: empirically observed 2026-05-30 prcznsk@ — 4th account
+// re-authorized BEFORE s329 #B autoAddAccount fix shipped, so its token landed in providers/
+// but never reached accounts.json. Original BootstrapFromProviders short-circuited on
+// `len(m.accounts) > 0` and never backfilled. Idempotent path here fixes that retroactively
+// for the entire fleet without any per-relay manual intervention.
 //
 // Each provider's ID is parsed as "<provider>:<email>" (e.g. "gdrive:darek@gmail.com").
-// The first such provider in the slice → PrimaryWrite/Priority 0; rest → ReplicaWrite/Priority N.
-// Returns the number of accounts created (0 if accounts.json was already populated).
-//
-// Per user decision 2026-05-22 §11 #3: existing relays may be reset; this bootstrap is the
-// auto path — UI can then let the user drag-reorder priorities.
+// Returns the number of accounts NEWLY created during this call.
 func (m *Manager) BootstrapFromProviders(providerIDs []string) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if len(m.accounts) > 0 {
-		return 0, nil // already bootstrapped
+	// Build existing-set keyed by "provider:email" for O(1) lookup.
+	existing := make(map[string]bool, len(m.accounts))
+	maxID := int64(0)
+	maxPriority := -1
+	for _, a := range m.accounts {
+		existing[a.Provider+":"+a.Email] = true
+		if a.ID > maxID { maxID = a.ID }
+		if a.Status != types.StatusRemoved && a.Priority > maxPriority { maxPriority = a.Priority }
 	}
+	freshBootstrap := len(m.accounts) == 0
 	added := 0
-	for i, pid := range providerIDs {
+	for _, pid := range providerIDs {
 		// Split "provider:email" — defensive parse for malformed IDs.
 		var provider, email string
 		for j := 0; j < len(pid); j++ {
@@ -640,28 +658,28 @@ func (m *Manager) BootstrapFromProviders(providerIDs []string) (int, error) {
 				break
 			}
 		}
-		if provider == "" || email == "" {
-			continue // skip malformed; not fatal — operator can re-add via UI
-		}
+		if provider == "" || email == "" { continue }
+		if existing[provider+":"+email] { continue } // already represented — skip silently
+		// Role: in a fresh bootstrap the first added account becomes PrimaryWrite; in an
+		// incremental backfill we never create a second PrimaryWrite — append as ReplicaWrite.
 		role := types.RoleReplicaWrite
-		if added == 0 {
-			role = types.RolePrimaryWrite
-		}
+		if freshBootstrap && added == 0 { role = types.RolePrimaryWrite }
+		maxID++
+		maxPriority++
 		m.accounts = append(m.accounts, &types.CloudAccount{
-			ID:       int64(i + 1),
+			ID:       maxID,
 			Provider: provider,
 			Email:    email,
 			AddedAt:  time.Now().UTC(),
 			Role:     role,
-			Priority: i,
+			Priority: maxPriority,
 			Status:   types.StatusActive,
 		})
+		existing[provider+":"+email] = true
 		added++
 	}
 	if added > 0 {
-		if err := m.savelocked(); err != nil {
-			return 0, err
-		}
+		if err := m.savelocked(); err != nil { return 0, err }
 	}
 	return added, nil
 }

@@ -495,6 +495,74 @@ func TestDrainState_SnapshotIsCopy(t *testing.T) {
 	if again.ReplicasMigrated != 30 { t.Errorf("internal state leaked: got %d, want 30", again.ReplicasMigrated) }
 }
 
+// s329 #E regression pin: BootstrapFromProviders must be idempotent — running it on a relay
+// that already has partial admin metadata MUST backfill missing providers without disturbing
+// existing entries. Pre-fix the function short-circuited on `len(m.accounts) > 0` and the user
+// saw 2 wiszące konta (4th re-auth, stratumos) without admin badge / drag-handle / scan loop
+// pickup because their tokens existed in providers/<id>.json but never reached accounts.json.
+func TestBootstrap_FreshAccountsAssignsPrimaryThenReplica(t *testing.T) {
+	m, _ := mkManager(t)
+	n, err := m.BootstrapFromProviders([]string{"gdrive:a@x.com", "gdrive:b@x.com", "gdrive:c@x.com"})
+	if err != nil { t.Fatalf("BootstrapFromProviders: %v", err) }
+	if n != 3 { t.Fatalf("expected 3 added on fresh bootstrap, got %d", n) }
+	accs := m.Accounts()
+	if len(accs) != 3 { t.Fatalf("expected 3 accounts, got %d", len(accs)) }
+	if accs[0].Role != types.RolePrimaryWrite { t.Errorf("first account Role = %q, want primary_write", accs[0].Role) }
+	for i := 1; i < 3; i++ {
+		if accs[i].Role != types.RoleReplicaWrite { t.Errorf("account %d Role = %q, want replica_write", i, accs[i].Role) }
+	}
+	if accs[0].Priority != 0 || accs[1].Priority != 1 || accs[2].Priority != 2 {
+		t.Errorf("priorities = [%d %d %d], want [0 1 2]", accs[0].Priority, accs[1].Priority, accs[2].Priority)
+	}
+}
+
+func TestBootstrap_IdempotentSecondCallNoChange(t *testing.T) {
+	m, _ := mkManager(t)
+	_, _ = m.BootstrapFromProviders([]string{"gdrive:a@x.com", "gdrive:b@x.com"})
+	n, err := m.BootstrapFromProviders([]string{"gdrive:a@x.com", "gdrive:b@x.com"})
+	if err != nil { t.Fatalf("second BootstrapFromProviders: %v", err) }
+	if n != 0 { t.Errorf("expected 0 added on repeat call, got %d", n) }
+	if len(m.Accounts()) != 2 { t.Errorf("expected still 2 accounts, got %d", len(m.Accounts())) }
+}
+
+func TestBootstrap_BackfillsMissingProvidersWithoutMutatingExisting(t *testing.T) {
+	m, _ := mkManager(t)
+	_, _ = m.BootstrapFromProviders([]string{"gdrive:a@x.com", "gdrive:b@x.com"})
+	beforeAccs := m.Accounts()
+	beforeAccs[0].Pinned = true
+	beforeAccs[0].Priority = 5
+	beforeAccs[1].Priority = 8
+	_ = m.ReplaceAll(beforeAccs)
+
+	n, err := m.BootstrapFromProviders([]string{"gdrive:a@x.com", "gdrive:b@x.com", "gdrive:c@x.com"})
+	if err != nil { t.Fatalf("backfill BootstrapFromProviders: %v", err) }
+	if n != 1 { t.Errorf("expected 1 backfilled, got %d", n) }
+	accs := m.Accounts()
+	if len(accs) != 3 { t.Fatalf("expected 3 accounts after backfill, got %d", len(accs)) }
+	var a, b, c *types.CloudAccount
+	for _, x := range accs {
+		switch x.Email {
+		case "a@x.com": a = x
+		case "b@x.com": b = x
+		case "c@x.com": c = x
+		}
+	}
+	if a == nil || b == nil || c == nil { t.Fatal("missing accounts after backfill") }
+	if !a.Pinned { t.Errorf("a@ pin lost after backfill") }
+	if a.Priority != 5 { t.Errorf("a@ Priority = %d, want 5 (preserved)", a.Priority) }
+	if b.Priority != 8 { t.Errorf("b@ Priority = %d, want 8 (preserved)", b.Priority) }
+	if c.Role != types.RoleReplicaWrite { t.Errorf("c@ Role = %q, want replica_write (no second Primary in backfill path)", c.Role) }
+	if c.Priority != 9 { t.Errorf("c@ Priority = %d, want 9 (max existing 8 + 1)", c.Priority) }
+}
+
+func TestBootstrap_SkipsMalformedProviderIDs(t *testing.T) {
+	m, _ := mkManager(t)
+	n, _ := m.BootstrapFromProviders([]string{"missing-colon", "", "gdrive:ok@x.com", ":no-provider"})
+	if n != 1 { t.Errorf("expected 1 valid (malformed skipped), got %d", n) }
+	accs := m.Accounts()
+	if len(accs) != 1 || accs[0].Email != "ok@x.com" { t.Errorf("unexpected accounts after skip-malformed: %+v", accs) }
+}
+
 // noopDrainer is a stub PipelineDrainer for unit tests — no files, no providers.
 type noopDrainer struct{}
 

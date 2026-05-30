@@ -43,11 +43,19 @@ func LoadClientSecret(path string) (*GDriveClientSecret, error) {
 
 // BuildOAuthConfig creates an oauth2.Config from client_secret.json.
 // redirectURL is the full callback URI (e.g. from config.CallbackURL(port)).
+//
+// s329 #scope: drive.DriveScope (full access — see/edit/manage/delete) replaces drive.DriveFileScope
+// (per-file, only files created by the app). User decision 2026-05-30: dudenest is designed for full
+// management of connected Drive accounts (browse arbitrary files, future edit/move/delete features) —
+// drive.file was empirically insufficient for whole-Drive bootstrap (lister.ListAll returned 0 files
+// for pre-existing user files on tvquos@gmail.com 6th + getechnics@ 7th accounts). Existing tokens
+// stay on drive.file scope and continue to work for app-created files; user must Reconnect each tile
+// in Settings → Cloud Accounts to upgrade to full scope.
 func BuildOAuthConfig(cs *GDriveClientSecret, redirectURL string) *oauth2.Config {
 	return &oauth2.Config{
 		ClientID:     cs.Installed.ClientID,
 		ClientSecret: cs.Installed.ClientSecret,
-		Scopes:       []string{drive.DriveFileScope},
+		Scopes:       []string{drive.DriveScope},
 		Endpoint:     google.Endpoint,
 		RedirectURL:  redirectURL,
 	}
@@ -55,11 +63,12 @@ func BuildOAuthConfig(cs *GDriveClientSecret, redirectURL string) *oauth2.Config
 
 // BuildWebOAuthConfig creates an oauth2.Config for the Web Application OAuth client.
 // redirectURL is the full callback URI (e.g. from config.OAuth.WebRedirectURL).
+// Same scope upgrade as BuildOAuthConfig (s329 #scope).
 func BuildWebOAuthConfig(clientID, clientSecret, redirectURL string) *oauth2.Config {
 	return &oauth2.Config{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
-		Scopes:       []string{drive.DriveFileScope},
+		Scopes:       []string{drive.DriveScope},
 		Endpoint:     google.Endpoint,
 		RedirectURL:  redirectURL,
 	}

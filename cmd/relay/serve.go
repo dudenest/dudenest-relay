@@ -223,19 +223,20 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if accMgr, err := account.New(authConfigDir); err != nil {
 		log.Printf("⚠️  account.Manager init failed (falling back to legacy upload selection): %v", err)
 	} else {
-		if len(accMgr.Accounts()) == 0 {
-			// Bootstrap from currently-loaded providers. p.clouds is set inside the pipeline;
-			// we rebuild the ID list here via getClouds() (same source) to avoid exposing internals.
-			if clouds, cErr := getClouds(); cErr == nil {
-				ids := make([]string, 0, len(clouds))
-				for _, c := range clouds {
-					ids = append(ids, c.ID())
-				}
-				if n, bErr := accMgr.BootstrapFromProviders(ids); bErr != nil {
-					log.Printf("⚠️  account bootstrap: %v", bErr)
-				} else if n > 0 {
-					log.Printf("✅ account bootstrap: created %d CloudAccount records from existing providers (edit priorities in Settings → Cloud Accounts)", n)
-				}
+		// s329 #E: BootstrapFromProviders is idempotent — always invoke it at startup. It is a no-op
+		// for accounts already present in accounts.json, and backfills any provider whose token sits
+		// in providers/<id>.json but never reached accounts.json (e.g. accounts re-authorized before
+		// s329 #B autoAddAccount fix shipped). Pre-fix this branch was gated on `len(accounts)==0`
+		// and stale providers permanently lacked admin badge / drag-handle / scan loop pickup until
+		// the user manually re-added them — which they couldn't do because the UI had no menu on
+		// admin-less tiles. Idempotent path heals the fleet automatically on next restart.
+		if clouds, cErr := getClouds(); cErr == nil {
+			ids := make([]string, 0, len(clouds))
+			for _, c := range clouds { ids = append(ids, c.ID()) }
+			if n, bErr := accMgr.BootstrapFromProviders(ids); bErr != nil {
+				log.Printf("⚠️  account bootstrap: %v", bErr)
+			} else if n > 0 {
+				log.Printf("✅ account bootstrap: backfilled %d CloudAccount record(s) from existing providers/ tokens (edit priorities in Settings → Cloud Accounts)", n)
 			}
 		}
 		p.SetAccountManager(accMgr)
