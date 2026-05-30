@@ -63,6 +63,7 @@ type GDriveToken struct {
 	ClientID      string    `json:"client_id,omitempty"`       // which OAuth client issued this token
 	LastError     string    `json:"last_error,omitempty"`      // persisted error state (e.g. invalid_grant)
 	LastFileCount int64     `json:"last_file_count,omitempty"` // last known file count on this provider (cached for offline display)
+	LastAuthorizedAt time.Time `json:"last_authorized_at,omitempty"` // s329: timestamp of last successful OAuth token save — bumped by handleExchange/handleSession noVNC callback; Flutter polls this to detect re-auth completion for accounts that were already available=true (e.g. scope upgrade flow)
 }
 
 // CloudProvider interface — implemented by gdrive, mega, onedrive, etc.

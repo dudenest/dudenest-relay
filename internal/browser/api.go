@@ -196,6 +196,7 @@ func (srv *Server) handleExchange(w http.ResponseWriter, r *http.Request) {
 		Email:        email,
 		ProviderID:   upsertProviderID(srv.configDir, email), // reuse existing ID if email known
 		ClientID:     cfg.ClientID,                           // remember which client issued this token
+		LastAuthorizedAt: time.Now(),                          // s329 #I: bump on every successful token save — Flutter polling detects re-auth via this field even for accounts that were already available=true (scope upgrade flow)
 	}
 	if rt == "" { fmt.Printf("handleExchange: WARNING — no refresh_token for %s\n", email) }
 	if err := SaveToken(srv.configDir, gt.ProviderID, gt); err != nil { jsonError(w, "save token: "+err.Error(), 500); return }
@@ -303,6 +304,7 @@ func (srv *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 			AccessToken: token.AccessToken, TokenType: token.TokenType, RefreshToken: rt,
 			Expiry: token.Expiry, Email: email, ProviderID: upsertProviderID(srv.configDir, email),
 			ClientID: srv.oauthCfg.ClientID,
+			LastAuthorizedAt: time.Now(), // s329 #I: bump on noVNC OAuth completion → Flutter polling detects re-auth via this field
 		}
 		if sErr := SaveToken(srv.configDir, gt.ProviderID, gt); sErr != nil {
 			fmt.Printf("handleSession: save token error for %s: %v\n", sid, sErr)
@@ -547,6 +549,7 @@ type providerInfo struct {
 	FileCount  int64   `json:"file_count"`           // files stored on this provider (last known for offline)
 	Available  bool    `json:"available"`
 	LastError  string  `json:"last_error,omitempty"` // reason when available=false
+	LastAuthorizedAt int64 `json:"last_authorized_at,omitempty"` // s329 #I: Unix seconds — Flutter polling detects re-auth via bump even when available stayed true
 }
 type providersResp struct{ Providers []providerInfo `json:"providers"` }
 
@@ -572,6 +575,7 @@ func (srv *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 		if seen[t.Email] { continue }
 		seen[t.Email] = true
 		pi := providerInfo{ID: t.ProviderID, Type: "gdrive", Email: t.Email}
+		if !t.LastAuthorizedAt.IsZero() { pi.LastAuthorizedAt = t.LastAuthorizedAt.Unix() } // s329 #I: surface re-auth bump to Flutter polling
 
 		// Count files from local blockmap (works for both online and offline providers)
 		if srv.bm != nil {

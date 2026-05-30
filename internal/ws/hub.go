@@ -5,6 +5,7 @@ package ws
 
 import (
 	"encoding/json"
+	"log"
 	"net"
 	"net/http"
 	"sync"
@@ -59,11 +60,13 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Hub) Broadcast(msg Message) {
 	data, _ := json.Marshal(msg)
 	h.mu.Lock()
+	n := len(h.clients) // s329 #I: capture under lock for diagnostic log
 	for conn := range h.clients {
 		wsutil.WriteServerMessage(conn, ws.OpText, data) //nolint:errcheck
 	}
 	cb := h.onAuthDone
 	h.mu.Unlock()
+	log.Printf("ws Broadcast: type=%s email=%s clients=%d", msg.Type, msg.Email, n) // s329 #I: diagnose Flutter "Waiting for authentication" hang — was n=0 the cause?
 	if msg.Type == "auth_done" && cb != nil { go cb() }
 }
 
