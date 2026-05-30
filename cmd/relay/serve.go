@@ -239,6 +239,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 			}
 		}
 		p.SetAccountManager(accMgr)
+		authSrv.SetAccountManager(accMgr) // s329 #B: also wire to browser API server so OAuth completions auto-promote to admin Manager
 		log.Printf("✅ account.Manager attached: %d accounts, replication_factor=%d, diversity=%v",
 			len(accMgr.ActiveAccounts()), accMgr.Policy().ReplicationFactor, accMgr.Policy().DiversityRequired)
 

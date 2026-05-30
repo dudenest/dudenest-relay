@@ -22,6 +22,7 @@ import (
 
 	"golang.org/x/oauth2"
 
+	"github.com/dudenest/dudenest-relay/internal/account"
 	"github.com/dudenest/dudenest-relay/internal/auth"
 	"github.com/dudenest/dudenest-relay/internal/blockmap"
 	"github.com/dudenest/dudenest-relay/pkg/types"
@@ -41,6 +42,37 @@ type Server struct {
 	noVNCBackend  string              // noVNC/websockify backend address (default: "127.0.0.1:6080")
 	cbMu          sync.Mutex          // protects cbCancel — only one callback server at a time
 	cbCancel      context.CancelFunc  // cancel function for the active callback server
+	accountMgr    *account.Manager    // s329 #B: auto-add CloudAccount to admin Manager after OAuth (nil = legacy mode)
+}
+
+// SetAccountManager wires the account.Manager so every successful SaveToken in this server
+// automatically promotes the new (or re-authorized) provider into account.Manager state.
+// Without this wiring, freshly-OAuthed accounts existed in ~/.config/dudenest/providers/*.json
+// (visible to /providers) but never reached accounts.json (visible to /admin/accounts) — Flutter
+// then rendered them without admin badge / Priority chip / popup menu / drag handle, and the
+// scan IncrementalPoll loop (which iterates over mgr.Accounts()) never bootstrapped them.
+// Empirically observed 2026-05-30 prcznsk@: 4th and 5th OAuthed accounts had no admin metadata.
+func (srv *Server) SetAccountManager(m *account.Manager) { srv.accountMgr = m }
+
+// autoAddAccount is the single helper called from every SaveToken success path. Idempotent:
+// if (provider, email) already exists in account.Manager, AddAccount returns ErrReAddDetected
+// which we treat as success (the account is already known — re-auth is a no-op for the manager
+// state, the new token is already persisted in providers/<id>.json by the caller).
+//
+// Logged to stdout so journalctl shows the auto-add lifecycle without needing debug flags.
+func (srv *Server) autoAddAccount(provider, email string) {
+	if srv.accountMgr == nil { return } // legacy mode (e.g. CLI auth, or tests without accountMgr)
+	if provider == "" || email == "" { return }
+	a, err := srv.accountMgr.AddAccount(provider, email)
+	switch {
+	case err == nil:
+		fmt.Printf("✅ account auto-added to admin Manager: id=%d provider=%s email=%s role=%s priority=%d (whole-Drive bootstrap will trigger within 60s via IncrementalPoll)\n",
+			a.ID, a.Provider, a.Email, a.Role, a.Priority)
+	case account.IsReAddError(err):
+		fmt.Printf("ℹ️  account re-auth detected for %s/%s — admin Manager already has this record, token refreshed in providers/ store\n", provider, email)
+	default:
+		fmt.Printf("⚠️  account auto-add failed for %s/%s: %v — admin badges will NOT appear until manual /admin/accounts POST\n", provider, email, err)
+	}
 }
 
 // NewServer creates an API server. display e.g. ":99", listenAddr e.g. "0.0.0.0:8086".
@@ -167,6 +199,7 @@ func (srv *Server) handleExchange(w http.ResponseWriter, r *http.Request) {
 	}
 	if rt == "" { fmt.Printf("handleExchange: WARNING — no refresh_token for %s\n", email) }
 	if err := SaveToken(srv.configDir, gt.ProviderID, gt); err != nil { jsonError(w, "save token: "+err.Error(), 500); return }
+	srv.autoAddAccount("gdrive", email) // s329 #B: also register in account.Manager so admin badges/scan loop activate
 	// Notify Flutter via WebSocket if this was a relay-initiated auth request
 	if req.RequestID != "" && srv.wsHub != nil {
 		srv.wsHub.Broadcast(ws.Message{Type: "auth_done", RequestID: req.RequestID, Provider: req.Provider, Email: email})
@@ -273,6 +306,8 @@ func (srv *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		}
 		if sErr := SaveToken(srv.configDir, gt.ProviderID, gt); sErr != nil {
 			fmt.Printf("handleSession: save token error for %s: %v\n", sid, sErr)
+		} else {
+			srv.autoAddAccount("gdrive", email) // s329 #B: register in admin Manager after noVNC OAuth completion
 		}
 		fmt.Printf("handleSession: noVNC auth done — %s (%s)\n", email, gt.ProviderID)
 		if srv.wsHub != nil {
@@ -422,6 +457,7 @@ func (srv *Server) handleClick(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "save token: "+err.Error(), 500)
 			return
 		}
+		srv.autoAddAccount("gdrive", email) // s329 #B: register in admin Manager after chromedp auto-login completion
 		// Navigate to Drive so :99 shows logged-in state for visual inspection; session auto-closes after 5min
 		_ = s.Navigate("https://drive.google.com")
 		jsonOK(w, stepResp{Status: "done", Fields: []Field{{ID: "email", Label: email}}})
