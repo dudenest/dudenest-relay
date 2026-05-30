@@ -91,13 +91,16 @@ func (a *accountAdmin) handleListOrReorder(w http.ResponseWriter, r *http.Reques
 }
 
 // handleByID dispatches /admin/accounts/{id} and /admin/accounts/{id}/refresh-quota.
-// /admin/accounts/reorder is intentionally handled above to keep the bulk + per-id routes separate.
+// Bulk routes (reorder, refresh-quota) intercepted before parseInt — they reach this handler
+// via the trailing-slash mux entry "/admin/accounts/" winning prefix priority over "/admin/accounts".
 func (a *accountAdmin) handleByID(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/admin/accounts/")
-	if rest == "" || rest == "reorder" {
-		// /reorder is the bulk route, served by handleListOrReorder via the /admin/accounts mux entry.
-		// Empty rest shouldn't reach us (different mux entry) but defensively handle it.
+	if rest == "" {
 		httpErr(w, http.StatusBadRequest, "account id required")
+		return
+	}
+	if rest == "reorder" { // s329 fix: same trailing-slash mux precedence as refresh-quota; delegate to bulk handler
+		a.handleListOrReorder(w, r)
 		return
 	}
 	if rest == "refresh-quota" { // s320 hotfix: bulk endpoint matched by trailing-slash mux; route here before parseInt
