@@ -1,6 +1,7 @@
-// Package backup sends relay state snapshots to dudenest-backup service.
+// Package backup sends relay state snapshots to dudenest-hub service (s334: hub renamed from dudenest-backup).
 // Triggered after every upload/delete; client-side debounce: 3s.
-// Server-side debounce: 5s (backup service). Silent no-op if env not set.
+// Server-side debounce: 5s (hub backup endpoint). Silent no-op if env not set.
+// Package name "backup" kept — refers to the FUNCTIONALITY (snapshot backup), not the service name.
 package backup
 
 import (
@@ -21,7 +22,7 @@ import (
 	"github.com/dudenest/dudenest-relay/pkg/types"
 )
 
-// Client sends encrypted relay state to dudenest-backup.
+// Client sends encrypted relay state to dudenest-hub.
 type Client struct {
 	url       string
 	relayID   string
@@ -35,7 +36,7 @@ type Client struct {
 }
 
 // New creates a backup client.
-// backupURL: base URL of dudenest-backup (e.g. "https://backup.dudenest.com").
+// backupURL: base URL of dudenest-hub (e.g. "https://backup.dudenest.com").
 // debounce: client-side delay before sending snapshot (e.g. 3*time.Second).
 // version: relay binary version string reported in every ping (e.g. "v0.5.9").
 // RELAY_ID and RELAY_SECRET are still read from env — set by relay registration.
@@ -204,7 +205,7 @@ func (c *Client) StartPingLoop(initial time.Duration) {
 	}()
 }
 
-// backupRequest matches dudenest-backup POST /relay/backup body.
+// backupRequest matches dudenest-hub POST /relay/backup body.
 // v0.20.0+: BackupBlob (zero-knowledge AES-256-GCM) is the canonical field.
 // Legacy MapsJSON+ProvidersEnc kept in struct only for hub backward-compat decoding (NOT populated on send).
 type backupRequest struct {
@@ -278,7 +279,7 @@ func (c *Client) send(maps []*types.FileMap) error {
 	return nil
 }
 
-// restoreResponse matches the GET /relay/restore response from dudenest-backup.
+// restoreResponse matches the GET /relay/restore response from dudenest-hub.
 // Hub returns both legacy (maps_json/providers_enc) AND new (backup_blob) fields; client picks based on which is present.
 type restoreResponse struct {
 	RelayID       string  `json:"relay_id"`
@@ -290,7 +291,7 @@ type restoreResponse struct {
 	CreatedAt     string  `json:"created_at"`
 }
 
-// Restore fetches the latest backup from dudenest-backup and writes maps + provider tokens to configDir.
+// Restore fetches the latest backup from dudenest-hub and writes maps + provider tokens to configDir.
 // Safe to call on nil. Returns (restored=true, nil) if backup was found and applied.
 func (c *Client) Restore() (bool, error) {
 	if c == nil { return false, nil }

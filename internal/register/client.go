@@ -157,9 +157,10 @@ const announceTokenFile = "announce_token.tmp"
 type BootstrapPayload struct {
 	JWTSecret          string `json:"jwt_secret"`            // delivered once — write to relay.env
 	RelayID            string `json:"relay_id"`              // permanent relay identity
-	RelaySecret        string `json:"relay_secret"`          // HMAC key for relay→backup auth
+	RelaySecret        string `json:"relay_secret"`          // HMAC key for relay→hub auth (s334)
 	RelayURL           string `json:"relay_url"`             // assigned subdomain (relay-XXXX.dudenest.com)
-	BackupURL          string `json:"backup_url"`            // dudenest-backup base URL
+	HubURL             string `json:"hub_url"`               // s334: dudenest-hub base URL (preferred)
+	BackupURL          string `json:"backup_url"`            // s334: backward-compat alias for old relays (BACKUP_URL env var); will be removed after grace period
 	GdriveClientSecret string `json:"gdrive_client_secret"`  // fleet-wide Google OAuth client JSON ("installed" or "web" format — oauth2.ConfigFromJSON handles both); written to <configDir>/gdrive_client_secret.json if file missing or contains placeholder
 }
 

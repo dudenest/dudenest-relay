@@ -1028,9 +1028,13 @@ func makeBootstrapHandler(configDir string) http.HandlerFunc {
 		os.Setenv("RELAY_ID", payload.RelayID)         //nolint:errcheck
 		os.Setenv("RELAY_SECRET", payload.RelaySecret) //nolint:errcheck
 		os.Setenv("JWT_SECRET", payload.JWTSecret)     //nolint:errcheck — sets for current process; relay.env updated by install script
-		if payload.BackupURL != "" {
-			os.Setenv("BACKUP_URL", payload.BackupURL)
-		} //nolint:errcheck
+		// s334: prefer HubURL, fallback to BackupURL (old hubs that don't send hub_url yet)
+		hubURL := payload.HubURL
+		if hubURL == "" { hubURL = payload.BackupURL }
+		if hubURL != "" {
+			os.Setenv("HUB_URL", hubURL) //nolint:errcheck
+			os.Setenv("BACKUP_URL", hubURL) //nolint:errcheck — s334 backward-compat: old code paths still read BACKUP_URL
+		}
 		register.ClearAnnounceToken(configDir) // one-time use — delete after success
 		log.Printf("✅ relay bootstrapped: relay_id=%s relay_url=%s", payload.RelayID, payload.RelayURL)
 		w.Header().Set("Content-Type", "application/json")

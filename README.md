@@ -110,7 +110,8 @@ chmod +x relay-linux-arm64 && sudo mv relay-linux-arm64 /usr/local/bin/relay
 sudo mkdir -p /etc/dudenest /var/lib/dudenest/maps
 sudo tee /etc/dudenest/relay.env >/dev/null <<EOF
 RELAY_KEY=$(openssl rand -hex 32)
-BACKUP_URL=https://backup.dudenest.com
+HUB_URL=https://hub.dudenest.com
+# BACKUP_URL=https://backup.dudenest.com   # s334: deprecated — relay reads HUB_URL first, BACKUP_URL fallback for grace period
 EOF
 sudo chmod 600 /etc/dudenest/relay.env
 
@@ -154,7 +155,7 @@ Priority chain: **CLI flag > env var > relay.json > built-in defaults**
     "session_timeout_hours": 4
   },
   "backup": {
-    "url": "https://backup.dudenest.com",
+    "url": "https://hub.dudenest.com",   // s334: dudenest-hub service (JSON key "backup" kept = function name)
     "debounce_seconds": 3
   },
   "novnc": {
@@ -185,7 +186,7 @@ internal/
 ├── api/            # Local REST API (for app)
 ├── auth/           # JWT validation, relay token (L2/L3 security)
 ├── backup/         # Backup client (ping loop, FileMap sync)
-├── register/       # Relay registration with backup.dudenest.com
+├── register/       # Relay registration with hub.dudenest.com   (s334: was backup.dudenest.com)
 ├── config/         # Config loading (relay.json)
 ├── blockstore/     # Legacy chunking engine (unused, Replica is default)
 ├── crypto/         # Legacy AES-256-GCM/HKDF (unused in Replica mode)
@@ -222,7 +223,7 @@ Optional overrides for relay.json values:
 |----------|-----------|---------|
 | `RELAY_LISTEN` | `server.listen` | `0.0.0.0:8086` |
 | `RELAY_DISPLAY` | `server.display` | `:99` |
-| `BACKUP_URL` | `backup.url` | `https://backup.dudenest.com` |
+| `HUB_URL` (preferred) / `BACKUP_URL` (deprecated alias) | `backup.url` | `https://hub.dudenest.com` |
 
 ## License
 

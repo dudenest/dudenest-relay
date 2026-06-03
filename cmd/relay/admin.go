@@ -13,7 +13,7 @@
 // Auth: same wrapper as /files (requireAuthWithReg — JWT + X-Relay-Token), so only the relay's
 // paired Flutter user can trigger an update. No anonymous self-rooting.
 //
-// Why this lives on the relay (not on the dudenest-backup hub): the hub doesn't know per-relay
+// Why this lives on the relay (not on the dudenest-hub): the hub doesn't know per-relay
 // binary versions, and the update *must* happen from the relay's own filesystem context. Hub-side
 // admin would require either SSH (no) or a relay-side polling endpoint anyway, so we keep it here.
 package main

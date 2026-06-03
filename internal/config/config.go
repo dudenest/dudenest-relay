@@ -32,8 +32,8 @@ type OAuthConfig struct {
 type BrowserConfig struct {
 	SessionTimeoutHours int `json:"session_timeout_hours"` // browser session auto-expiry
 }
-type BackupConfig struct {
-	URL             string  `json:"url"`              // dudenest-backup service base URL
+type BackupConfig struct { // s334: type name BackupConfig kept (callers compat); semantics: hub service config
+	URL             string  `json:"url"`              // s334: dudenest-hub service base URL (renamed from dudenest-backup)
 	PublicURL       string  `json:"public_url"`       // public HTTPS URL of this relay (e.g. "https://relay.dudenest.com") — sent during registration, returned to Flutter for per-user routing
 	DebounceSeconds float64 `json:"debounce_seconds"` // client-side debounce before sending snapshot
 }
@@ -54,7 +54,7 @@ func Defaults() *Config {
 		Server:  ServerConfig{Listen: "0.0.0.0:8086", Display: ":99"},
 		OAuth:   OAuthConfig{CallbackPort: 8085, WebRedirectURL: "https://dudenest.com/auth"},
 		Browser: BrowserConfig{SessionTimeoutHours: 4},
-		Backup:  BackupConfig{URL: "https://backup.dudenest.com", DebounceSeconds: 3},
+		Backup:  BackupConfig{URL: "https://hub.dudenest.com", DebounceSeconds: 3}, // s334: default → hub.dudenest.com (backup.dudenest.com nadal działa przez 30-day soft-deprecation alias)
 		NoVNC:   NoVNCConfig{BackendAddr: "127.0.0.1:6080"},
 		Upload:  UploadConfig{MaxSizeMB: 32},
 		Cache:   CacheConfig{ManifestMaxFiles: 0, LazySidecarsOnList: false},
@@ -91,7 +91,9 @@ func Load(path string) (*Config, error) {
 // applyEnvOverrides applies environment variable overrides on top of file config.
 // Only non-sensitive values are overridable via env; secrets stay in CI/CD vars.
 func applyEnvOverrides(cfg *Config) {
-	if v := os.Getenv("BACKUP_URL"); v != "" {
+	if v := os.Getenv("HUB_URL"); v != "" { // s334: HUB_URL primary
+		cfg.Backup.URL = v
+	} else if v := os.Getenv("BACKUP_URL"); v != "" { // s334: BACKUP_URL fallback for backward-compat (1-2 release cycle)
 		cfg.Backup.URL = v
 	}
 	if v := os.Getenv("RELAY_PUBLIC_URL"); v != "" {
