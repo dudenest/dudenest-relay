@@ -25,7 +25,7 @@ RELAY_BIN="/usr/local/bin/relay"
 CONFIG_DIR="/etc/dudenest"
 DATA_DIR="/var/lib/dudenest"
 ZT_NETWORK="${ZT_NETWORK:-932df01efb1ebd71}"
-BACKUP_URL="${BACKUP_URL:-https://backup.dudenest.com}"
+BACKUP_URL="${BACKUP_URL:-https://hub.dudenest.com}"   # s364: default → hub.dudenest.com (env var name kept for compat)
 DUDE_USER="${DUDE_USER:-dude}"
 # DUDE_UID is preferred (matches the reference relay-poc) but skipped if already taken
 DUDE_UID="${DUDE_UID:-1000}"

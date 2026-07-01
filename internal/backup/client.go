@@ -36,7 +36,7 @@ type Client struct {
 }
 
 // New creates a backup client.
-// backupURL: base URL of dudenest-hub (e.g. "https://backup.dudenest.com").
+// backupURL: base URL of dudenest-hub (e.g. "https://hub.dudenest.com").
 // debounce: client-side delay before sending snapshot (e.g. 3*time.Second).
 // version: relay binary version string reported in every ping (e.g. "v0.5.9").
 // RELAY_ID and RELAY_SECRET are still read from env — set by relay registration.
