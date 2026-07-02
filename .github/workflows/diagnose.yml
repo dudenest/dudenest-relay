@@ -11,7 +11,7 @@ jobs:
           echo "=== ALL SERVICES ===" && docker service ls
           echo "=== BACKEND ===" && docker service ps dudenest-backend_server --no-trunc 2>/dev/null || echo "NOT FOUND"
           echo "=== RELAY ===" && docker service ps dudenest-relay_relay --no-trunc 2>/dev/null || echo "NOT FOUND"
-          echo "=== BACKUP ===" && docker service ps dudenest-backup_backup --no-trunc 2>/dev/null || echo "NOT FOUND"
+          echo "=== HUB ===" && docker service ps dudenest-hub_hub --no-trunc 2>/dev/null || echo "NOT FOUND"
           echo "=== NETWORK ===" && docker network ls | grep dudenest || true
           echo "=== BACKEND LOGS (last 20) ===" && docker service logs dudenest-backend_server --tail 20 2>/dev/null || echo "no logs"
           echo "=== RELAY JWT_SECRET check ===" && docker service inspect dudenest-relay_relay --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' | grep JWT_SECRET | sed 's/JWT_SECRET=\(.\{0,8\}\).*/JWT_SECRET=\1...REDACTED/'
@@ -35,7 +35,7 @@ jobs:
           echo "=== BACKEND LOGS auth errors ===" && docker service logs dudenest-backend_server --tail 100 --timestamps 2>&1 | grep -i "401\|unauth\|jwt\|relay\|register\|error" | tail -20 || echo "no backend logs"
           echo "=== OVERLAY NETWORK IPAM ===" && docker network inspect dudenest --format '{{json .IPAM}}' 2>/dev/null || echo "no dudenest network"
           echo "=== OVERLAY NETWORK CONTAINERS ===" && docker network inspect dudenest --format '{{range .Containers}}{{.Name}} {{.IPv4Address}} {{println}}{{end}}' 2>/dev/null || echo "no containers on dudenest"
-          echo "=== BACKUP STATUS ===" && docker service ls --filter name=dudenest-backup && docker service ps dudenest-backup_backup --no-trunc 2>/dev/null | head -5
+          echo "=== HUB STATUS ===" && docker service ls --filter name=dudenest-hub && docker service ps dudenest-hub_hub --no-trunc 2>/dev/null | head -5
 
       - name: Diagnose relay-poc (10.51.1.119)
         env:
