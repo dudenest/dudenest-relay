@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.23.10] — 2026-07-02
+### Changed
+- Default backup/hub URL → `https://hub.dudenest.com` (retire `backup.dudenest.com`). Reads `HUB_URL` (primary) / `BACKUP_URL` (fallback) from env. Bootstrap response key `hub_url` (was `backup_url`).
+- Fleet upgrade path: this release migrates all relays off `backup.dudenest.com` via Phase 0 auto-update. Config defaults are compiled into the binary — a fleet-wide URL change requires a new release, not a host-side `relay.env` edit.
+
 ## [Unreleased] — 2026-05-26 — Tile manifest for instant gallery cache
 
 ### Added
