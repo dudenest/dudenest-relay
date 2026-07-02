@@ -1,9 +1,9 @@
-// register/client.go — auto-registers relay with dudenest-backup on first start.
+// register/client.go — auto-registers relay with dudenest-hub on first start.
 // Saves credentials to configDir/relay_creds.json (idempotent — skips if file exists).
 // Two entry points: EnsureRegistered (env-var based, startup) and RegisterOnceWithUserID (JWT-based, lazy).
 //
 // relay_url (added 2026-05-07): the relay sends its public HTTPS URL during registration.
-// dudenest-backup stores it in CRDB. Flutter clients read it via GET /api/v1/relays and use
+// dudenest-hub stores it in CRDB. Flutter clients read it via GET /api/v1/relays and use
 // it as the relay baseURL — enabling automatic per-user relay routing without manual configuration.
 // Set via RELAY_PUBLIC_URL env var in relay.env (e.g. "https://relay.dudenest.com").
 //
