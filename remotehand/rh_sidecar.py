@@ -125,9 +125,18 @@ def main() -> None:
         from rh_screen import ScrotObserver
         from rh_classify import make_classifier
         display = os.environ.get("RH_DISPLAY", ":99")
+        proc = None
+        oauth_url = os.environ.get("RH_OAUTH_URL", "")
+        if oauth_url:  # launch the vanilla browser to the OAuth URL on this display
+            from rh_browser import launch
+            proc = launch(oauth_url, display, os.environ.get("RH_PROFILE", f"/tmp/rh-{session_id}"))
         observer = ScrotObserver(display, classifier=make_classifier())
         sc = Sidecar(observer, XdotoolInjector(display), keys, _stdout_writer, session_id)
-        _run_real(sc)
+        try:
+            _run_real(sc)
+        finally:
+            if proc is not None:
+                proc.terminate()
     sc.close()
 
 

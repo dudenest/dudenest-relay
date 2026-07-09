@@ -62,3 +62,62 @@ func TestAttachWiresHubToSidecar(t *testing.T) {
 		return m["type"] == "rh_state" && m["state"] == "success"
 	})
 }
+
+// TestManagerRoutesBySessionAndReleasesDisplay proves the multi-session path:
+// Start spawns a sidecar on an allocated display, inbound frames route by
+// session_id, and End releases the display.
+func TestManagerRoutesBySessionAndReleasesDisplay(t *testing.T) {
+	requireSidecar(t)
+	hub := newFakeHub()
+	pool := NewDisplayPool(":0")
+	m := NewManager(hub, pool, sidecarScript(), 20*time.Second,
+		"RH_FAKE=1", "RH_STATES=email,password,success")
+
+	sid, err := m.Start("https://accounts.google.com/o/oauth2/v2/auth?fake")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if pool.Available() != 0 || m.Active() != 1 {
+		t.Fatalf("display not allocated / session not tracked (avail=%d active=%d)",
+			pool.Available(), m.Active())
+	}
+	// rh_hello must carry this session's id
+	hello := waitFor(t, hub.out, func(x map[string]any) bool { return x["type"] == "rh_hello" })
+	if hello["session_id"] != sid {
+		t.Fatalf("rh_hello session_id=%v, want %s", hello["session_id"], sid)
+	}
+	waitFor(t, hub.out, func(x map[string]any) bool {
+		return x["type"] == "rh_prompt" && x["step"] == "email"
+	})
+	// input WITHOUT session_id must be dropped by the router (no crash, no delivery)
+	hub.input(map[string]any{"type": "rh_input", "step": "email",
+		"values": map[string]string{"login": "x"}})
+	// correctly-addressed input drives to success
+	hub.input(map[string]any{"type": "rh_input", "session_id": sid, "step": "email",
+		"values": map[string]string{"login": "a@b.c", "password": "pw"}})
+	waitFor(t, hub.out, func(x map[string]any) bool {
+		return x["type"] == "rh_state" && x["state"] == "success"
+	})
+
+	m.End(sid)
+	if m.Active() != 0 || pool.Available() != 1 {
+		t.Fatalf("End should free session+display (active=%d avail=%d)", m.Active(), pool.Available())
+	}
+	m.End(sid) // idempotent
+}
+
+// TestManagerPoolExhaustion: Start fails cleanly when no display is free.
+func TestManagerPoolExhaustion(t *testing.T) {
+	requireSidecar(t)
+	hub := newFakeHub()
+	m := NewManager(hub, NewDisplayPool(":0"), sidecarScript(), 20*time.Second,
+		"RH_FAKE=1", "RH_STATES=email,success")
+	sid, err := m.Start("u")
+	if err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	defer m.End(sid)
+	if _, err := m.Start("u"); err != ErrNoDisplay {
+		t.Fatalf("want ErrNoDisplay on exhausted pool, got %v", err)
+	}
+}
