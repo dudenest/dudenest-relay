@@ -1,0 +1,7 @@
+# Remote-Hand sidecar — Faza 1+ runtime deps (Faza 0 core is stdlib-only).
+# System deps (apt): xdotool scrot tesseract-ocr
+pyautogui>=0.9.54       # XTEST input + screen capture (humanized)
+opencv-python>=4.9      # template match — locate login fields / captcha bbox
+pytesseract>=0.3.10     # OCR labels / error text
+pynacl>=1.5             # sealed_box: decrypt credentials sealed to session pubkey
+websockets>=12.0        # ws client to relay Hub (rh_* messages)
