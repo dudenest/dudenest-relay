@@ -9,10 +9,15 @@ The FSM depends only on abstract Observer/Injector/Emitter, so it is fully
 unit-testable without an X server, a browser, or a network (Rule #17).
 """
 from __future__ import annotations
+import sys
 from typing import Protocol
 
 from rh_classify import classify_error
 from rh_protocol import Field, PageState, rh_prompt, rh_state
+
+
+def _log(msg: str) -> None:
+    sys.stderr.write(f"rh_fsm: {msg}\n"); sys.stderr.flush()
 
 
 class Emitter(Protocol):
@@ -134,7 +139,9 @@ class RemoteHandFSM:
         if self._error_shown:
             return  # already surfaced this error; the page still shows it — wait for the user
         self._error_shown = True
-        field, msg = classify_error(self._obs.error_text())
+        err_text = self._obs.error_text()
+        field, msg = classify_error(err_text)
+        _log(f"_on_error: error_text={err_text!r} → field={field!r} msg={msg!r}")
         if field is None:  # terminal — give up
             self.done = True
             self.result = "error"
