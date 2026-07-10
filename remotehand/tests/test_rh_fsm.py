@@ -140,6 +140,7 @@ class TestError(unittest.TestCase):
         fsm.tick()
         prompts = [m for m in emit.msgs if m["type"] == "rh_prompt"]
         self.assertEqual(prompts[-1]["step"], "email")
+        self.assertEqual(prompts[-1]["level"], "warning")
         fsm.submit("email", {"login": "correct@example.com", "password": "pw"})
         self.assertEqual(inj.calls[:3], [("key", "ctrl+a"), ("type", "correct@example.com"), ("key", "Return")])
 

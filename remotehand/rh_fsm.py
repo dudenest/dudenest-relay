@@ -149,7 +149,7 @@ class RemoteHandFSM:
         self._prompted.add(step)                     # don't let _on_<state> double-handle
         self._replace_next = True                    # overwrite Google's invalid value on submit
         self._emit.send(rh_prompt(self.session_id, self.request_id, step, msg,
-                                  [Field(n, l, k) for (n, l, k) in specs]))
+                                  [Field(n, l, k) for (n, l, k) in specs], level="warning"))
 
     def _on_unknown(self) -> None:
         pass  # transient/loading — re-observe on next tick

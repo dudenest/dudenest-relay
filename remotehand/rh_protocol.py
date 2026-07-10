@@ -45,12 +45,12 @@ def rh_hello(session_id: str, relay_pubkey_b64: str) -> dict[str, Any]:
 
 def rh_prompt(session_id: str, request_id: str, step: str, title: str,
               fields: list[Field], image_b64: str | None = None,
-              region: dict | None = None) -> dict[str, Any]:
+              region: dict | None = None, level: str = "info") -> dict[str, Any]:
     """Ask the user to fill `fields`. `image_b64` carries a tightly-cropped
     captcha (§8.1: challenge must fill the view, not sit in an empty screen)."""
     msg: dict[str, Any] = {"type": "rh_prompt", "session_id": session_id,
                            "request_id": request_id, "step": step, "title": title,
-                           "fields": [asdict(f) for f in fields]}
+                           "fields": [asdict(f) for f in fields], "level": level}
     if image_b64 is not None:
         msg["image"] = image_b64
     if region is not None:

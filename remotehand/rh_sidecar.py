@@ -20,6 +20,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 from queue import Empty, Queue
 
 from rh_crypto import SessionKeys
@@ -92,6 +93,10 @@ def _stdout_writer(msg: dict) -> None:
     sys.stdout.write(json.dumps(msg) + "\n"); sys.stdout.flush()
 
 
+def _log(msg: str) -> None:
+    sys.stderr.write(f"remotehand[{os.environ.get('RH_SESSION', 'rh')}]: {msg}\n"); sys.stderr.flush()
+
+
 def _run_fake(sc: Sidecar, observer: GatedObserver, read_line, max_idle_ticks: int = 6) -> None:
     """Deterministic loop for fake mode: advance the gated page after each input."""
     sc.hello(); sc.tick()
@@ -113,44 +118,54 @@ def _run_real(sc: Sidecar, poll_s: float = 0.8) -> None:
         q.put(None)
     threading.Thread(target=reader, daemon=True).start()
     sc.hello()
+    _log("real loop started")
     while not sc.done:
         sc.tick()
         try:
             line = q.get(timeout=poll_s)
         except Empty:
             continue
-        if line is None: break
+        if line is None:
+            _log("stdin closed; exiting real loop")
+            break
         sc.on_input(json.loads(line))
+    _log(f"real loop stopped done={sc.done} result={sc.fsm.result} last_state={sc.fsm.last_state}")
 
 
 def main() -> None:
     session_id = os.environ.get("RH_SESSION", "rh")
     keys = SessionKeys()
-    if os.environ.get("RH_FAKE") == "1":  # headless transport test
-        from rh_input import RecordingInjector
-        states = [PageState(s.strip().lower()) for s in
-                  os.environ.get("RH_STATES", "email,password,success").split(",")]
-        observer = GatedObserver(states)
-        sc = Sidecar(observer, RecordingInjector(), keys, _stdout_writer, session_id)
-        _run_fake(sc, observer, sys.stdin.readline)
-    else:
-        from rh_input import XdotoolInjector
-        from rh_screen import ScrotObserver
-        from rh_classify import make_classifier
-        display = os.environ.get("RH_DISPLAY", ":99")
-        proc = None
-        oauth_url = os.environ.get("RH_OAUTH_URL", "")
-        if oauth_url:  # launch the vanilla browser to the OAuth URL on this display
-            from rh_browser import launch
-            proc = launch(oauth_url, display, os.environ.get("RH_PROFILE", f"/tmp/rh-{session_id}"))
-        observer = ScrotObserver(display, classifier=make_classifier())
-        sc = Sidecar(observer, XdotoolInjector(display), keys, _stdout_writer, session_id)
-        try:
-            _run_real(sc)
-        finally:
-            if proc is not None:
-                proc.terminate()
-    sc.close()
+    try:
+        if os.environ.get("RH_FAKE") == "1":  # headless transport test
+            from rh_input import RecordingInjector
+            states = [PageState(s.strip().lower()) for s in
+                      os.environ.get("RH_STATES", "email,password,success").split(",")]
+            observer = GatedObserver(states)
+            sc = Sidecar(observer, RecordingInjector(), keys, _stdout_writer, session_id)
+            _run_fake(sc, observer, sys.stdin.readline)
+        else:
+            from rh_input import XdotoolInjector
+            from rh_screen import ScrotObserver
+            from rh_classify import make_classifier
+            display = os.environ.get("RH_DISPLAY", ":99")
+            proc = None
+            oauth_url = os.environ.get("RH_OAUTH_URL", "")
+            if oauth_url:  # launch the vanilla browser to the OAuth URL on this display
+                from rh_browser import launch
+                proc = launch(oauth_url, display, os.environ.get("RH_PROFILE", f"/tmp/rh-{session_id}"))
+                _log(f"browser launched pid={proc.pid}")
+            observer = ScrotObserver(display, classifier=make_classifier())
+            sc = Sidecar(observer, XdotoolInjector(display), keys, _stdout_writer, session_id)
+            try:
+                _run_real(sc)
+            finally:
+                if proc is not None:
+                    _log(f"terminating browser pid={proc.pid}")
+                    proc.terminate()
+        sc.close()
+    except Exception:
+        _log("fatal exception:\n" + traceback.format_exc())
+        raise
 
 
 if __name__ == "__main__":

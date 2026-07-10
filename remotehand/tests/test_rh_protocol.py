@@ -27,8 +27,13 @@ class TestMessages(unittest.TestCase):
         self.assertEqual(m["session_id"], "s1")
         self.assertEqual(m["step"], "email")
         self.assertEqual(m["fields"][0]["name"], "login")
+        self.assertEqual(m["level"], "info")
         self.assertNotIn("image", m)      # optional omitted when absent
         self.assertNotIn("region", m)
+
+    def test_rh_prompt_warning_level(self):
+        m = rh_prompt("s1", "r1", "email", "Wrong email", [Field("login", "Login", "text")], level="warning")
+        self.assertEqual(m["level"], "warning")
 
     def test_rh_prompt_includes_captcha_image(self):
         m = rh_prompt("s1", "r1", "captcha_static", "Solve",
