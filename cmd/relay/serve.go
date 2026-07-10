@@ -407,8 +407,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}
 		return url, nil
 	})
-	mux.HandleFunc("/relay/oauth3/start", requireAuthWithReg(lr, rhMgr.StartHandler())) // begin method-3 session → {session_id}
-	mux.HandleFunc("/relay/oauth3/end", requireAuthWithReg(lr, rhMgr.EndHandler()))     // tear down method-3 session
+mux.HandleFunc("/relay/oauth3/start", requireAuthWithReg(lr, rhMgr.StartHandler()))  // begin method-3 session → {session_id}
+		mux.HandleFunc("/relay/oauth3/end", requireAuthWithReg(lr, rhMgr.EndHandler()))      // tear down method-3 session
+		mux.HandleFunc("/relay/oauth3/input", requireAuthWithReg(lr, rhMgr.InputHandler())) // Flutter → sidecar input (HTTP POST, reliable)
 	// Phase β: account/policy admin endpoints (CRUD via Flutter Settings → Cloud Accounts).
 	// Same auth wrapper as /files — only the paired user's Flutter can mutate.
 	if globalAdminAccounts != nil {

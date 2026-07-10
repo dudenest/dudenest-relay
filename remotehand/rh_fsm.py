@@ -16,6 +16,9 @@ from rh_classify import classify_error
 from rh_protocol import Field, PageState, rh_prompt, rh_state
 
 
+_UNKNOWN_STALL_TICKS = 10  # ~8s at 0.8s/tick before treating a stuck UNKNOWN as an unexpected screen
+
+
 def _log(msg: str) -> None:
     sys.stderr.write(f"rh_fsm: {msg}\n"); sys.stderr.flush()
 
@@ -37,6 +40,8 @@ class RemoteHandFSM:
         self._prompted: set[str] = set()       # steps already prompted/handled (idempotency)
         self._error_shown = False              # latch: one re-prompt per error, until user responds
         self._replace_next = False             # after Google field error, Ctrl+A before typing correction
+        self._unknown_ticks = 0                # consecutive UNKNOWN observations (stall detection)
+        self._unknown_surfaced = False         # latch: surface an unrecognized screen only once
         self.done = False
         self.result: str | None = None
         self.last_state = PageState.UNKNOWN
@@ -48,6 +53,9 @@ class RemoteHandFSM:
             return self.last_state
         st = self._obs.observe()
         self.last_state = st
+        if st is not PageState.UNKNOWN:  # a recognized page resets stall detection
+            self._unknown_ticks = 0
+            self._unknown_surfaced = False
         {
             PageState.EMAIL: self._on_email, PageState.PASSWORD: self._on_password,
             PageState.CONSENT: self._on_consent, PageState.PHONE: self._on_phone,
@@ -159,7 +167,24 @@ class RemoteHandFSM:
                                   [Field(n, l, k) for (n, l, k) in specs], level="warning"))
 
     def _on_unknown(self) -> None:
-        pass  # transient/loading — re-observe on next tick
+        # A brief UNKNOWN is normal (page loading between steps). But if it persists,
+        # Google is likely showing an interstitial we don't have a rule for yet — never
+        # spin forever: OCR the screen and either end cleanly (recognized terminal) or
+        # surface the on-screen text so the user can act (and we can add a rule later).
+        self._unknown_ticks += 1
+        if self._unknown_ticks < _UNKNOWN_STALL_TICKS or self._unknown_surfaced:
+            return
+        self._unknown_surfaced = True
+        text = (self._obs.error_text() or "").strip()
+        snippet = " ".join(text.split())[:200]
+        field, msg = classify_error(text)
+        _log(f"_on_unknown stall ({self._unknown_ticks} ticks): text={snippet!r} → field={field!r} msg={msg!r}")
+        if text and field is None and msg != "Sign-in failed":  # recognized terminal (e.g. session expired)
+            self.done = True
+            self.result = "error"
+            self._state("error", msg)
+        elif snippet:  # unrecognized — show what Google displays instead of a blank spinner
+            self._state("working", f"Waiting — Google shows: {snippet}")
 
     # ---- helpers ----
     def _type_and_next(self, text: str, replace: bool = False) -> None:

@@ -93,5 +93,25 @@ class TestClassifyError(unittest.TestCase):
         self.assertTrue(msg)
 
 
+class TestSessionExpired(unittest.TestCase):
+    """Google's idle-timeout interstitial (user took too long via the relay form)."""
+    SAMPLES = [
+        "Your session ended because there was no activity",
+        "Your session has expired",
+        "Your session timed out",
+        "You've been signed out",
+    ]
+
+    def test_classifies_as_error(self):
+        for t in self.SAMPLES:
+            self.assertEqual(classify_text(t), PageState.ERROR, t)
+
+    def test_is_terminal_with_restart_message(self):
+        for t in self.SAMPLES:
+            field, msg = classify_error(t)
+            self.assertIsNone(field, t)                 # terminal — cannot recover the dead OAuth state
+            self.assertIn("session expired", msg.lower(), t)
+
+
 if __name__ == "__main__":
     unittest.main()

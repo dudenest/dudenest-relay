@@ -2,6 +2,7 @@ package remotehand
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 )
 
@@ -77,6 +78,46 @@ func (m *Manager) EndHandler() http.HandlerFunc {
 			return
 		}
 		m.End(req.SessionID)
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// InputHandler receives user input from Flutter via HTTP POST (reliable
+// request/response) instead of the lossy WebSocket. The body is the same
+// rh_input JSON the sidecar expects; Manager.routeInput dispatches it by
+// session_id. WS stays for relay→Flutter (rh_prompt/hello/state) only.
+//
+//	POST {"session_id":"rh-...","step":"sms_code","values":{"code":"123456"},...}
+//	 204 on success   404 if session not found   400 bad request
+func (m *Manager) InputHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil || len(body) == 0 {
+			http.Error(w, "body required", http.StatusBadRequest)
+			return
+		}
+		var env struct {
+			SessionID string `json:"session_id"`
+		}
+		if json.Unmarshal(body, &env) != nil || env.SessionID == "" {
+			http.Error(w, "session_id required", http.StatusBadRequest)
+			return
+		}
+		m.mu.Lock()
+		s := m.sessions[env.SessionID]
+		m.mu.Unlock()
+		if s == nil {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		if err := s.bridge.SendInput(body); err != nil {
+			http.Error(w, "sidecar not running", http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

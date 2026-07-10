@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from rh_protocol import PageState  # noqa: E402
 from rh_input import RecordingInjector  # noqa: E402
 from rh_screen import ScriptedObserver  # noqa: E402
-from rh_fsm import RemoteHandFSM  # noqa: E402
+from rh_fsm import RemoteHandFSM, _UNKNOWN_STALL_TICKS  # noqa: E402
 
 
 class RecordingEmitter:
@@ -174,6 +174,44 @@ class TestUnknownWaits(unittest.TestCase):
         self.assertEqual(emit.msgs, [])
         fsm.tick()                                   # EMAIL → prompt
         self.assertEqual(emit.steps(), ["email"])
+
+
+class TestUnknownStall(unittest.TestCase):
+    """A brief UNKNOWN is loading; a persistent one is an unexpected Google screen —
+    never spin forever (Rule: no silent 'known limitation')."""
+    def test_brief_unknown_stays_silent(self):
+        fsm, inj, emit = make([PageState.UNKNOWN], err="Your session ended because there was no activity")
+        for _ in range(_UNKNOWN_STALL_TICKS - 1):     # just below the stall threshold
+            fsm.tick()
+        self.assertEqual(emit.msgs, [])
+        self.assertFalse(fsm.done)
+
+    def test_persistent_unknown_recognized_terminal_ends(self):
+        fsm, inj, emit = make([PageState.UNKNOWN], err="Your session ended because there was no activity")
+        for _ in range(_UNKNOWN_STALL_TICKS):
+            fsm.tick()
+        self.assertTrue(fsm.done)
+        self.assertEqual(fsm.result, "error")
+        self.assertEqual(emit.msgs[-1]["state"], "error")
+        self.assertIn("session expired", emit.msgs[-1]["message"].lower())
+
+    def test_persistent_unknown_unrecognized_surfaces_once(self):
+        fsm, inj, emit = make([PageState.UNKNOWN], err="Please complete this extra step to continue")
+        for _ in range(_UNKNOWN_STALL_TICKS + 3):
+            fsm.tick()
+        self.assertFalse(fsm.done)                    # unrecognized → surfaced, not terminal
+        surfaced = [m for m in emit.msgs if m["type"] == "rh_state" and "Google shows" in m.get("message", "")]
+        self.assertEqual(len(surfaced), 1)            # latched — surfaced exactly once
+        self.assertIn("extra step", surfaced[0]["message"])
+
+    def test_unknown_counter_resets_on_recognized_page(self):
+        # UNKNOWN just under threshold, then a real page, then UNKNOWN again must not fire early.
+        states = [PageState.UNKNOWN] * (_UNKNOWN_STALL_TICKS - 1) + [PageState.EMAIL] + [PageState.UNKNOWN] * 2
+        fsm, inj, emit = make(states, err="mystery screen")
+        for _ in range(len(states)):
+            fsm.tick()
+        surfaced = [m for m in emit.msgs if m["type"] == "rh_state" and "Google shows" in m.get("message", "")]
+        self.assertEqual(surfaced, [])                # reset by EMAIL → never reached threshold again
 
 
 if __name__ == "__main__":

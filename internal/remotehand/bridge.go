@@ -31,12 +31,18 @@ type Bridge struct {
 	sessionID string   // correlates with ws messages
 	env       []string // extra env (e.g. RH_FAKE=1 for tests)
 	send      func([]byte)
+	onExit    func() // invoked once when the sidecar exits (stdout EOF) — frees the display
 
 	mu     sync.Mutex
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	closed bool
 }
+
+// SetOnExit registers a callback fired once when the sidecar process exits on its
+// own (browser closed, crash, flow done) so the Manager can release the display
+// immediately instead of waiting for the session timeout. Call before Start.
+func (b *Bridge) SetOnExit(fn func()) { b.onExit = fn }
 
 // New builds a Bridge. send is invoked for every line the sidecar emits
 // (wire it to ws.Hub.BroadcastRaw). extraEnv is appended to the child env.
@@ -72,7 +78,9 @@ func (b *Bridge) Start(ctx context.Context) error {
 	return nil
 }
 
-// readLoop forwards each sidecar stdout line to send until EOF.
+// readLoop forwards each sidecar stdout line to send until EOF. EOF means the
+// sidecar exited — fire onExit so the Manager frees the display promptly (else it
+// leaks until the session timeout and exhausts the small display pool under churn).
 func (b *Bridge) readLoop(stdout io.Reader) {
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024) // captcha images can be large
@@ -81,6 +89,9 @@ func (b *Bridge) readLoop(stdout io.Reader) {
 		if b.send != nil && len(line) > 0 {
 			b.send(line)
 		}
+	}
+	if b.onExit != nil {
+		b.onExit() // sidecar gone; Manager.End is idempotent so a concurrent Close is safe
 	}
 }
 

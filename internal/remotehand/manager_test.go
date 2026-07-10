@@ -121,3 +121,37 @@ func TestManagerPoolExhaustion(t *testing.T) {
 		t.Fatalf("want ErrNoDisplay on exhausted pool, got %v", err)
 	}
 }
+
+// TestManagerReleasesDisplayOnSidecarExit: a sidecar that exits on its own (browser
+// closed / flow done) must free its display promptly via onExit — WITHOUT an
+// explicit End and WITHOUT waiting for the session timeout. Regression for the
+// pool-exhaustion-under-churn bug (small pool leaked displays to dead sidecars).
+func TestManagerReleasesDisplayOnSidecarExit(t *testing.T) {
+	requireSidecar(t)
+	hub := newFakeHub()
+	pool := NewDisplayPool(":0")
+	m := NewManager(hub, pool, sidecarScript(), 20*time.Second,
+		"RH_FAKE=1", "RH_STATES=email,success")
+	sid, err := m.Start("u")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitFor(t, hub.out, func(x map[string]any) bool {
+		return x["type"] == "rh_prompt" && x["step"] == "email"
+	})
+	// Drive to success → the fake sidecar reaches 'done' and exits its process.
+	hub.input(map[string]any{"type": "rh_input", "session_id": sid, "step": "email",
+		"values": map[string]string{"login": "a@b.c"}})
+	waitFor(t, hub.out, func(x map[string]any) bool {
+		return x["type"] == "rh_state" && x["state"] == "success"
+	})
+	// onExit (stdout EOF) must release the display with no explicit End — poll briefly.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if pool.Available() == 1 && m.Active() == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("sidecar exit did not free display (avail=%d active=%d)", pool.Available(), m.Active())
+}

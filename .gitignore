@@ -10,3 +10,7 @@ vendor/
 .AI
 /relay
 relay.exe
+
+# Python bytecode (remote-hand sidecar)
+__pycache__/
+*.pyc

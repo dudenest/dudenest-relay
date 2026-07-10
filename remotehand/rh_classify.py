@@ -27,6 +27,9 @@ _RULES: list[tuple[PageState, list[str]]] = [
         r"too many failed",
         r"account (disabled|has been disabled)",
         r"couldn.?t sign you in",
+        r"your session (ended|has expired|expired|timed out)",
+        r"session ended because there was no activity",
+        r"you.?ve been signed out",
     ]),
     (PageState.SMS, [
         r"enter the code",
@@ -92,6 +95,9 @@ _ERROR_MAP: list[tuple[str | None, str, list[str]]] = [
      [r"too many failed", r"too many attempts", r"try again later"]),
     (None, "This account is unavailable",
      [r"account (disabled|has been disabled)", r"couldn.?t sign you in"]),
+    (None, "Session expired (idle too long) — please start again",
+     [r"your session (ended|has expired|expired|timed out)",
+      r"session ended because there was no activity", r"you.?ve been signed out"]),
 ]
 
 

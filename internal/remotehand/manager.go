@@ -75,6 +75,7 @@ func (m *Manager) Start(oauthURL string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), m.timeout)
 	env := append([]string{"RH_OAUTH_URL=" + oauthURL}, m.extraEnv...)
 	b := New(m.script, display, sid, m.hub.BroadcastRaw, env...)
+	b.SetOnExit(func() { m.End(sid) }) // sidecar self-exit → free display now, not at timeout
 	if err := b.Start(ctx); err != nil {
 		cancel()
 		m.pool.Release(display)
