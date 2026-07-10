@@ -135,6 +135,14 @@ class TestError(unittest.TestCase):
         prompts = [m for m in emit.msgs if m["type"] == "rh_prompt"]
         self.assertEqual(prompts[-1]["step"], "sms_code")
 
+    def test_no_account_reprompts_login_and_replaces_google_field(self):
+        fsm, inj, emit = make([PageState.ERROR], err="Couldnt find his account")
+        fsm.tick()
+        prompts = [m for m in emit.msgs if m["type"] == "rh_prompt"]
+        self.assertEqual(prompts[-1]["step"], "email")
+        fsm.submit("email", {"login": "correct@example.com", "password": "pw"})
+        self.assertEqual(inj.calls[:3], [("key", "ctrl+a"), ("type", "correct@example.com"), ("key", "Return")])
+
 
 class TestIdempotency(unittest.TestCase):
     """Rule #17: re-observing the same page must not double-prompt / double-type."""

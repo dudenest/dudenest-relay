@@ -31,6 +31,7 @@ class RemoteHandFSM:
         self._buffered: dict[str, str] = {}   # e.g. password held until PASSWORD page
         self._prompted: set[str] = set()       # steps already prompted/handled (idempotency)
         self._error_shown = False              # latch: one re-prompt per error, until user responds
+        self._replace_next = False             # after Google field error, Ctrl+A before typing correction
         self.done = False
         self.result: str | None = None
         self.last_state = PageState.UNKNOWN
@@ -55,17 +56,18 @@ class RemoteHandFSM:
         self._error_shown = False  # user is responding → next error page may re-prompt again
         if step == "email":
             self._buffered["password"] = values.get("password", "")  # keep for password page
-            self._type_and_next(values.get("login", ""))
+            self._type_and_next(values.get("login", ""), replace=self._replace_next)
             self._state("working", "submitting email")
         elif step == "password":
-            self._type_and_next(values.get("password") or self._buffered.get("password", ""))
+            self._type_and_next(values.get("password") or self._buffered.get("password", ""), replace=self._replace_next)
             self._state("working", "submitting password")
         elif step == "phone":
-            self._type_and_next(values.get("phone", ""))
+            self._type_and_next(values.get("phone", ""), replace=self._replace_next)
             self._state("working", "submitting phone")
         elif step == "sms_code":
-            self._type_and_next(values.get("code", ""))
+            self._type_and_next(values.get("code", ""), replace=self._replace_next)
             self._state("working", "submitting code")
+        self._replace_next = False
 
     # ---- per-state handlers ----
     def _on_email(self) -> None:  # scenario §7 step 2: ask login + password together
@@ -145,6 +147,7 @@ class RemoteHandFSM:
         self._buffered.pop("password", None)       # drop stale secret
         self._prompted.discard("password_injected")  # allow a fresh password inject
         self._prompted.add(step)                     # don't let _on_<state> double-handle
+        self._replace_next = True                    # overwrite Google's invalid value on submit
         self._emit.send(rh_prompt(self.session_id, self.request_id, step, msg,
                                   [Field(n, l, k) for (n, l, k) in specs]))
 
@@ -152,7 +155,9 @@ class RemoteHandFSM:
         pass  # transient/loading — re-observe on next tick
 
     # ---- helpers ----
-    def _type_and_next(self, text: str) -> None:
+    def _type_and_next(self, text: str, replace: bool = False) -> None:
+        if replace:
+            self._inj.press_key("ctrl+a")
         self._inj.type_text(text)
         self._inj.press_key("Return")
 

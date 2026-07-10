@@ -22,7 +22,7 @@ from rh_protocol import PageState
 # Patterns are regexes matched against lowercased OCR text.
 _RULES: list[tuple[PageState, list[str]]] = [
     (PageState.ERROR, [
-        r"couldn.?t find your (google )?account",
+        r"couldn.?t find (your|this|his) (google )?account",
         r"wrong password",
         r"too many failed",
         r"account (disabled|has been disabled)",
@@ -87,7 +87,7 @@ _ERROR_MAP: list[tuple[str | None, str, list[str]]] = [
      [r"couldn.?t verify (your )?phone", r"invalid phone", r"enter a valid phone",
       r"this phone number cannot be used", r"wrong number"]),
     ("login", "Couldn't find that account — check the email",
-     [r"couldn.?t find your (google )?account"]),
+     [r"couldn.?t find (your|this|his) (google )?account", r"couldn.?t find .{0,24}account"]),
     (None, "Too many attempts — try again later",
      [r"too many failed", r"too many attempts", r"try again later"]),
     (None, "This account is unavailable",
