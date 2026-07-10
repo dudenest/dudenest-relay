@@ -25,9 +25,10 @@ type Message struct {
 
 // Hub manages connected Flutter clients and broadcasts messages to them.
 type Hub struct {
-	mu         sync.Mutex
-	clients    map[net.Conn]bool
-	onAuthDone func() // optional callback invoked when an auth_done Broadcast fires — used by serve.go to trigger pipeline reinit out of standby mode
+	mu              sync.Mutex
+	clients         map[net.Conn]bool
+	onAuthDone      func()       // optional callback invoked when an auth_done Broadcast fires — used by serve.go to trigger pipeline reinit out of standby mode
+	onClientMessage func([]byte) // optional: raw inbound client frames (e.g. Remote-Hand rh_input) routed to the sidecar bridge
 }
 
 // NewHub returns a ready-to-use WebSocket hub.
@@ -49,9 +50,31 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil { return }
 	h.mu.Lock(); h.clients[conn] = true; h.mu.Unlock()
 	defer func() { h.mu.Lock(); delete(h.clients, conn); h.mu.Unlock(); conn.Close() }()
-	for { // read loop: keep-alive + detect client disconnect
-		if _, _, err := wsutil.ReadClientData(conn); err != nil { break }
+	for { // read loop: keep-alive, inbound rh_input routing, disconnect detection
+		data, _, err := wsutil.ReadClientData(conn)
+		if err != nil { break }
+		h.mu.Lock(); cb := h.onClientMessage; h.mu.Unlock()
+		if cb != nil && len(data) > 0 { cb(data) }
 	}
+}
+
+// SetOnClientMessage registers a handler for raw inbound frames from Flutter
+// (Remote-Hand rh_input). Set by the sidecar bridge so user input reaches the
+// per-session Python sidecar over its stdin.
+func (h *Hub) SetOnClientMessage(fn func([]byte)) {
+	h.mu.Lock(); defer h.mu.Unlock()
+	h.onClientMessage = fn
+}
+
+// BroadcastRaw sends pre-serialized JSON to all clients verbatim — used to
+// forward Remote-Hand sidecar messages (rh_hello/rh_prompt/rh_state) whose
+// schema the Hub does not need to know.
+func (h *Hub) BroadcastRaw(data []byte) {
+	h.mu.Lock()
+	for conn := range h.clients {
+		wsutil.WriteServerMessage(conn, ws.OpText, data) //nolint:errcheck
+	}
+	h.mu.Unlock()
 }
 
 // Broadcast sends msg to all connected Flutter clients (best-effort, ignores errors).

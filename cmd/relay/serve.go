@@ -30,6 +30,7 @@ import (
 	"github.com/dudenest/dudenest-relay/internal/pipeline"
 	"github.com/dudenest/dudenest-relay/internal/register"
 	"github.com/dudenest/dudenest-relay/internal/relaytoken"
+	"github.com/dudenest/dudenest-relay/internal/remotehand"
 	"github.com/dudenest/dudenest-relay/internal/scan"
 	"github.com/dudenest/dudenest-relay/internal/thumbnail"
 	"github.com/dudenest/dudenest-relay/internal/ws"
@@ -232,7 +233,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 		// admin-less tiles. Idempotent path heals the fleet automatically on next restart.
 		if clouds, cErr := getClouds(); cErr == nil {
 			ids := make([]string, 0, len(clouds))
-			for _, c := range clouds { ids = append(ids, c.ID()) }
+			for _, c := range clouds {
+				ids = append(ids, c.ID())
+			}
 			if n, bErr := accMgr.BootstrapFromProviders(ids); bErr != nil {
 				log.Printf("⚠️  account bootstrap: %v", bErr)
 			} else if n > 0 {
@@ -381,6 +384,31 @@ func runServe(cmd *cobra.Command, args []string) error {
 	mux.HandleFunc("/files/", requireAuthWithReg(lr, fs.handleFile))
 	mux.HandleFunc("/admin/version", requireAuthWithReg(lr, fs.handleAdminVersion)) // Flutter Update screen — read current + latest release info
 	mux.HandleFunc("/admin/update", requireAuthWithReg(lr, fs.handleAdminUpdate))   // Flutter Update screen — trigger immediate self-update + restart
+	// Method 3 (Remote-Hand): CDP-free mediated login. Manager spawns a Python
+	// sidecar per session on an allocated X display; Flutter drives a schema-driven
+	// form over /ws. See RELAY-REMOTE-HAND-PLAN.md. Sidecar path via env, default
+	// install location; Manager is lazy (spawns nothing until /relay/oauth3/start).
+	rhDisplay := cfg.Server.Display
+	if rhDisplay == "" {
+		rhDisplay = ":99"
+	}
+	rhScript := os.Getenv("RH_SIDECAR_SCRIPT")
+	if rhScript == "" {
+		rhScript = "/usr/local/lib/dudenest/remotehand/rh_sidecar.py"
+	}
+	rhMgr := remotehand.NewManager(wsHub, remotehand.NewDisplayPool(rhDisplay), rhScript, cfg.SessionTimeout())
+	rhMgr.SetPrepare(func(provider string) (string, error) { // provider → OAuth URL + arm server-side token capture (reuses method-2 helpers)
+		if provider != "gdrive" {
+			return "", fmt.Errorf("provider %q not supported for relay-assisted login", provider)
+		}
+		url := browser.BuildAuthURL(cfg2)
+		if err := authSrv.StartAssistedCapture(url); err != nil {
+			return "", err
+		}
+		return url, nil
+	})
+	mux.HandleFunc("/relay/oauth3/start", requireAuthWithReg(lr, rhMgr.StartHandler())) // begin method-3 session → {session_id}
+	mux.HandleFunc("/relay/oauth3/end", requireAuthWithReg(lr, rhMgr.EndHandler()))     // tear down method-3 session
 	// Phase β: account/policy admin endpoints (CRUD via Flutter Settings → Cloud Accounts).
 	// Same auth wrapper as /files — only the paired user's Flutter can mutate.
 	if globalAdminAccounts != nil {
@@ -1030,9 +1058,11 @@ func makeBootstrapHandler(configDir string) http.HandlerFunc {
 		os.Setenv("JWT_SECRET", payload.JWTSecret)     //nolint:errcheck — sets for current process; relay.env updated by install script
 		// s334: prefer HubURL, fallback to BackupURL (old hubs that don't send hub_url yet)
 		hubURL := payload.HubURL
-		if hubURL == "" { hubURL = payload.BackupURL }
+		if hubURL == "" {
+			hubURL = payload.BackupURL
+		}
 		if hubURL != "" {
-			os.Setenv("HUB_URL", hubURL) //nolint:errcheck
+			os.Setenv("HUB_URL", hubURL)    //nolint:errcheck
 			os.Setenv("BACKUP_URL", hubURL) //nolint:errcheck — s334 backward-compat: old code paths still read BACKUP_URL
 		}
 		register.ClearAnnounceToken(configDir) // one-time use — delete after success

@@ -1,8 +1,9 @@
 // api.go — HTTP REST API server for browser auth sessions (used by Flutter UI).
 // Auth methods supported:
-//   A. Flutter-side OAuth  — GET /auth/url → Flutter opens browser (user IP ✅) → POST /auth/exchange
-//   B. Browser automation  — POST /auth/session → chromedp on relay (self-hosted only)
-//   C. WebSocket requests  — relay sends auth_request to Flutter via /ws
+//
+//	A. Flutter-side OAuth  — GET /auth/url → Flutter opens browser (user IP ✅) → POST /auth/exchange
+//	B. Browser automation  — POST /auth/session → chromedp on relay (self-hosted only)
+//	C. WebSocket requests  — relay sends auth_request to Flutter via /ws
 package browser
 
 import (
@@ -25,24 +26,25 @@ import (
 	"github.com/dudenest/dudenest-relay/internal/account"
 	"github.com/dudenest/dudenest-relay/internal/auth"
 	"github.com/dudenest/dudenest-relay/internal/blockmap"
-	"github.com/dudenest/dudenest-relay/pkg/types"
 	"github.com/dudenest/dudenest-relay/internal/ws"
-	)
+	"github.com/dudenest/dudenest-relay/pkg/types"
+)
+
 // Server exposes browser auth sessions over HTTP for Flutter to consume.
 type Server struct {
-	mgr           *Manager
-	listenAddr    string
-	oauthURL      string              // Google OAuth2 authorization URL (built from client_id)
-	oauthCfg      *oauth2.Config      // desktop/mobile client (redirect: http://localhost or custom scheme)
-	webOAuthCfg   *oauth2.Config      // web client (redirect: https://dudenest.com/auth); nil = unsupported
-	configDir     string              // where to save tokens (~/.config/dudenest)
-	wsHub         *ws.Hub             // optional — broadcasts auth_request to Flutter (nil = disabled)
-	bm            *blockmap.Manager   // optional — used for file_count in /auth/providers (nil = count disabled)
-	callbackPort  int                 // local port for OAuth2 redirect (default: 8085)
-	noVNCBackend  string              // noVNC/websockify backend address (default: "127.0.0.1:6080")
-	cbMu          sync.Mutex          // protects cbCancel — only one callback server at a time
-	cbCancel      context.CancelFunc  // cancel function for the active callback server
-	accountMgr    *account.Manager    // s329 #B: auto-add CloudAccount to admin Manager after OAuth (nil = legacy mode)
+	mgr          *Manager
+	listenAddr   string
+	oauthURL     string             // Google OAuth2 authorization URL (built from client_id)
+	oauthCfg     *oauth2.Config     // desktop/mobile client (redirect: http://localhost or custom scheme)
+	webOAuthCfg  *oauth2.Config     // web client (redirect: https://dudenest.com/auth); nil = unsupported
+	configDir    string             // where to save tokens (~/.config/dudenest)
+	wsHub        *ws.Hub            // optional — broadcasts auth_request to Flutter (nil = disabled)
+	bm           *blockmap.Manager  // optional — used for file_count in /auth/providers (nil = count disabled)
+	callbackPort int                // local port for OAuth2 redirect (default: 8085)
+	noVNCBackend string             // noVNC/websockify backend address (default: "127.0.0.1:6080")
+	cbMu         sync.Mutex         // protects cbCancel — only one callback server at a time
+	cbCancel     context.CancelFunc // cancel function for the active callback server
+	accountMgr   *account.Manager   // s329 #B: auto-add CloudAccount to admin Manager after OAuth (nil = legacy mode)
 }
 
 // SetAccountManager wires the account.Manager so every successful SaveToken in this server
@@ -61,8 +63,12 @@ func (srv *Server) SetAccountManager(m *account.Manager) { srv.accountMgr = m }
 //
 // Logged to stdout so journalctl shows the auto-add lifecycle without needing debug flags.
 func (srv *Server) autoAddAccount(provider, email string) {
-	if srv.accountMgr == nil { return } // legacy mode (e.g. CLI auth, or tests without accountMgr)
-	if provider == "" || email == "" { return }
+	if srv.accountMgr == nil {
+		return
+	} // legacy mode (e.g. CLI auth, or tests without accountMgr)
+	if provider == "" || email == "" {
+		return
+	}
 	a, err := srv.accountMgr.AddAccount(provider, email)
 	switch {
 	case err == nil:
@@ -153,13 +159,23 @@ func (srv *Server) Run() error {
 // Flutter specifies its own callback URI so the auth code returns to the user's device (user's IP ✅).
 // GET /auth/url?provider=gdrive&callback=com.dudenest.app://oauth/callback
 func (srv *Server) handleAuthURL(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet { http.Error(w, "GET only", http.StatusMethodNotAllowed); return }
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
 	provider := r.URL.Query().Get("provider")
 	callbackURI := r.URL.Query().Get("callback")
-	if provider == "" { provider = "gdrive" }
-	if provider != "gdrive" { jsonError(w, "unsupported provider: "+provider, 400); return }
+	if provider == "" {
+		provider = "gdrive"
+	}
+	if provider != "gdrive" {
+		jsonError(w, "unsupported provider: "+provider, 400)
+		return
+	}
 	cfg := *srv.selectOAuthCfg(callbackURI) // copy — web vs desktop client based on callback URI
-	if callbackURI != "" { cfg.RedirectURL = callbackURI }
+	if callbackURI != "" {
+		cfg.RedirectURL = callbackURI
+	}
 	// prompt=consent forces Google to always issue a new refresh_token (even on re-auth)
 	authURL := cfg.AuthCodeURL("state-token", oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
 	jsonOK(w, map[string]string{"url": authURL, "provider": provider, "redirect_uri": cfg.RedirectURL})
@@ -169,37 +185,65 @@ func (srv *Server) handleAuthURL(w http.ResponseWriter, r *http.Request) {
 // The code was obtained on user's device (user's IP) — relay only does the token exchange (acceptable).
 // POST /auth/exchange {provider, code, redirect_uri, request_id?}
 func (srv *Server) handleExchange(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { http.Error(w, "POST only", http.StatusMethodNotAllowed); return }
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
 	var req struct {
 		Provider    string `json:"provider"`
 		Code        string `json:"code"`
 		RedirectURI string `json:"redirect_uri"`
 		RequestID   string `json:"request_id,omitempty"` // correlates with ws auth_request
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { jsonError(w, "invalid JSON: "+err.Error(), 400); return }
-	if req.Provider == "" { req.Provider = "gdrive" }
-	if req.Provider != "gdrive" { jsonError(w, "unsupported provider: "+req.Provider, 400); return }
-	if req.Code == "" { jsonError(w, "code required", 400); return }
-	cfg := *srv.selectOAuthCfg(req.RedirectURI) // must use same client as handleAuthURL used
-	if req.RedirectURI != "" { cfg.RedirectURL = req.RedirectURI }
-	token, err := ExchangeCode(&cfg, req.Code)
-	if err != nil { jsonError(w, "token exchange: "+err.Error(), 500); return }
-	email, err := GetEmailFromToken(&cfg, token)
-	if err != nil { email = "unknown@gmail.com" } // non-fatal
-	rt := token.RefreshToken
-	if rt == "" { rt = existingRefreshToken(srv.configDir, email) } // Google omits rt on re-auth; preserve existing
-	gt := &types.GDriveToken{
-		AccessToken:  token.AccessToken,
-		TokenType:    token.TokenType,
-		RefreshToken: rt,
-		Expiry:       token.Expiry,
-		Email:        email,
-		ProviderID:   upsertProviderID(srv.configDir, email), // reuse existing ID if email known
-		ClientID:     cfg.ClientID,                           // remember which client issued this token
-		LastAuthorizedAt: time.Now(),                          // s329 #I: bump on every successful token save — Flutter polling detects re-auth via this field even for accounts that were already available=true (scope upgrade flow)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid JSON: "+err.Error(), 400)
+		return
 	}
-	if rt == "" { fmt.Printf("handleExchange: WARNING — no refresh_token for %s\n", email) }
-	if err := SaveToken(srv.configDir, gt.ProviderID, gt); err != nil { jsonError(w, "save token: "+err.Error(), 500); return }
+	if req.Provider == "" {
+		req.Provider = "gdrive"
+	}
+	if req.Provider != "gdrive" {
+		jsonError(w, "unsupported provider: "+req.Provider, 400)
+		return
+	}
+	if req.Code == "" {
+		jsonError(w, "code required", 400)
+		return
+	}
+	cfg := *srv.selectOAuthCfg(req.RedirectURI) // must use same client as handleAuthURL used
+	if req.RedirectURI != "" {
+		cfg.RedirectURL = req.RedirectURI
+	}
+	token, err := ExchangeCode(&cfg, req.Code)
+	if err != nil {
+		jsonError(w, "token exchange: "+err.Error(), 500)
+		return
+	}
+	email, err := GetEmailFromToken(&cfg, token)
+	if err != nil {
+		email = "unknown@gmail.com"
+	} // non-fatal
+	rt := token.RefreshToken
+	if rt == "" {
+		rt = existingRefreshToken(srv.configDir, email)
+	} // Google omits rt on re-auth; preserve existing
+	gt := &types.GDriveToken{
+		AccessToken:      token.AccessToken,
+		TokenType:        token.TokenType,
+		RefreshToken:     rt,
+		Expiry:           token.Expiry,
+		Email:            email,
+		ProviderID:       upsertProviderID(srv.configDir, email), // reuse existing ID if email known
+		ClientID:         cfg.ClientID,                           // remember which client issued this token
+		LastAuthorizedAt: time.Now(),                             // s329 #I: bump on every successful token save — Flutter polling detects re-auth via this field even for accounts that were already available=true (scope upgrade flow)
+	}
+	if rt == "" {
+		fmt.Printf("handleExchange: WARNING — no refresh_token for %s\n", email)
+	}
+	if err := SaveToken(srv.configDir, gt.ProviderID, gt); err != nil {
+		jsonError(w, "save token: "+err.Error(), 500)
+		return
+	}
 	srv.autoAddAccount("gdrive", email) // s329 #B: also register in account.Manager so admin badges/scan loop activate
 	// Notify Flutter via WebSocket if this was a relay-initiated auth request
 	if req.RequestID != "" && srv.wsHub != nil {
@@ -211,7 +255,9 @@ func (srv *Server) handleExchange(w http.ResponseWriter, r *http.Request) {
 
 // --- Request / Response types ---
 
-type sessionReq struct{ Provider string `json:"provider"` }
+type sessionReq struct {
+	Provider string `json:"provider"`
+}
 type inputReq struct {
 	SessionID string `json:"session_id"`
 	Selector  string `json:"selector"`
@@ -272,9 +318,11 @@ func (srv *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "navigate to OAuth URL: "+err.Error(), 500)
 		return
 	}
-	srv.cancelPrevCallback() // free port :8085 if previous session's callback server is still running
+	srv.cancelPrevCallback()                                                     // free port :8085 if previous session's callback server is still running
 	cbCtx, cbCancel := context.WithTimeout(context.Background(), 10*time.Minute) // user has 10min to complete login
-	srv.cbMu.Lock(); srv.cbCancel = cbCancel; srv.cbMu.Unlock() // register cancel for future cleanup
+	srv.cbMu.Lock()
+	srv.cbCancel = cbCancel
+	srv.cbMu.Unlock() // register cancel for future cleanup
 	waitForCode, cbErr := StartCallbackServer(cbCtx, 10*time.Minute, srv.callbackPort)
 	if cbErr != nil {
 		cbCancel()
@@ -297,13 +345,17 @@ func (srv *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		email, _ := GetEmailFromToken(srv.oauthCfg, token)
-		if email == "" { email = "unknown@gmail.com" }
+		if email == "" {
+			email = "unknown@gmail.com"
+		}
 		rt := token.RefreshToken
-		if rt == "" { rt = existingRefreshToken(srv.configDir, email) }
+		if rt == "" {
+			rt = existingRefreshToken(srv.configDir, email)
+		}
 		gt := &types.GDriveToken{
 			AccessToken: token.AccessToken, TokenType: token.TokenType, RefreshToken: rt,
 			Expiry: token.Expiry, Email: email, ProviderID: upsertProviderID(srv.configDir, email),
-			ClientID: srv.oauthCfg.ClientID,
+			ClientID:         srv.oauthCfg.ClientID,
 			LastAuthorizedAt: time.Now(), // s329 #I: bump on noVNC OAuth completion → Flutter polling detects re-auth via this field
 		}
 		if sErr := SaveToken(srv.configDir, gt.ProviderID, gt); sErr != nil {
@@ -319,10 +371,69 @@ func (srv *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		srv.mgr.Close(sid)
 	}()
 	scheme := "http"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" { scheme = "https" } // Cloudflare sets X-Forwarded-Proto
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	} // Cloudflare sets X-Forwarded-Proto
 	vncURL := fmt.Sprintf("%s://%s/vnc/dudenest.html?session=%s", scheme, r.Host, sid)
 	fmt.Printf("handleSession: noVNC URL: %s\n", vncURL)
 	jsonOK(w, map[string]string{"session_id": sid, "status": "vnc_ready", "vnc_url": vncURL})
+}
+
+// StartAssistedCapture arms OAuth token capture for a method-3 (Remote-Hand)
+// session. It starts the callback server and, in the background, waits for the
+// code → exchanges → saves the token → broadcasts auth_done — exactly like noVNC
+// method 2, but WITHOUT a chromedp session (the CDP-free sidecar drives the
+// vanilla Chromium). Reuses the same token helpers, so token storage / auth_done
+// are byte-for-byte identical. Called by serve.go when a method-3 session starts;
+// the returned OAuth URL is what the sidecar opens.
+func (srv *Server) StartAssistedCapture(oauthURL string) error {
+	srv.cancelPrevCallback() // one callback server at a time on :callbackPort
+	cbCtx, cbCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	srv.cbMu.Lock()
+	srv.cbCancel = cbCancel
+	srv.cbMu.Unlock()
+	waitForCode, err := StartCallbackServer(cbCtx, 10*time.Minute, srv.callbackPort)
+	if err != nil {
+		cbCancel()
+		return fmt.Errorf("assisted-capture callback server: %w", err)
+	}
+	fmt.Printf("assisted-capture: armed for %s\n", oauthURL)
+	go func() {
+		defer cbCancel()
+		code, cErr := waitForCode()
+		if cErr != nil {
+			fmt.Printf("assisted-capture: callback error: %v\n", cErr)
+			return
+		}
+		token, xErr := ExchangeCode(srv.oauthCfg, code)
+		if xErr != nil {
+			fmt.Printf("assisted-capture: exchange error: %v\n", xErr)
+			return
+		}
+		email, _ := GetEmailFromToken(srv.oauthCfg, token)
+		if email == "" {
+			email = "unknown@gmail.com"
+		}
+		rt := token.RefreshToken
+		if rt == "" {
+			rt = existingRefreshToken(srv.configDir, email)
+		}
+		gt := &types.GDriveToken{
+			AccessToken: token.AccessToken, TokenType: token.TokenType, RefreshToken: rt,
+			Expiry: token.Expiry, Email: email, ProviderID: upsertProviderID(srv.configDir, email),
+			ClientID: srv.oauthCfg.ClientID, LastAuthorizedAt: time.Now(),
+		}
+		if sErr := SaveToken(srv.configDir, gt.ProviderID, gt); sErr != nil {
+			fmt.Printf("assisted-capture: save token error: %v\n", sErr)
+			return
+		}
+		srv.autoAddAccount("gdrive", email)
+		fmt.Printf("assisted-capture: auth done — %s (%s)\n", email, gt.ProviderID)
+		if srv.wsHub != nil {
+			srv.wsHub.Broadcast(ws.Message{Type: "auth_done", Provider: "gdrive", Email: email})
+		}
+	}()
+	return nil
 }
 
 func (srv *Server) handleInput(w http.ResponseWriter, r *http.Request) {
@@ -388,7 +499,10 @@ func (srv *Server) handleClick(w http.ResponseWriter, r *http.Request) {
 	if strings.Contains(req.Selector, "submit_approve_access") {
 		// Bind :8085 synchronously BEFORE clicking — eliminates race where browser redirects before server is ready.
 		// defer cancel() ensures port is freed when this handler returns (success or error).
-		type codeRes struct{ code string; err error }
+		type codeRes struct {
+			code string
+			err  error
+		}
 		codeCh := make(chan codeRes, 1)
 		cbCtx, cancelCallback := context.WithCancel(r.Context())
 		defer cancelCallback() // frees :8085 immediately when handler returns
@@ -446,7 +560,9 @@ func (srv *Server) handleClick(w http.ResponseWriter, r *http.Request) {
 			email = "unknown@gmail.com" // non-fatal: token works even without email
 		}
 		rt := token.RefreshToken
-		if rt == "" { rt = existingRefreshToken(srv.configDir, email) }
+		if rt == "" {
+			rt = existingRefreshToken(srv.configDir, email)
+		}
 		gt := &types.GDriveToken{
 			AccessToken:  token.AccessToken,
 			TokenType:    token.TokenType,
@@ -478,23 +594,41 @@ func (srv *Server) handleClick(w http.ResponseWriter, r *http.Request) {
 func (srv *Server) handleVNCProxy(w http.ResponseWriter, r *http.Request) {
 	backendAddr := srv.noVNCBackend
 	path := strings.TrimPrefix(r.URL.Path, "/vnc")
-	if path == "" || path == "/" { path = "/dudenest.html" }
+	if path == "" || path == "/" {
+		path = "/dudenest.html"
+	}
 	if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") { // WebSocket: VNC stream — require valid session
 		sid := r.URL.Query().Get("session")
-		if sid == "" { http.Error(w, "missing session param", http.StatusUnauthorized); return }
-		if _, err := srv.mgr.Get(sid); err != nil { http.Error(w, "invalid or expired session", http.StatusForbidden); return }
+		if sid == "" {
+			http.Error(w, "missing session param", http.StatusUnauthorized)
+			return
+		}
+		if _, err := srv.mgr.Get(sid); err != nil {
+			http.Error(w, "invalid or expired session", http.StatusForbidden)
+			return
+		}
 		srv.tunnelWebSocket(w, r, backendAddr, path)
 		return
 	}
 	// Regular HTTP: proxy static noVNC assets (dudenest.html, core/rfb.js, etc.)
 	backendURL := &url.URL{Scheme: "http", Host: backendAddr, Path: path}
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, backendURL.String(), r.Body)
-	if err != nil { http.Error(w, "proxy request: "+err.Error(), 500); return }
-	for k, vv := range r.Header { req.Header[k] = vv }
+	if err != nil {
+		http.Error(w, "proxy request: "+err.Error(), 500)
+		return
+	}
+	for k, vv := range r.Header {
+		req.Header[k] = vv
+	}
 	resp, err := http.DefaultTransport.RoundTrip(req)
-	if err != nil { http.Error(w, "backend error: "+err.Error(), 502); return }
+	if err != nil {
+		http.Error(w, "backend error: "+err.Error(), 502)
+		return
+	}
 	defer resp.Body.Close()
-	for k, vv := range resp.Header { w.Header()[k] = vv }
+	for k, vv := range resp.Header {
+		w.Header()[k] = vv
+	}
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body) //nolint:errcheck
 }
@@ -502,24 +636,40 @@ func (srv *Server) handleVNCProxy(w http.ResponseWriter, r *http.Request) {
 // tunnelWebSocket creates a bidirectional TCP tunnel for WebSocket upgrade requests.
 func (srv *Server) tunnelWebSocket(w http.ResponseWriter, r *http.Request, backendAddr, backendPath string) {
 	backendConn, err := net.DialTimeout("tcp", backendAddr, 5*time.Second)
-	if err != nil { http.Error(w, "backend dial: "+err.Error(), 502); return }
+	if err != nil {
+		http.Error(w, "backend dial: "+err.Error(), 502)
+		return
+	}
 	defer backendConn.Close()
 	backendReq, _ := http.NewRequest(r.Method, "http://"+backendAddr+backendPath, nil)
 	backendReq.Header = r.Header.Clone()
 	backendReq.Header.Set("Host", backendAddr)
-	if err := backendReq.Write(backendConn); err != nil { return }
+	if err := backendReq.Write(backendConn); err != nil {
+		return
+	}
 	backendBuf := bufio.NewReader(backendConn)
 	resp, err := http.ReadResponse(backendBuf, backendReq)
-	if err != nil || resp.StatusCode != http.StatusSwitchingProtocols { return }
+	if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
+		return
+	}
 	hj, ok := w.(http.Hijacker)
-	if !ok { http.Error(w, "hijack not supported", 500); return }
+	if !ok {
+		http.Error(w, "hijack not supported", 500)
+		return
+	}
 	clientConn, clientBuf, err := hj.Hijack()
-	if err != nil { return }
+	if err != nil {
+		return
+	}
 	defer clientConn.Close()
-	if err := resp.Write(clientBuf); err != nil { return }
-	if err := clientBuf.Flush(); err != nil { return }
+	if err := resp.Write(clientBuf); err != nil {
+		return
+	}
+	if err := clientBuf.Flush(); err != nil {
+		return
+	}
 	done := make(chan struct{}, 2)
-	go func() { io.Copy(backendConn, clientBuf); done <- struct{}{} }()    //nolint:errcheck
+	go func() { io.Copy(backendConn, clientBuf); done <- struct{}{} }() //nolint:errcheck
 	go func() { io.Copy(clientConn, backendBuf); done <- struct{}{} }() //nolint:errcheck
 	<-done
 }
@@ -541,17 +691,19 @@ func (srv *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 }
 
 type providerInfo struct {
-	ID         string  `json:"id"`
-	Type       string  `json:"type"`
-	Email      string  `json:"email"`
-	QuotaTotal float64 `json:"quota_total_gb"`
-	QuotaUsed  float64 `json:"quota_used_gb"`
-	FileCount  int64   `json:"file_count"`           // files stored on this provider (last known for offline)
-	Available  bool    `json:"available"`
-	LastError  string  `json:"last_error,omitempty"` // reason when available=false
-	LastAuthorizedAt int64 `json:"last_authorized_at,omitempty"` // s329 #I: Unix seconds — Flutter polling detects re-auth via bump even when available stayed true
+	ID               string  `json:"id"`
+	Type             string  `json:"type"`
+	Email            string  `json:"email"`
+	QuotaTotal       float64 `json:"quota_total_gb"`
+	QuotaUsed        float64 `json:"quota_used_gb"`
+	FileCount        int64   `json:"file_count"` // files stored on this provider (last known for offline)
+	Available        bool    `json:"available"`
+	LastError        string  `json:"last_error,omitempty"`         // reason when available=false
+	LastAuthorizedAt int64   `json:"last_authorized_at,omitempty"` // s329 #I: Unix seconds — Flutter polling detects re-auth via bump even when available stayed true
 }
-type providersResp struct{ Providers []providerInfo `json:"providers"` }
+type providersResp struct {
+	Providers []providerInfo `json:"providers"`
+}
 
 func (srv *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -572,10 +724,14 @@ func (srv *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 			fmt.Printf("handleProviders: skip %s: %v\n", e.Name(), err)
 			continue
 		}
-		if seen[t.Email] { continue }
+		if seen[t.Email] {
+			continue
+		}
 		seen[t.Email] = true
 		pi := providerInfo{ID: t.ProviderID, Type: "gdrive", Email: t.Email}
-		if !t.LastAuthorizedAt.IsZero() { pi.LastAuthorizedAt = t.LastAuthorizedAt.Unix() } // s329 #I: surface re-auth bump to Flutter polling
+		if !t.LastAuthorizedAt.IsZero() {
+			pi.LastAuthorizedAt = t.LastAuthorizedAt.Unix()
+		} // s329 #I: surface re-auth bump to Flutter polling
 
 		// Count files from local blockmap (works for both online and offline providers)
 		if srv.bm != nil {
@@ -604,7 +760,9 @@ func (srv *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 			if newTok != nil && newTok.AccessToken != t.AccessToken {
 				t.AccessToken = newTok.AccessToken
 				t.Expiry = newTok.Expiry
-				if newTok.RefreshToken != "" { t.RefreshToken = newTok.RefreshToken }
+				if newTok.RefreshToken != "" {
+					t.RefreshToken = newTok.RefreshToken
+				}
 				t.LastError = "" // clear previous error
 			}
 			overwriteToken(tokenPath, t)
@@ -618,7 +776,7 @@ func (srv *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 		providers = append(providers, pi)
 	}
 	jsonOK(w, providersResp{Providers: providers})
-	}
+}
 func jsonOK(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)

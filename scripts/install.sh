@@ -74,6 +74,7 @@ APT_PKGS=(
   wmctrl  # enforces maximized window state after Chromium launch (saved state overrides --start-maximized)
   tigervnc-standalone-server tigervnc-common tigervnc-tools
   novnc python3-websockify websockify
+  tesseract-ocr xdotool scrot python3-pil python3-pip  # remote-hand method 3: CDP-free OCR read + XTEST input
   unattended-upgrades apt-listchanges
 )
 APT_OPTS=(-y --no-install-recommends -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confnew)
@@ -322,6 +323,25 @@ curl -fsSL "$RELAY_URL" -o "$RELAY_TMP" || fail "Failed to download relay binary
 chmod +x "$RELAY_TMP"
 mv -f "$RELAY_TMP" "$RELAY_BIN"
 ok "Relay binary: $RELAY_BIN ($RELAY_ARCH)"
+
+# Remote-Hand sidecar (method 3: CDP-free mediated login — Python, spawned per session
+# by the relay). Optional: failures degrade method 3 only, they never break the install.
+RH_DIR="/usr/local/lib/dudenest/remotehand"
+RH_BASE="https://raw.githubusercontent.com/$RELAY_REPO/main/remotehand"
+mkdir -p "$RH_DIR"
+RH_OK=1
+for f in rh_protocol.py rh_input.py rh_screen.py rh_fsm.py rh_classify.py rh_crypto.py rh_browser.py rh_sidecar.py; do
+  curl -fsSL "$RH_BASE/$f" -o "$RH_DIR/$f" || { warn "remote-hand: fetch $f failed"; RH_OK=0; }
+done
+if [[ $RH_OK -eq 1 ]]; then
+  if pip3 install --break-system-packages --quiet pynacl pytesseract >/dev/null 2>&1; then
+    ok "Remote-Hand sidecar: $RH_DIR + pynacl/pytesseract (method 3 ready)"
+  else
+    warn "Remote-Hand sidecar files installed but pip deps failed — method 3 degraded"
+  fi
+else
+  warn "Remote-Hand sidecar incomplete — method 3 unavailable (retry on next install)"
+fi
 
 mkdir -p "$CONFIG_DIR/providers" "$DATA_DIR/maps" "$DATA_DIR/thumbs"
 # Legacy migration: relay-poc (pre-bootstrap) stored config in /root/.config/dudenest/.
