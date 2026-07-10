@@ -28,9 +28,20 @@ from rh_protocol import PageState, RhInput, rh_hello
 
 
 class _EmitterWriter:
-    """FSM Emitter that serializes messages through a line writer."""
-    def __init__(self, write): self._write = write
-    def send(self, msg: dict) -> None: self._write(msg)
+    """FSM Emitter that serializes messages through a line writer.
+
+    Re-announces rh_hello immediately before every rh_prompt so a Flutter client
+    that connected AFTER the initial hello (the ws opens a beat after /start
+    spawns the sidecar) still receives the session pubkey with the prompt — else
+    the form renders but 'Continue' stays disabled ('Establishing secure channel')."""
+    def __init__(self, write, hello=None):
+        self._write = write
+        self._hello = hello  # callable → rh_hello dict (re-sent before prompts)
+
+    def send(self, msg: dict) -> None:
+        if self._hello is not None and msg.get("type") == "rh_prompt":
+            self._write(self._hello())
+        self._write(msg)
 
 
 class GatedObserver:
@@ -44,6 +55,7 @@ class GatedObserver:
     def advance(self) -> None: self._i += 1
     def capture_captcha(self) -> bytes | None: return self._captcha
     def error_text(self) -> str: return self._err
+    def locate(self, text: str) -> tuple[int, int] | None: return None
 
 
 class Sidecar:
@@ -52,7 +64,8 @@ class Sidecar:
         self.keys = keys
         self.session_id = session_id
         self._write = write
-        self.fsm = RemoteHandFSM(session_id, observer, injector, _EmitterWriter(write))
+        self.fsm = RemoteHandFSM(session_id, observer, injector,
+                                 _EmitterWriter(write, lambda: rh_hello(session_id, keys.public_key_b64)))
 
     def hello(self) -> None:
         self._write(rh_hello(self.session_id, self.keys.public_key_b64))

@@ -75,6 +75,39 @@ def classify_text(text: str) -> PageState:
     return PageState.UNKNOWN
 
 
+# Error subclassification: which field to re-prompt (or None = terminal), + message.
+# Ordered: specific field errors first, terminal last.
+_ERROR_MAP: list[tuple[str | None, str, list[str]]] = [
+    ("password", "Wrong password — try again",
+     [r"wrong password", r"password (was )?incorrect", r"the password you entered is incorrect"]),
+    ("code", "Wrong code — check the SMS and re-enter",
+     [r"wrong code", r"incorrect code", r"invalid code", r"code (is )?(wrong|incorrect|invalid)",
+      r"that code didn.?t work", r"enter a valid code"]),
+    ("phone", "Couldn't verify that number — check it (with country code)",
+     [r"couldn.?t verify (your )?phone", r"invalid phone", r"enter a valid phone",
+      r"this phone number cannot be used", r"wrong number"]),
+    ("login", "Couldn't find that account — check the email",
+     [r"couldn.?t find your (google )?account"]),
+    (None, "Too many attempts — try again later",
+     [r"too many failed", r"too many attempts", r"try again later"]),
+    (None, "This account is unavailable",
+     [r"account (disabled|has been disabled)", r"couldn.?t sign you in"]),
+]
+
+
+def classify_error(text: str) -> tuple[str | None, str]:
+    """Map an error page's text to (field_to_reprompt, message).
+
+    field is one of login|password|phone|code to re-prompt that field so the user
+    can correct their input; None means a terminal error (give up). Unknown errors
+    are treated as terminal (safe default — don't loop on an unclassifiable page)."""
+    t = text.lower()
+    for field, msg, patterns in _ERROR_MAP:
+        if any(re.search(p, t) for p in patterns):
+            return field, msg
+    return None, "Sign-in failed"
+
+
 def ocr_text(png: bytes) -> str:
     """OCR a PNG via Tesseract (lazy import so tests need no deps/binaries)."""
     import io

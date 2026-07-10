@@ -4,7 +4,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from rh_protocol import PageState  # noqa: E402
-from rh_classify import classify_text, classify_image, make_classifier  # noqa: E402
+from rh_classify import classify_text, classify_image, make_classifier, classify_error  # noqa: E402
 
 # Representative OCR blobs approximating what Tesseract yields on each Google page.
 EMAIL = "Sign in\nUse your Google Account\nEmail or phone\nForgot email?\nNext"
@@ -62,6 +62,32 @@ class TestObserverIntegration(unittest.TestCase):
         obs = ScrotObserver(classifier=make_classifier(ocr=lambda png: SMS))
         obs.grab = lambda region=None: b"fakepng"  # avoid real scrot
         self.assertEqual(obs.observe(), PageState.SMS)
+
+
+class TestClassifyError(unittest.TestCase):
+    def test_wrong_password_reprompts_password(self):
+        field, msg = classify_error("Wrong password. Try again or click Forgot password.")
+        self.assertEqual(field, "password")
+        self.assertIn("password", msg.lower())
+
+    def test_wrong_code_reprompts_code(self):
+        self.assertEqual(classify_error("Wrong code. Enter it again")[0], "code")
+        self.assertEqual(classify_error("You entered an invalid code")[0], "code")
+
+    def test_phone_error_reprompts_phone(self):
+        self.assertEqual(classify_error("This phone number cannot be used for verification")[0], "phone")
+
+    def test_no_account_reprompts_login(self):
+        self.assertEqual(classify_error("Couldn't find your Google Account")[0], "login")
+
+    def test_terminal_errors_return_none(self):
+        self.assertIsNone(classify_error("Too many failed attempts. Try again later")[0])
+        self.assertIsNone(classify_error("This account has been disabled")[0])
+
+    def test_unknown_error_is_terminal(self):
+        field, msg = classify_error("some unexpected page")
+        self.assertIsNone(field)
+        self.assertTrue(msg)
 
 
 if __name__ == "__main__":

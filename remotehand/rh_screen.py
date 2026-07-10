@@ -22,6 +22,7 @@ class Observer(Protocol):
     def observe(self) -> PageState: ...
     def capture_captcha(self) -> bytes | None: ...
     def error_text(self) -> str: ...
+    def locate(self, text: str) -> tuple[int, int] | None: ...
 
 
 class ScrotObserver:
@@ -50,7 +51,31 @@ class ScrotObserver:
         return self.grab(region) if region else None
 
     def error_text(self) -> str:
-        return ""  # Faza 1: OCR the error node
+        """OCR the current screen so the FSM can classify which error Google shows
+        (wrong password/code/phone/account) and re-prompt the offending field."""
+        try:
+            from rh_classify import ocr_text
+            return ocr_text(self.grab())
+        except Exception:
+            return ""
+
+    def locate(self, text: str) -> tuple[int, int] | None:
+        """Find the on-screen center of a word (e.g. a 'Continue'/'Allow' button)
+        via OCR word boxes — so the FSM can click buttons Enter can't activate."""
+        try:
+            import io
+            import pytesseract
+            from PIL import Image
+            data = pytesseract.image_to_data(Image.open(io.BytesIO(self.grab())),
+                                              output_type=pytesseract.Output.DICT)
+            target = text.strip().lower()
+            for i, word in enumerate(data["text"]):
+                if word.strip().lower() == target:
+                    return (data["left"][i] + data["width"][i] // 2,
+                            data["top"][i] + data["height"][i] // 2)
+        except Exception:
+            pass
+        return None
 
 
 def crop_region(png: bytes, region: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
@@ -63,10 +88,12 @@ def crop_region(png: bytes, region: tuple[int, int, int, int]) -> tuple[int, int
 
 class ScriptedObserver:
     """Test double — yields a scripted sequence of PageStates, one per observe()."""
-    def __init__(self, states: list[PageState], captcha: bytes | None = None, err: str = ""):
+    def __init__(self, states: list[PageState], captcha: bytes | None = None, err: str = "",
+                 locate: tuple[int, int] | None = None):
         self._states = list(states)
         self._captcha = captcha
         self._err = err
+        self._locate = locate
         self._i = 0
 
     def observe(self) -> PageState:
@@ -76,3 +103,4 @@ class ScriptedObserver:
 
     def capture_captcha(self) -> bytes | None: return self._captcha
     def error_text(self) -> str: return self._err
+    def locate(self, text: str) -> tuple[int, int] | None: return self._locate

@@ -76,11 +76,19 @@ class TestTwoFactor(unittest.TestCase):
 
 
 class TestConsentAutoAccept(unittest.TestCase):
-    def test_consent_pressed_return(self):
-        fsm, inj, emit = make([PageState.CONSENT, PageState.SUCCESS])
+    def test_consent_clicks_located_button(self):
+        obs = ScriptedObserver([PageState.CONSENT, PageState.SUCCESS], locate=(947, 863))
+        inj = RecordingInjector()
+        emit = RecordingEmitter()
+        fsm = RemoteHandFSM("s1", obs, inj, emit)
+        fsm.tick()
+        self.assertIn(("click", 947, 863, 1), inj.calls)  # clicked the 'Continue' button
+        self.assertIn("working", emit.states())
+
+    def test_consent_falls_back_to_return_when_button_not_found(self):
+        fsm, inj, emit = make([PageState.CONSENT, PageState.SUCCESS])  # locate=None
         fsm.tick()
         self.assertIn(("key", "Return"), inj.calls)
-        self.assertIn("working", emit.states())
 
 
 class TestCaptcha(unittest.TestCase):
@@ -94,12 +102,38 @@ class TestCaptcha(unittest.TestCase):
 
 
 class TestError(unittest.TestCase):
-    def test_error_terminates_with_message(self):
-        fsm, inj, emit = make([PageState.ERROR], err="Wrong password")
+    def test_terminal_error_terminates(self):
+        fsm, inj, emit = make([PageState.ERROR], err="Too many failed attempts, try again later")
         fsm.tick()
         self.assertTrue(fsm.done)
         self.assertEqual(fsm.result, "error")
-        self.assertEqual(emit.msgs[-1]["message"], "Wrong password")
+        self.assertEqual(emit.msgs[-1]["type"], "rh_state")
+        self.assertEqual(emit.msgs[-1]["state"], "error")
+
+    def test_wrong_password_reprompts_not_terminal(self):
+        fsm, inj, emit = make([PageState.ERROR], err="Wrong password. Try again")
+        fsm.tick()
+        self.assertFalse(fsm.done)                       # recoverable — not terminal
+        prompts = [m for m in emit.msgs if m["type"] == "rh_prompt"]
+        self.assertEqual(prompts[-1]["step"], "password")
+        self.assertIn("password", prompts[-1]["title"].lower())
+
+    def test_error_latched_once_until_resubmit(self):
+        # Same error observed repeatedly must re-prompt only once (no spam).
+        fsm, inj, emit = make([PageState.ERROR, PageState.ERROR, PageState.ERROR], err="Wrong password")
+        fsm.tick(); fsm.tick(); fsm.tick()
+        prompts = [m for m in emit.msgs if m["type"] == "rh_prompt"]
+        self.assertEqual(len(prompts), 1)
+        # After the user re-submits, a fresh error may re-prompt again
+        fsm.submit("password", {"password": "again"})
+        fsm.tick()
+        self.assertGreaterEqual(len([m for m in emit.msgs if m["type"] == "rh_prompt"]), 2)
+
+    def test_wrong_code_reprompts_code(self):
+        fsm, inj, emit = make([PageState.ERROR], err="Wrong code, enter it again")
+        fsm.tick()
+        prompts = [m for m in emit.msgs if m["type"] == "rh_prompt"]
+        self.assertEqual(prompts[-1]["step"], "sms_code")
 
 
 class TestIdempotency(unittest.TestCase):

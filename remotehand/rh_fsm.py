@@ -11,6 +11,7 @@ unit-testable without an X server, a browser, or a network (Rule #17).
 from __future__ import annotations
 from typing import Protocol
 
+from rh_classify import classify_error
 from rh_protocol import Field, PageState, rh_prompt, rh_state
 
 
@@ -29,6 +30,7 @@ class RemoteHandFSM:
         self._emit = emitter
         self._buffered: dict[str, str] = {}   # e.g. password held until PASSWORD page
         self._prompted: set[str] = set()       # steps already prompted/handled (idempotency)
+        self._error_shown = False              # latch: one re-prompt per error, until user responds
         self.done = False
         self.result: str | None = None
         self.last_state = PageState.UNKNOWN
@@ -50,6 +52,7 @@ class RemoteHandFSM:
 
     def submit(self, step: str, values: dict[str, str]) -> None:
         """Feed user input from Flutter (secrets already decrypted by caller)."""
+        self._error_shown = False  # user is responding → next error page may re-prompt again
         if step == "email":
             self._buffered["password"] = values.get("password", "")  # keep for password page
             self._type_and_next(values.get("login", ""))
@@ -82,10 +85,16 @@ class RemoteHandFSM:
             self._prompt_once("password", "Enter your password",
                               [Field("password", "Password", "password")])
 
-    def _on_consent(self) -> None:  # auto-accept known consent/agree screens
+    def _on_consent(self) -> None:  # auto-accept the OAuth consent screen
         if "consent" not in self._prompted:
             self._prompted.add("consent")
-            self._inj.press_key("Return")
+            # Enter does NOT activate Google's consent button (it isn't focused) —
+            # locate "Continue"/"Allow" via OCR and click it (Faza 2 fix).
+            pos = self._obs.locate("Continue") or self._obs.locate("Allow")
+            if pos is not None:
+                self._inj.click(*pos)
+            else:
+                self._inj.press_key("Return")  # fallback if the button text isn't found
             self._state("working", "accepting consent")
 
     def _on_phone(self) -> None:
@@ -111,9 +120,33 @@ class RemoteHandFSM:
         self.done = True; self.result = "success"
         self._state("success", "login complete")
 
+    # field → (step, [(name,label,kind), ...]) for re-prompting a mistyped value
+    _REPROMPT = {
+        "login": ("email", [("login", "Login / e-mail", "text"), ("password", "Password", "password")]),
+        "password": ("password", [("password", "Password", "password")]),
+        "phone": ("phone", [("phone", "Phone number", "tel")]),
+        "code": ("sms_code", [("code", "Verification code", "code")]),
+    }
+
     def _on_error(self) -> None:
-        self.done = True; self.result = "error"
-        self._state("error", self._obs.error_text() or "login failed")
+        if self._error_shown:
+            return  # already surfaced this error; the page still shows it — wait for the user
+        self._error_shown = True
+        field, msg = classify_error(self._obs.error_text())
+        if field is None:  # terminal — give up
+            self.done = True
+            self.result = "error"
+            self._state("error", msg)
+            return
+        self._reprompt(field, msg)  # recoverable — let the user correct the offending field
+
+    def _reprompt(self, field: str, msg: str) -> None:
+        step, specs = self._REPROMPT[field]
+        self._buffered.pop("password", None)       # drop stale secret
+        self._prompted.discard("password_injected")  # allow a fresh password inject
+        self._prompted.add(step)                     # don't let _on_<state> double-handle
+        self._emit.send(rh_prompt(self.session_id, self.request_id, step, msg,
+                                  [Field(n, l, k) for (n, l, k) in specs]))
 
     def _on_unknown(self) -> None:
         pass  # transient/loading — re-observe on next tick
