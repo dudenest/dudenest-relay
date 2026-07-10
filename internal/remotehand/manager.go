@@ -31,6 +31,20 @@ type Manager struct {
 
 	mu       sync.Mutex
 	sessions map[string]*mgrSession
+
+	// prepareSession maps a provider (e.g. "gdrive") to the OAuth URL the sidecar
+	// should open, AND arms server-side token capture as a side effect (serve.go
+	// wires this to browser.Server.StartAssistedCapture). nil → only explicit
+	// oauth_url requests are accepted (tests/advanced).
+	prepareSession func(provider string) (string, error)
+}
+
+// SetPrepare installs the provider→OAuth-URL resolver that also arms token
+// capture. Called once by serve.go after construction.
+func (m *Manager) SetPrepare(fn func(provider string) (string, error)) {
+	m.mu.Lock()
+	m.prepareSession = fn
+	m.mu.Unlock()
 }
 
 type mgrSession struct {
@@ -89,7 +103,8 @@ func (m *Manager) End(sid string) {
 
 // Active reports the number of live sessions.
 func (m *Manager) Active() int {
-	m.mu.Lock(); defer m.mu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return len(m.sessions)
 }
 

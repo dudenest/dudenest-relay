@@ -5,15 +5,16 @@ import (
 	"net/http"
 )
 
-// StartHandler begins a method-3 session for a provider's OAuth URL.
+// StartHandler begins a method-3 session.
 //
-//	POST {"oauth_url":"https://accounts.google.com/o/oauth2/..."}
-//	 200 {"session_id":"rh-..."}   503 when at capacity (no free display)
+//	POST {"provider":"gdrive"}    → relay builds the OAuth URL server-side and
+//	                                arms token capture (production path)
+//	POST {"oauth_url":"https://…"} → explicit URL (tests/advanced)
+//	 200 {"session_id":"rh-..."}   503 at capacity   400 bad request
 //
-// Mount behind the relay's auth middleware in serve.go/api.go when the user picks
-// "Relay assisted (method 3)". After this returns, Flutter opens the ws and drives
-// the dynamic form; the OAuth token is captured server-side by the existing relay
-// callback (same as method 2) once the login succeeds.
+// Mounted behind the relay's auth middleware in serve.go. After this returns,
+// Flutter opens the ws and drives the dynamic form; the OAuth token is captured
+// server-side (browser.Server.StartAssistedCapture, same helpers as method 2).
 func (m *Manager) StartHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -21,13 +22,31 @@ func (m *Manager) StartHandler() http.HandlerFunc {
 			return
 		}
 		var req struct {
+			Provider string `json:"provider"`
 			OAuthURL string `json:"oauth_url"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.OAuthURL == "" {
-			http.Error(w, "oauth_url required", http.StatusBadRequest)
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		oauthURL := req.OAuthURL
+		if oauthURL == "" && req.Provider != "" {
+			m.mu.Lock()
+			prep := m.prepareSession
+			m.mu.Unlock()
+			if prep == nil {
+				http.Error(w, "provider sessions not configured", http.StatusBadRequest)
+				return
+			}
+			built, perr := prep(req.Provider)
+			if perr != nil {
+				http.Error(w, perr.Error(), http.StatusBadRequest)
+				return
+			}
+			oauthURL = built
+		}
+		if oauthURL == "" {
+			http.Error(w, "provider or oauth_url required", http.StatusBadRequest)
 			return
 		}
-		sid, err := m.Start(req.OAuthURL)
+		sid, err := m.Start(oauthURL)
 		if err == ErrNoDisplay {
 			http.Error(w, "no free relay display", http.StatusServiceUnavailable)
 			return

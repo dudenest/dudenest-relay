@@ -2,6 +2,7 @@ package remotehand
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -70,6 +71,45 @@ func TestStartHandlerValidation(t *testing.T) {
 	m.StartHandler()(rr, httptest.NewRequest(http.MethodPost, "/start", strings.NewReader(`{}`)))
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("want 400, got %d", rr.Code)
+	}
+}
+
+func TestStartHandlerProviderPath(t *testing.T) {
+	m, _ := newFakeManager(t, ":0")
+	var gotProvider string
+	m.SetPrepare(func(p string) (string, error) {
+		gotProvider = p
+		return "file:///tmp/oauth.html", nil // in prod: browser.BuildAuthURL + arm capture
+	})
+	rr := httptest.NewRecorder()
+	m.StartHandler()(rr, httptest.NewRequest(http.MethodPost, "/start", strings.NewReader(`{"provider":"gdrive"}`)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("provider path want 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+	if gotProvider != "gdrive" {
+		t.Fatalf("prepare called with %q, want gdrive", gotProvider)
+	}
+	var resp map[string]string
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	m.End(resp["session_id"])
+}
+
+func TestStartHandlerProviderNotConfigured(t *testing.T) {
+	m, _ := newFakeManager(t, ":0") // no SetPrepare
+	rr := httptest.NewRecorder()
+	m.StartHandler()(rr, httptest.NewRequest(http.MethodPost, "/start", strings.NewReader(`{"provider":"gdrive"}`)))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("unconfigured provider want 400, got %d", rr.Code)
+	}
+}
+
+func TestStartHandlerProviderRejected(t *testing.T) {
+	m, _ := newFakeManager(t, ":0")
+	m.SetPrepare(func(p string) (string, error) { return "", errors.New("unsupported") })
+	rr := httptest.NewRecorder()
+	m.StartHandler()(rr, httptest.NewRequest(http.MethodPost, "/start", strings.NewReader(`{"provider":"mega"}`)))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("rejected provider want 400, got %d", rr.Code)
 	}
 }
 

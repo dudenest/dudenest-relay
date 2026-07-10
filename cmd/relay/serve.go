@@ -397,6 +397,16 @@ func runServe(cmd *cobra.Command, args []string) error {
 		rhScript = "/usr/local/lib/dudenest/remotehand/rh_sidecar.py"
 	}
 	rhMgr := remotehand.NewManager(wsHub, remotehand.NewDisplayPool(rhDisplay), rhScript, cfg.SessionTimeout())
+	rhMgr.SetPrepare(func(provider string) (string, error) { // provider → OAuth URL + arm server-side token capture (reuses method-2 helpers)
+		if provider != "gdrive" {
+			return "", fmt.Errorf("provider %q not supported for relay-assisted login", provider)
+		}
+		url := browser.BuildAuthURL(cfg2)
+		if err := authSrv.StartAssistedCapture(url); err != nil {
+			return "", err
+		}
+		return url, nil
+	})
 	mux.HandleFunc("/relay/oauth3/start", requireAuthWithReg(lr, rhMgr.StartHandler())) // begin method-3 session → {session_id}
 	mux.HandleFunc("/relay/oauth3/end", requireAuthWithReg(lr, rhMgr.EndHandler()))     // tear down method-3 session
 	// Phase β: account/policy admin endpoints (CRUD via Flutter Settings → Cloud Accounts).
