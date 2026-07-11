@@ -14,6 +14,7 @@ SEND_CODE = "Verify it's you\nGet a verification code\nGoogle will send a verifi
 SMS = "2-Step Verification\nEnter the code\nG-882211\nA text message with a code was sent"
 CAPTCHA = "Type the text you hear or see\nI'm not a robot"
 CONSENT = "Dudenest wants to access your Google Account\nAllow\nCancel"
+UNVERIFIED = "Google hasn't verified this app\nAdvanced\nBACK TO SAFETY"
 ERR_NOACCT = "Couldn't find your Google Account\nTry again"
 ERR_NOACCT_OCR = "Couldnt find his account"
 ERR_WRONGPW = "Wrong password. Try again or click Forgot password to reset it."
@@ -27,6 +28,7 @@ class TestClassifyText(unittest.TestCase):
     def test_sms(self): self.assertEqual(classify_text(SMS), PageState.SMS)
     def test_captcha(self): self.assertEqual(classify_text(CAPTCHA), PageState.CAPTCHA)
     def test_consent(self): self.assertEqual(classify_text(CONSENT), PageState.CONSENT)
+    def test_unverified_app(self): self.assertEqual(classify_text(UNVERIFIED), PageState.UNVERIFIED_APP)
     def test_error_no_account(self): self.assertEqual(classify_text(ERR_NOACCT), PageState.ERROR)
     def test_error_no_account_ocr_variant(self): self.assertEqual(classify_text(ERR_NOACCT_OCR), PageState.ERROR)
     def test_error_wrong_password(self): self.assertEqual(classify_text(ERR_WRONGPW), PageState.ERROR)

@@ -31,6 +31,11 @@ _RULES: list[tuple[PageState, list[str]]] = [
         r"session ended because there was no activity",
         r"you.?ve been signed out",
     ]),
+    (PageState.UNVERIFIED_APP, [
+        r"google hasn.?t verified this app",
+        r"hasn.?t verified this app",
+        r"continue only if you understand the risks",
+    ]),
     (PageState.SMS, [
         r"enter the code",
         r"g-\s?\d{2,}",

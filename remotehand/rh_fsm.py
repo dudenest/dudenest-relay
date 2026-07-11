@@ -89,7 +89,8 @@ class RemoteHandFSM:
             PageState.EMAIL: self._on_email, PageState.PASSWORD: self._on_password,
             PageState.CONSENT: self._on_consent, PageState.PHONE: self._on_phone,
             PageState.SEND_CODE: self._on_send_code, PageState.SMS: self._on_sms, PageState.CAPTCHA: self._on_captcha,
-            PageState.SUCCESS: self._on_success, PageState.ERROR: self._on_error,
+            PageState.UNVERIFIED_APP: self._on_unverified_app, PageState.SUCCESS: self._on_success,
+            PageState.ERROR: self._on_error,
         }.get(st, self._on_unknown)()
         return st
 
@@ -193,9 +194,18 @@ class RemoteHandFSM:
         raw = self._obs.error_text() or ""
         text = " ".join(raw.split())
         m = re.search(r"google will send (?:a )?verification code to (.+?)(?:\. standard| standard| message and data|$)", text, re.I)
-        if not m:
-            return ""
-        detail = m.group(1).strip(" .")
+        detail = m.group(1).strip(" .") if m else ""
+        if not detail or re.search(r"message and data|english \(|help privacy|privacy terms", detail, re.I):
+            lines = [l.strip() for l in raw.splitlines() if l.strip()]
+            for line in lines:
+                if re.search(r"standard", line, re.I) and re.search(r"[+#*•0-9]{2,}", line):
+                    detail = re.sub(r"\bstandard\b.*", "", line, flags=re.I).strip(" .")
+                    break
+            if not detail:
+                for line in lines:
+                    if re.search(r"[+#*•][+#*•\s]*[0-9]{2,}", line):
+                        detail = line.strip(" .")
+                        break
         detail = re.sub(r"[+#*•]+(?:\s+[+#*•]+)*\s*([0-9]{2,})", r"••• ••• •\1", detail)
         return detail[:80]
 
@@ -213,6 +223,27 @@ class RemoteHandFSM:
                                       "Solve the challenge",
                                       [Field("captcha", "Type what you see", "captcha_image")],
                                       image_b64=b64))
+
+    def _on_unverified_app(self) -> None:
+        text = self._obs.error_text() or ""
+        if re.search(r"continue only if you understand the risks|go to .+unsafe|continue to", text, re.I):
+            if "unverified_continue" not in self._prompted:
+                self._prompted.add("unverified_continue")
+                pos = self._obs.locate("Continue", min_y=560) or self._obs.locate("Go", min_y=560)
+                if pos is None:
+                    self._state("error", "Could not find Google's unverified-app continue link")
+                    return
+                self._inj.click(*pos)
+                self._state("working", "continuing past Google unverified-app warning")
+            return
+        if "unverified_advanced" not in self._prompted:
+            self._prompted.add("unverified_advanced")
+            pos = self._obs.locate("Advanced", min_y=520)
+            if pos is None:
+                self._state("error", "Could not find Google's Advanced link")
+                return
+            self._inj.click(*pos)
+            self._state("working", "opening Google unverified-app advanced options")
 
     def _on_success(self) -> None:
         self.done = True; self.result = "success"

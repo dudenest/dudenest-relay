@@ -113,6 +113,28 @@ class TestTwoFactor(unittest.TestCase):
         prompt = [m for m in emit.msgs if m["type"] == "rh_prompt"][-1]
         self.assertIn("••• ••• •90", prompt["title"])
 
+    def test_send_code_recovers_when_ocr_reorders_phone_before_sentence(self):
+        err = "++ #90. Standard\nGoogle will send a verification code to\nmessage and data rates may apply.\nEnglish (United States) > Help Privacy Terms"
+        fsm, inj, emit = make([PageState.SEND_CODE], err=err)
+        fsm.tick()
+        prompt = [m for m in emit.msgs if m["type"] == "rh_prompt"][-1]
+        self.assertIn("••• ••• •90", prompt["title"])
+        self.assertNotIn("message and data", prompt["title"])
+
+
+class TestUnverifiedAppAutoAccept(unittest.TestCase):
+    def test_clicks_advanced_then_continue(self):
+        obs = LocateByWordObserver(
+            [PageState.UNVERIFIED_APP, PageState.UNVERIFIED_APP, PageState.CONSENT],
+            {"advanced": (370, 576), "continue": (370, 652)},
+            err="Google hasn't verified this app")
+        inj = RecordingInjector(); emit = RecordingEmitter(); fsm = RemoteHandFSM("s1", obs, inj, emit)
+        fsm.tick()
+        self.assertIn(("click", 370, 576, 1), inj.calls)
+        obs._err = "Continue only if you understand the risks and trust the developer"
+        fsm.tick()
+        self.assertIn(("click", 370, 652, 1), inj.calls)
+
 
 class TestConsentAutoAccept(unittest.TestCase):
     def test_consent_clicks_located_button(self):
