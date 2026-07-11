@@ -15,9 +15,12 @@ var _ Broadcaster = (*ws.Hub)(nil)
 
 // fakeHub records BroadcastRaw output and captures the inbound handler.
 type fakeHub struct {
-	mu      sync.Mutex
-	out     chan map[string]any
-	onInput func([]byte)
+	mu            sync.Mutex
+	out           chan map[string]any
+	onInput       func([]byte)
+	onConnect     func()
+	onClientsGone func()
+	clients       int
 }
 
 func newFakeHub() *fakeHub { return &fakeHub{out: make(chan map[string]any, 64)} }
@@ -30,6 +33,23 @@ func (f *fakeHub) BroadcastRaw(b []byte) {
 }
 func (f *fakeHub) SetOnClientMessage(fn func([]byte)) {
 	f.mu.Lock(); f.onInput = fn; f.mu.Unlock()
+}
+func (f *fakeHub) SetOnConnect(fn func()) {
+	f.mu.Lock(); f.onConnect = fn; f.mu.Unlock()
+}
+func (f *fakeHub) SetOnClientsGone(fn func()) {
+	f.mu.Lock(); f.onClientsGone = fn; f.mu.Unlock()
+}
+func (f *fakeHub) ClientCount() int {
+	f.mu.Lock(); defer f.mu.Unlock(); return f.clients
+}
+func (f *fakeHub) connect() { // simulate a ws client attaching → triggers replay
+	f.mu.Lock(); f.clients++; fn := f.onConnect; f.mu.Unlock()
+	if fn != nil { fn() }
+}
+func (f *fakeHub) disconnect() { // simulate the last ws client leaving
+	f.mu.Lock(); if f.clients > 0 { f.clients-- }; gone := f.clients == 0; fn := f.onClientsGone; f.mu.Unlock()
+	if gone && fn != nil { fn() }
 }
 func (f *fakeHub) input(v any) {
 	f.mu.Lock(); fn := f.onInput; f.mu.Unlock()
@@ -119,5 +139,105 @@ func TestManagerPoolExhaustion(t *testing.T) {
 	defer m.End(sid)
 	if _, err := m.Start("u"); err != ErrNoDisplay {
 		t.Fatalf("want ErrNoDisplay on exhausted pool, got %v", err)
+	}
+}
+
+// TestManagerReleasesDisplayOnSidecarExit: a sidecar that exits on its own (browser
+// closed / flow done) must free its display promptly via onExit — WITHOUT an
+// explicit End and WITHOUT waiting for the session timeout. Regression for the
+// pool-exhaustion-under-churn bug (small pool leaked displays to dead sidecars).
+func TestManagerReleasesDisplayOnSidecarExit(t *testing.T) {
+	requireSidecar(t)
+	hub := newFakeHub()
+	pool := NewDisplayPool(":0")
+	m := NewManager(hub, pool, sidecarScript(), 20*time.Second,
+		"RH_FAKE=1", "RH_STATES=email,success")
+	sid, err := m.Start("u")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitFor(t, hub.out, func(x map[string]any) bool {
+		return x["type"] == "rh_prompt" && x["step"] == "email"
+	})
+	// Drive to success → the fake sidecar reaches 'done' and exits its process.
+	hub.input(map[string]any{"type": "rh_input", "session_id": sid, "step": "email",
+		"values": map[string]string{"login": "a@b.c"}})
+	waitFor(t, hub.out, func(x map[string]any) bool {
+		return x["type"] == "rh_state" && x["state"] == "success"
+	})
+	// onExit (stdout EOF) must release the display with no explicit End — poll briefly.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if pool.Available() == 1 && m.Active() == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("sidecar exit did not free display (avail=%d active=%d)", pool.Available(), m.Active())
+}
+
+// TestManagerReplaysPromptToLateClient: a ws that attaches AFTER the sidecar sent its
+// first hello+prompt (the instant email form) must still receive them via replay —
+// otherwise the form is lost to the connect race and the user sees a blank spinner.
+func TestManagerReplaysPromptToLateClient(t *testing.T) {
+	requireSidecar(t)
+	hub := newFakeHub()
+	m := NewManager(hub, NewDisplayPool(":0"), sidecarScript(), 20*time.Second,
+		"RH_FAKE=1", "RH_STATES=email,success")
+	sid, err := m.Start("u")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer m.End(sid)
+	waitFor(t, hub.out, func(x map[string]any) bool { // first delivery cached
+		return x["type"] == "rh_prompt" && x["step"] == "email"
+	})
+	hub.connect() // a late ws attaches → cached hello+prompt must be replayed
+	sawHello, sawPrompt := false, false
+	deadline := time.After(3 * time.Second)
+	for !(sawHello && sawPrompt) {
+		select {
+		case msg := <-hub.out:
+			if msg["type"] == "rh_hello" && msg["session_id"] == sid {
+				sawHello = true
+			}
+			if msg["type"] == "rh_prompt" && msg["step"] == "email" {
+				sawPrompt = true
+			}
+		case <-deadline:
+			t.Fatalf("replay incomplete: hello=%v prompt=%v", sawHello, sawPrompt)
+		}
+	}
+}
+
+// TestManagerReapsAbandonedSession: when the last ws client leaves and none returns, the
+// session is reaped and its display freed — presence-based teardown so an abandoned login
+// (user closed the app) doesn't block the next 'Relay assisted' until a blind timeout.
+func TestManagerReapsAbandonedSession(t *testing.T) {
+	requireSidecar(t)
+	hub := newFakeHub()
+	pool := NewDisplayPool(":0")
+	m := NewManager(hub, pool, sidecarScript(), 20*time.Second,
+		"RH_FAKE=1", "RH_STATES=email,password,success") // stays at email (no input) → session stays live
+	sid, err := m.Start("u")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer m.End(sid)
+	waitFor(t, hub.out, func(x map[string]any) bool {
+		return x["type"] == "rh_prompt" && x["step"] == "email"
+	})
+	if m.Active() != 1 || pool.Available() != 0 {
+		t.Fatalf("session not live (active=%d avail=%d)", m.Active(), pool.Available())
+	}
+	hub.connect() // a client is present → reap must be a no-op
+	m.reapAbandoned()
+	if m.Active() != 1 {
+		t.Fatalf("reaped a session that still has a connected client")
+	}
+	hub.disconnect() // last client leaves (arms the grace timer in the real path)
+	m.reapAbandoned() // simulate the grace elapsing with no reconnect
+	if m.Active() != 0 || pool.Available() != 1 {
+		t.Fatalf("abandoned session not reaped (active=%d avail=%d)", m.Active(), pool.Available())
 	}
 }

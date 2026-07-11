@@ -74,7 +74,7 @@ APT_PKGS=(
   wmctrl  # enforces maximized window state after Chromium launch (saved state overrides --start-maximized)
   tigervnc-standalone-server tigervnc-common tigervnc-tools
   novnc python3-websockify websockify
-  tesseract-ocr xdotool scrot python3-pil python3-pip  # remote-hand method 3: CDP-free OCR read + XTEST input
+  tesseract-ocr xdotool scrot xclip python3-pil python3-pip  # remote-hand method 3: CDP-free OCR read + XTEST input + clipboard field-verify
   unattended-upgrades apt-listchanges
 )
 APT_OPTS=(-y --no-install-recommends -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confnew)

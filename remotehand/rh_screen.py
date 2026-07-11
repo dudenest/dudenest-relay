@@ -22,6 +22,7 @@ class Observer(Protocol):
     def observe(self) -> PageState: ...
     def capture_captcha(self) -> bytes | None: ...
     def error_text(self) -> str: ...
+    def locate(self, text: str, min_y: int = 0) -> tuple[int, int] | None: ...
 
 
 class ScrotObserver:
@@ -50,7 +51,76 @@ class ScrotObserver:
         return self.grab(region) if region else None
 
     def error_text(self) -> str:
-        return ""  # Faza 1: OCR the error node
+        """OCR the current screen so the FSM can classify which error Google shows
+        (wrong password/code/phone/account) and re-prompt the offending field."""
+        try:
+            from rh_classify import ocr_text
+            return ocr_text(self.grab())
+        except Exception:
+            return ""
+
+    def locate(self, text: str, min_y: int = 0) -> tuple[int, int] | None:
+        """Find the on-screen center of a word (e.g. a 'Continue'/'Allow' button)
+        via OCR word boxes — so the FSM can click buttons Enter can't activate."""
+        png = None
+        try:
+            import io
+            import pytesseract
+            from PIL import Image
+            png = self.grab()
+            data = pytesseract.image_to_data(Image.open(io.BytesIO(png)), output_type=pytesseract.Output.DICT)
+            target = text.strip().lower()
+            matches = []
+            for i, word in enumerate(data["text"]):
+                if word.strip().lower() == target:
+                    y = data["top"][i] + data["height"][i] // 2
+                    if y >= min_y:
+                        matches.append((data["left"][i] + data["width"][i] // 2, y))
+            if matches:
+                return sorted(matches, key=lambda p: (p[1], p[0]))[-1]
+        except Exception:
+            pass
+        if text.strip().lower() in ("send", "next", "continue", "allow"):
+            return self._locate_blue_primary_button(png, min_y)
+        return None
+
+    def _locate_blue_primary_button(self, png: bytes | None, min_y: int = 0) -> tuple[int, int] | None:
+        """Fallback for Google's primary button: white text on blue often OCRs as
+        nothing (live Send button). Detect the blue rounded rectangle in lower UI."""
+        try:
+            import io
+            from PIL import Image
+            img = Image.open(io.BytesIO(png or self.grab())).convert("RGB")
+            pts = []
+            for y in range(max(min_y, img.height // 2), img.height - 60):
+                for x in range(img.width // 3, img.width - 80):
+                    r, g, b = img.getpixel((x, y))
+                    if 0 <= r <= 110 and 60 <= g <= 180 and 150 <= b <= 255 and b > g + 35 and g > r + 25:
+                        pts.append((x, y))
+            if not pts:
+                return None
+            comps = []
+            remaining = set(pts)
+            while remaining:
+                seed = remaining.pop(); stack = [seed]; comp = [seed]
+                while stack:
+                    x, y = stack.pop()
+                    near = [p for p in list(remaining) if abs(p[0] - x) <= 2 and abs(p[1] - y) <= 2]
+                    for p in near:
+                        remaining.remove(p); stack.append(p); comp.append(p)
+                if len(comp) >= 20:
+                    xs, ys = [p[0] for p in comp], [p[1] for p in comp]
+                    w, h = max(xs) - min(xs) + 1, max(ys) - min(ys) + 1
+                    comps.append((len(comp), w, h, min(xs), min(ys), max(xs), max(ys)))
+            candidates = [c for c in comps if c[1] >= 30 and c[2] >= 18]
+            if not candidates:
+                candidates = comps
+            if not candidates:
+                return None
+            _, _, _, x1, y1, x2, y2 = sorted(candidates, key=lambda c: (c[6], c[5], c[0]))[-1]
+            return ((x1 + x2) // 2, (y1 + y2) // 2)
+        except Exception:
+            return None
 
 
 def crop_region(png: bytes, region: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
@@ -63,10 +133,12 @@ def crop_region(png: bytes, region: tuple[int, int, int, int]) -> tuple[int, int
 
 class ScriptedObserver:
     """Test double — yields a scripted sequence of PageStates, one per observe()."""
-    def __init__(self, states: list[PageState], captcha: bytes | None = None, err: str = ""):
+    def __init__(self, states: list[PageState], captcha: bytes | None = None, err: str = "",
+                 locate: tuple[int, int] | None = None):
         self._states = list(states)
         self._captcha = captcha
         self._err = err
+        self._locate = locate
         self._i = 0
 
     def observe(self) -> PageState:
@@ -76,3 +148,4 @@ class ScriptedObserver:
 
     def capture_captcha(self) -> bytes | None: return self._captcha
     def error_text(self) -> str: return self._err
+    def locate(self, text: str, min_y: int = 0) -> tuple[int, int] | None: return self._locate

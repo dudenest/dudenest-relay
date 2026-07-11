@@ -15,7 +15,16 @@ import (
 type Broadcaster interface {
 	BroadcastRaw([]byte)
 	SetOnClientMessage(func([]byte))
+	SetOnConnect(func())
+	SetOnClientsGone(func())
+	ClientCount() int
 }
+
+// abandonGrace is how long a session may have ZERO connected ws clients before it is
+// treated as abandoned (user closed the app / navigated away) and its display freed. It
+// must exceed the ws reconnect gap so a transient drop during an active flow doesn't reap
+// a live session — presence-based teardown, not a blind timeout.
+const abandonGrace = 45 * time.Second
 
 // Manager runs many concurrent Remote-Hand sessions over one Hub. It allocates a
 // display per session (§13), spawns a sidecar via a Bridge, and routes inbound
@@ -29,8 +38,9 @@ type Manager struct {
 	timeout  time.Duration
 	extraEnv []string // e.g. RH_FAKE for tests; empty in production (real mode)
 
-	mu       sync.Mutex
-	sessions map[string]*mgrSession
+	mu         sync.Mutex
+	sessions   map[string]*mgrSession
+	graceTimer *time.Timer // armed when the last ws client leaves; reaps abandoned sessions
 
 	// prepareSession maps a provider (e.g. "gdrive") to the OAuth URL the sidecar
 	// should open, AND arms server-side token capture as a side effect (serve.go
@@ -51,6 +61,10 @@ type mgrSession struct {
 	bridge  *Bridge
 	display string
 	cancel  context.CancelFunc
+	// last hello/prompt frames, replayed to a ws that connects after they were first sent
+	// (the ws attaches a beat after /start — without replay the instant email form is lost).
+	lastHello  []byte
+	lastPrompt []byte
 }
 
 // NewManager wires the single inbound-frame router on the hub once. timeout caps
@@ -60,7 +74,95 @@ func NewManager(hub Broadcaster, pool *DisplayPool, script string, timeout time.
 	m := &Manager{hub: hub, pool: pool, script: script, timeout: timeout,
 		extraEnv: extraEnv, sessions: make(map[string]*mgrSession)}
 	hub.SetOnClientMessage(m.routeInput)
+	hub.SetOnConnect(m.onClientConnected)   // late-joining ws → cancel abandon grace + replay prompt
+	hub.SetOnClientsGone(m.onClientsGone)   // last ws left → arm abandon grace
 	return m
+}
+
+// onClientConnected: a ws attached — cancel any pending abandon-reap (the user is back)
+// and replay the last prompt so the reconnecting client re-renders the form.
+func (m *Manager) onClientConnected() {
+	m.mu.Lock()
+	if m.graceTimer != nil {
+		m.graceTimer.Stop()
+		m.graceTimer = nil
+	}
+	m.mu.Unlock()
+	m.replayToNewClient()
+}
+
+// onClientsGone: the last ws disconnected. If a session is live, arm a grace timer; if no
+// client reconnects before it fires, the login was abandoned → free the display.
+func (m *Manager) onClientsGone() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.sessions) == 0 {
+		return
+	}
+	if m.graceTimer != nil {
+		m.graceTimer.Stop()
+	}
+	m.graceTimer = time.AfterFunc(abandonGrace, m.reapAbandoned)
+}
+
+// reapAbandoned ends every live session IF still no client is connected — the grace elapsed
+// with no reconnect, so the user really left (double-checked against a last-moment reconnect).
+func (m *Manager) reapAbandoned() {
+	if m.hub.ClientCount() > 0 {
+		return // a client is present after all — not abandoned
+	}
+	m.mu.Lock()
+	m.graceTimer = nil
+	sids := make([]string, 0, len(m.sessions))
+	for sid := range m.sessions {
+		sids = append(sids, sid)
+	}
+	m.mu.Unlock()
+	for _, sid := range sids {
+		m.End(sid)
+	}
+}
+
+// sendAndCache forwards a sidecar frame to Flutter and remembers the last hello/prompt
+// for this session so replayToNewClient can re-send them to a ws that connects later.
+func (m *Manager) sendAndCache(sid string) func([]byte) {
+	return func(line []byte) {
+		var t struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(line, &t) == nil && (t.Type == "rh_hello" || t.Type == "rh_prompt") {
+			cp := append([]byte(nil), line...)
+			m.mu.Lock()
+			if s := m.sessions[sid]; s != nil {
+				if t.Type == "rh_hello" {
+					s.lastHello = cp
+				} else {
+					s.lastPrompt = cp
+				}
+			}
+			m.mu.Unlock()
+		}
+		m.hub.BroadcastRaw(line)
+	}
+}
+
+// replayToNewClient re-broadcasts each live session's last hello+prompt so a ws that
+// attached after they were first sent renders the form instead of a blank spinner.
+func (m *Manager) replayToNewClient() {
+	m.mu.Lock()
+	var frames [][]byte
+	for _, s := range m.sessions {
+		if s.lastHello != nil {
+			frames = append(frames, s.lastHello)
+		}
+		if s.lastPrompt != nil {
+			frames = append(frames, s.lastPrompt)
+		}
+	}
+	m.mu.Unlock()
+	for _, f := range frames {
+		m.hub.BroadcastRaw(f)
+	}
 }
 
 // Start allocates a display, spawns a sidecar pointed at oauthURL, and returns
@@ -74,15 +176,19 @@ func (m *Manager) Start(oauthURL string) (string, error) {
 	sid := newSessionID()
 	ctx, cancel := context.WithTimeout(context.Background(), m.timeout)
 	env := append([]string{"RH_OAUTH_URL=" + oauthURL}, m.extraEnv...)
-	b := New(m.script, display, sid, m.hub.BroadcastRaw, env...)
+	b := New(m.script, display, sid, m.sendAndCache(sid), env...)
+	b.SetOnExit(func() { m.End(sid) }) // sidecar self-exit → free display now, not at timeout
+	m.mu.Lock() // register BEFORE Start so the sidecar's first frames are cached for replay
+	m.sessions[sid] = &mgrSession{bridge: b, display: display, cancel: cancel}
+	m.mu.Unlock()
 	if err := b.Start(ctx); err != nil {
+		m.mu.Lock()
+		delete(m.sessions, sid)
+		m.mu.Unlock()
 		cancel()
 		m.pool.Release(display)
 		return "", err
 	}
-	m.mu.Lock()
-	m.sessions[sid] = &mgrSession{bridge: b, display: display, cancel: cancel}
-	m.mu.Unlock()
 	go func() { <-ctx.Done(); m.End(sid) }() // auto-teardown on timeout/cancel
 	return sid, nil
 }

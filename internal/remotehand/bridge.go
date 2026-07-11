@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 )
 
 // Bridge owns one sidecar subprocess and pipes its stdio.
@@ -31,12 +32,18 @@ type Bridge struct {
 	sessionID string   // correlates with ws messages
 	env       []string // extra env (e.g. RH_FAKE=1 for tests)
 	send      func([]byte)
+	onExit    func() // invoked once when the sidecar exits (stdout EOF) — frees the display
 
 	mu     sync.Mutex
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	closed bool
 }
+
+// SetOnExit registers a callback fired once when the sidecar process exits on its
+// own (browser closed, crash, flow done) so the Manager can release the display
+// immediately instead of waiting for the session timeout. Call before Start.
+func (b *Bridge) SetOnExit(fn func()) { b.onExit = fn }
 
 // New builds a Bridge. send is invoked for every line the sidecar emits
 // (wire it to ws.Hub.BroadcastRaw). extraEnv is appended to the child env.
@@ -52,6 +59,7 @@ func (b *Bridge) Start(ctx context.Context) error {
 		return fmt.Errorf("bridge already started")
 	}
 	cmd := exec.CommandContext(ctx, "python3", b.script)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // own process group → kill sidecar+Chromium tree together
 	cmd.Env = append(os.Environ(),
 		"DISPLAY="+b.display, "RH_DISPLAY="+b.display, "RH_SESSION="+b.sessionID)
 	cmd.Env = append(cmd.Env, b.env...)
@@ -72,7 +80,9 @@ func (b *Bridge) Start(ctx context.Context) error {
 	return nil
 }
 
-// readLoop forwards each sidecar stdout line to send until EOF.
+// readLoop forwards each sidecar stdout line to send until EOF. EOF means the
+// sidecar exited — fire onExit so the Manager frees the display promptly (else it
+// leaks until the session timeout and exhausts the small display pool under churn).
 func (b *Bridge) readLoop(stdout io.Reader) {
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024) // captcha images can be large
@@ -81,6 +91,9 @@ func (b *Bridge) readLoop(stdout io.Reader) {
 		if b.send != nil && len(line) > 0 {
 			b.send(line)
 		}
+	}
+	if b.onExit != nil {
+		b.onExit() // sidecar gone; Manager.End is idempotent so a concurrent Close is safe
 	}
 }
 
@@ -109,7 +122,11 @@ func (b *Bridge) Close() error {
 		_ = b.stdin.Close()
 	}
 	if b.cmd != nil && b.cmd.Process != nil {
-		_ = b.cmd.Process.Kill()
+		// Kill the whole process group (negative pid) so Chromium and its child tree
+		// die with the sidecar — a lone Process.Kill leaves orphaned Chromium procs
+		// that pile up on the display and break window mapping (the 'no form' bug).
+		_ = syscall.Kill(-b.cmd.Process.Pid, syscall.SIGKILL)
+		_ = b.cmd.Process.Kill() // fallback if the group kill didn't apply
 		go func(c *exec.Cmd) { _ = c.Wait() }(b.cmd) // reap without holding the lock
 	}
 	return nil

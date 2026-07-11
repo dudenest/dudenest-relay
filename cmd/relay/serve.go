@@ -396,6 +396,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if rhScript == "" {
 		rhScript = "/usr/local/lib/dudenest/remotehand/rh_sidecar.py"
 	}
+	go EnsureSidecar(Version) // top up the method-3 sidecar+deps after a binary-only auto-update (non-blocking)
 	rhMgr := remotehand.NewManager(wsHub, remotehand.NewDisplayPool(rhDisplay), rhScript, cfg.SessionTimeout())
 	rhMgr.SetPrepare(func(provider string) (string, error) { // provider → OAuth URL + arm server-side token capture (reuses method-2 helpers)
 		if provider != "gdrive" {
@@ -407,8 +408,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}
 		return url, nil
 	})
-	mux.HandleFunc("/relay/oauth3/start", requireAuthWithReg(lr, rhMgr.StartHandler())) // begin method-3 session → {session_id}
-	mux.HandleFunc("/relay/oauth3/end", requireAuthWithReg(lr, rhMgr.EndHandler()))     // tear down method-3 session
+mux.HandleFunc("/relay/oauth3/start", requireAuthWithReg(lr, rhMgr.StartHandler()))  // begin method-3 session → {session_id}
+		mux.HandleFunc("/relay/oauth3/end", requireAuthWithReg(lr, rhMgr.EndHandler()))      // tear down method-3 session
+		mux.HandleFunc("/relay/oauth3/input", requireAuthWithReg(lr, rhMgr.InputHandler())) // Flutter → sidecar input (HTTP POST, reliable)
 	// Phase β: account/policy admin endpoints (CRUD via Flutter Settings → Cloud Accounts).
 	// Same auth wrapper as /files — only the paired user's Flutter can mutate.
 	if globalAdminAccounts != nil {
