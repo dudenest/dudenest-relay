@@ -193,7 +193,11 @@ class RemoteHandFSM:
         raw = self._obs.error_text() or ""
         text = " ".join(raw.split())
         m = re.search(r"google will send (?:a )?verification code to (.+?)(?:\. standard| standard| message and data|$)", text, re.I)
-        return (m.group(1).strip(" .") if m else "")[:80]
+        if not m:
+            return ""
+        detail = m.group(1).strip(" .")
+        detail = re.sub(r"[+#*•]+(?:\s+[+#*•]+)*\s*([0-9]{2,})", r"••• ••• •\1", detail)
+        return detail[:80]
 
     def _on_sms(self) -> None:
         self._prompt_once("sms_code", "Enter the code we texted you",

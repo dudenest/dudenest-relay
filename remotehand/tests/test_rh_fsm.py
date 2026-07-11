@@ -93,7 +93,7 @@ class TestTwoFactor(unittest.TestCase):
         prompts = [m for m in emit.msgs if m["type"] == "rh_prompt"]
         self.assertEqual(prompts[-1]["step"], "send_code")
         self.assertEqual(prompts[-1]["fields"], [])
-        self.assertIn("+++ +++ +90", prompts[-1]["title"])
+        self.assertIn("••• ••• •90", prompts[-1]["title"])
         fsm.submit("send_code", {})
         self.assertIn(("click", 844, 646, 1), inj.calls)
         fsm.tick()                                   # SMS → prompt code
@@ -106,6 +106,12 @@ class TestTwoFactor(unittest.TestCase):
         self.assertNotIn(("key", "Tab"), inj.calls)
         self.assertNotIn(("key", "Return"), inj.calls)
         self.assertEqual(emit.msgs[-1]["state"], "error")
+
+    def test_send_code_masks_ocr_bullets(self):
+        fsm, inj, emit = make([PageState.SEND_CODE], err="Google will send a verification code to ++ #90. Standard message and data rates may apply.")
+        fsm.tick()
+        prompt = [m for m in emit.msgs if m["type"] == "rh_prompt"][-1]
+        self.assertIn("••• ••• •90", prompt["title"])
 
 
 class TestConsentAutoAccept(unittest.TestCase):
