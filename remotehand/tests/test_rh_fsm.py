@@ -24,6 +24,14 @@ def make(states, captcha=None, err=""):
     return RemoteHandFSM("s1", obs, inj, emit), inj, emit
 
 
+class LocateByWordObserver(ScriptedObserver):
+    def __init__(self, states, locs, **kw):
+        super().__init__(states, **kw); self._locs = locs
+    def locate(self, text: str, min_y: int = 0):
+        p = self._locs.get(text.lower())
+        return p if p and p[1] >= min_y else None
+
+
 class TestHappyPathBufferedPassword(unittest.TestCase):
     """Scenario §7: user gives login+password up front; password auto-injected
     when the password page appears; then success."""
@@ -75,7 +83,9 @@ class TestTwoFactor(unittest.TestCase):
         self.assertIn(("type", "998877"), inj.calls)
 
     def test_known_phone_send_code_then_sms(self):
-        obs = ScriptedObserver([PageState.SEND_CODE, PageState.SMS, PageState.SUCCESS], locate=(1060, 844))
+        obs = LocateByWordObserver([PageState.SEND_CODE, PageState.SMS, PageState.SUCCESS],
+                                   {"get": (664, 638)},
+                                   err="Google will send a verification code to +++ +++ +90. Standard message and data rates may apply.")
         inj = RecordingInjector()
         emit = RecordingEmitter()
         fsm = RemoteHandFSM("s1", obs, inj, emit)
@@ -83,10 +93,19 @@ class TestTwoFactor(unittest.TestCase):
         prompts = [m for m in emit.msgs if m["type"] == "rh_prompt"]
         self.assertEqual(prompts[-1]["step"], "send_code")
         self.assertEqual(prompts[-1]["fields"], [])
+        self.assertIn("+++ +++ +90", prompts[-1]["title"])
         fsm.submit("send_code", {})
-        self.assertIn(("click", 1060, 844, 1), inj.calls)
+        self.assertIn(("click", 844, 646, 1), inj.calls)
         fsm.tick()                                   # SMS → prompt code
         self.assertEqual(emit.steps(), ["email", "send_code", "sms_code"])
+
+    def test_send_code_does_not_tab_into_help_when_button_missing(self):
+        obs = ScriptedObserver([PageState.SEND_CODE], locate=None)
+        inj = RecordingInjector(); emit = RecordingEmitter(); fsm = RemoteHandFSM("s1", obs, inj, emit)
+        fsm.tick(); fsm.submit("send_code", {})
+        self.assertNotIn(("key", "Tab"), inj.calls)
+        self.assertNotIn(("key", "Return"), inj.calls)
+        self.assertEqual(emit.msgs[-1]["state"], "error")
 
 
 class TestConsentAutoAccept(unittest.TestCase):

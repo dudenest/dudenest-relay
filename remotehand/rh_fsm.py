@@ -114,8 +114,8 @@ class RemoteHandFSM:
             self._type_and_next(values.get("phone", ""), replace=self._replace_next, verify_field="phone")
             self._state("working", "submitting phone")
         elif step == "send_code":
-            self._click_send_code()
-            self._state("working", "asking Google to send the verification code")
+            if self._click_send_code():
+                self._state("working", "asking Google to send the verification code")
         elif step == "sms_code":
             self._type_and_next(values.get("code", ""), replace=self._replace_next, verify_field="code")
             self._state("working", "submitting code")
@@ -166,17 +166,34 @@ class RemoteHandFSM:
                           [Field("phone", "Phone number", "tel")])
 
     def _on_send_code(self) -> None:
-        self._prompt_once("send_code", "Google will send a verification code to your phone", [])
+        if "send_code" in self._prompted:
+            return
+        self._prompted.add("send_code")
+        detail = self._send_code_detail()
+        title = "Google will send a verification code"
+        if detail:
+            title = f"Google will send a verification code to {detail}"
+        self._emit.send(rh_prompt(self.session_id, self.request_id, "send_code", title, []))
 
-    def _click_send_code(self) -> None:
+    def _click_send_code(self) -> bool:
         # The page has no input field. It asks permission to send an SMS to a known,
-        # masked number. Avoid matching the body word 'send' in 'Google will send...'
-        # by preferring lower-screen button text; fallback to keyboard activation.
+        # masked number. Some variants don't expose a visible 'Send' button in OCR;
+        # the selectable row is 'Get a verification code'. NEVER fallback Tab+Return
+        # here — it opened Google's Help link in live test.
         pos = self._obs.locate("Send", min_y=720) or self._obs.locate("Next", min_y=720)
         if pos is not None:
-            self._inj.click(*pos)
-        else:
-            self._inj.press_key("Tab"); self._inj.press_key("Return")
+            self._inj.click(*pos); return True
+        row = self._obs.locate("Get", min_y=500)
+        if row is not None:
+            self._inj.click(row[0] + 180, row[1] + 8); return True  # center of 'Get a verification code' option row
+        self._state("error", "Could not find Google's verification-code button")
+        return False
+
+    def _send_code_detail(self) -> str:
+        raw = self._obs.error_text() or ""
+        text = " ".join(raw.split())
+        m = re.search(r"google will send (?:a )?verification code to (.+?)(?:\. standard| standard| message and data|$)", text, re.I)
+        return (m.group(1).strip(" .") if m else "")[:80]
 
     def _on_sms(self) -> None:
         self._prompt_once("sms_code", "Enter the code we texted you",
