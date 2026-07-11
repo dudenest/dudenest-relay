@@ -15,9 +15,10 @@ var _ Broadcaster = (*ws.Hub)(nil)
 
 // fakeHub records BroadcastRaw output and captures the inbound handler.
 type fakeHub struct {
-	mu      sync.Mutex
-	out     chan map[string]any
-	onInput func([]byte)
+	mu        sync.Mutex
+	out       chan map[string]any
+	onInput   func([]byte)
+	onConnect func()
 }
 
 func newFakeHub() *fakeHub { return &fakeHub{out: make(chan map[string]any, 64)} }
@@ -30,6 +31,13 @@ func (f *fakeHub) BroadcastRaw(b []byte) {
 }
 func (f *fakeHub) SetOnClientMessage(fn func([]byte)) {
 	f.mu.Lock(); f.onInput = fn; f.mu.Unlock()
+}
+func (f *fakeHub) SetOnConnect(fn func()) {
+	f.mu.Lock(); f.onConnect = fn; f.mu.Unlock()
+}
+func (f *fakeHub) connect() { // simulate a ws client attaching → triggers replay
+	f.mu.Lock(); fn := f.onConnect; f.mu.Unlock()
+	if fn != nil { fn() }
 }
 func (f *fakeHub) input(v any) {
 	f.mu.Lock(); fn := f.onInput; f.mu.Unlock()
@@ -154,4 +162,38 @@ func TestManagerReleasesDisplayOnSidecarExit(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("sidecar exit did not free display (avail=%d active=%d)", pool.Available(), m.Active())
+}
+
+// TestManagerReplaysPromptToLateClient: a ws that attaches AFTER the sidecar sent its
+// first hello+prompt (the instant email form) must still receive them via replay —
+// otherwise the form is lost to the connect race and the user sees a blank spinner.
+func TestManagerReplaysPromptToLateClient(t *testing.T) {
+	requireSidecar(t)
+	hub := newFakeHub()
+	m := NewManager(hub, NewDisplayPool(":0"), sidecarScript(), 20*time.Second,
+		"RH_FAKE=1", "RH_STATES=email,success")
+	sid, err := m.Start("u")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer m.End(sid)
+	waitFor(t, hub.out, func(x map[string]any) bool { // first delivery cached
+		return x["type"] == "rh_prompt" && x["step"] == "email"
+	})
+	hub.connect() // a late ws attaches → cached hello+prompt must be replayed
+	sawHello, sawPrompt := false, false
+	deadline := time.After(3 * time.Second)
+	for !(sawHello && sawPrompt) {
+		select {
+		case msg := <-hub.out:
+			if msg["type"] == "rh_hello" && msg["session_id"] == sid {
+				sawHello = true
+			}
+			if msg["type"] == "rh_prompt" && msg["step"] == "email" {
+				sawPrompt = true
+			}
+		case <-deadline:
+			t.Fatalf("replay incomplete: hello=%v prompt=%v", sawHello, sawPrompt)
+		}
+	}
 }

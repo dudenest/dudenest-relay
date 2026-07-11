@@ -15,6 +15,7 @@ import (
 type Broadcaster interface {
 	BroadcastRaw([]byte)
 	SetOnClientMessage(func([]byte))
+	SetOnConnect(func())
 }
 
 // Manager runs many concurrent Remote-Hand sessions over one Hub. It allocates a
@@ -51,6 +52,10 @@ type mgrSession struct {
 	bridge  *Bridge
 	display string
 	cancel  context.CancelFunc
+	// last hello/prompt frames, replayed to a ws that connects after they were first sent
+	// (the ws attaches a beat after /start — without replay the instant email form is lost).
+	lastHello  []byte
+	lastPrompt []byte
 }
 
 // NewManager wires the single inbound-frame router on the hub once. timeout caps
@@ -60,7 +65,50 @@ func NewManager(hub Broadcaster, pool *DisplayPool, script string, timeout time.
 	m := &Manager{hub: hub, pool: pool, script: script, timeout: timeout,
 		extraEnv: extraEnv, sessions: make(map[string]*mgrSession)}
 	hub.SetOnClientMessage(m.routeInput)
+	hub.SetOnConnect(m.replayToNewClient) // late-joining ws → re-send the last prompt
 	return m
+}
+
+// sendAndCache forwards a sidecar frame to Flutter and remembers the last hello/prompt
+// for this session so replayToNewClient can re-send them to a ws that connects later.
+func (m *Manager) sendAndCache(sid string) func([]byte) {
+	return func(line []byte) {
+		var t struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(line, &t) == nil && (t.Type == "rh_hello" || t.Type == "rh_prompt") {
+			cp := append([]byte(nil), line...)
+			m.mu.Lock()
+			if s := m.sessions[sid]; s != nil {
+				if t.Type == "rh_hello" {
+					s.lastHello = cp
+				} else {
+					s.lastPrompt = cp
+				}
+			}
+			m.mu.Unlock()
+		}
+		m.hub.BroadcastRaw(line)
+	}
+}
+
+// replayToNewClient re-broadcasts each live session's last hello+prompt so a ws that
+// attached after they were first sent renders the form instead of a blank spinner.
+func (m *Manager) replayToNewClient() {
+	m.mu.Lock()
+	var frames [][]byte
+	for _, s := range m.sessions {
+		if s.lastHello != nil {
+			frames = append(frames, s.lastHello)
+		}
+		if s.lastPrompt != nil {
+			frames = append(frames, s.lastPrompt)
+		}
+	}
+	m.mu.Unlock()
+	for _, f := range frames {
+		m.hub.BroadcastRaw(f)
+	}
 }
 
 // Start allocates a display, spawns a sidecar pointed at oauthURL, and returns
@@ -74,16 +122,19 @@ func (m *Manager) Start(oauthURL string) (string, error) {
 	sid := newSessionID()
 	ctx, cancel := context.WithTimeout(context.Background(), m.timeout)
 	env := append([]string{"RH_OAUTH_URL=" + oauthURL}, m.extraEnv...)
-	b := New(m.script, display, sid, m.hub.BroadcastRaw, env...)
+	b := New(m.script, display, sid, m.sendAndCache(sid), env...)
 	b.SetOnExit(func() { m.End(sid) }) // sidecar self-exit → free display now, not at timeout
+	m.mu.Lock() // register BEFORE Start so the sidecar's first frames are cached for replay
+	m.sessions[sid] = &mgrSession{bridge: b, display: display, cancel: cancel}
+	m.mu.Unlock()
 	if err := b.Start(ctx); err != nil {
+		m.mu.Lock()
+		delete(m.sessions, sid)
+		m.mu.Unlock()
 		cancel()
 		m.pool.Release(display)
 		return "", err
 	}
-	m.mu.Lock()
-	m.sessions[sid] = &mgrSession{bridge: b, display: display, cancel: cancel}
-	m.mu.Unlock()
 	go func() { <-ctx.Done(); m.End(sid) }() // auto-teardown on timeout/cancel
 	return sid, nil
 }

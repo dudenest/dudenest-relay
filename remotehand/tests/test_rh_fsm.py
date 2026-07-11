@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from rh_protocol import PageState  # noqa: E402
 from rh_input import RecordingInjector  # noqa: E402
 from rh_screen import ScriptedObserver  # noqa: E402
-from rh_fsm import RemoteHandFSM, _UNKNOWN_STALL_TICKS  # noqa: E402
+from rh_fsm import RemoteHandFSM, _UNKNOWN_STALL_TICKS, _ERROR_CONFIRM_TICKS  # noqa: E402
 
 
 class RecordingEmitter:
@@ -55,7 +55,7 @@ class TestPasswordPromptedSeparately(unittest.TestCase):
     def test_prompts_password_when_not_buffered(self):
         fsm, inj, emit = make([PageState.PASSWORD, PageState.SUCCESS])
         fsm.tick()                                   # PASSWORD, nothing buffered → prompt
-        self.assertEqual(emit.steps(), ["password"])
+        self.assertEqual(emit.steps(), ["email", "password"])  # email shown at startup (instant form)
         fsm.submit("password", {"password": "pw"})
         self.assertIn(("type", "pw"), inj.calls)
         self.assertIn(("key", "Return"), inj.calls)
@@ -69,7 +69,7 @@ class TestTwoFactor(unittest.TestCase):
         fsm.tick()                                   # SMS → prompt code
         fsm.submit("sms_code", {"code": "998877"})
         fsm.tick()                                   # SUCCESS
-        self.assertEqual(emit.steps(), ["phone", "sms_code"])
+        self.assertEqual(emit.steps(), ["email", "phone", "sms_code"])  # email shown at startup
         self.assertEqual(fsm.result, "success")
         self.assertIn(("type", "+48123"), inj.calls)
         self.assertIn(("type", "998877"), inj.calls)
@@ -95,10 +95,9 @@ class TestCaptcha(unittest.TestCase):
     def test_captcha_prompt_carries_cropped_image(self):
         fsm, inj, emit = make([PageState.CAPTCHA], captcha=b"PNGBYTES")
         fsm.tick()
-        prompts = [m for m in emit.msgs if m["type"] == "rh_prompt"]
-        self.assertEqual(prompts[0]["step"], "captcha_static")
+        cap = [m for m in emit.msgs if m["type"] == "rh_prompt" and m["step"] == "captcha_static"][0]
         import base64
-        self.assertEqual(prompts[0]["image"], base64.b64encode(b"PNGBYTES").decode())
+        self.assertEqual(cap["image"], base64.b64encode(b"PNGBYTES").decode())
 
 
 class TestError(unittest.TestCase):
@@ -122,12 +121,12 @@ class TestError(unittest.TestCase):
         # Same error observed repeatedly must re-prompt only once (no spam).
         fsm, inj, emit = make([PageState.ERROR, PageState.ERROR, PageState.ERROR], err="Wrong password")
         fsm.tick(); fsm.tick(); fsm.tick()
-        prompts = [m for m in emit.msgs if m["type"] == "rh_prompt"]
-        self.assertEqual(len(prompts), 1)
+        warnings = [m for m in emit.msgs if m["type"] == "rh_prompt" and m.get("level") == "warning"]
+        self.assertEqual(len(warnings), 1)           # exactly one re-prompt despite 3 error ticks
         # After the user re-submits, a fresh error may re-prompt again
         fsm.submit("password", {"password": "again"})
         fsm.tick()
-        self.assertGreaterEqual(len([m for m in emit.msgs if m["type"] == "rh_prompt"]), 2)
+        self.assertGreaterEqual(len([m for m in emit.msgs if m["type"] == "rh_prompt" and m.get("level") == "warning"]), 2)
 
     def test_wrong_code_reprompts_code(self):
         fsm, inj, emit = make([PageState.ERROR], err="Wrong code, enter it again")
@@ -160,19 +159,21 @@ class TestIdempotency(unittest.TestCase):
 
     def test_tick_after_done_is_noop(self):
         fsm, inj, emit = make([PageState.SUCCESS, PageState.EMAIL])
-        fsm.tick()                                   # SUCCESS → done
+        fsm.tick()                                   # startup email prompt, then SUCCESS → done
         before = len(emit.msgs)
         fsm.tick()                                   # must not process EMAIL
-        self.assertEqual(len(emit.msgs), before)
-        self.assertEqual(emit.steps(), [])
+        self.assertEqual(len(emit.msgs), before)     # no new messages after done
+        self.assertEqual(emit.steps(), ["email"])    # only the startup email prompt, never re-emitted
 
 
 class TestUnknownWaits(unittest.TestCase):
     def test_unknown_then_email(self):
         fsm, inj, emit = make([PageState.UNKNOWN, PageState.EMAIL, PageState.SUCCESS])
-        fsm.tick()                                   # UNKNOWN → no-op
-        self.assertEqual(emit.msgs, [])
-        fsm.tick()                                   # EMAIL → prompt
+        fsm.tick()                                   # startup email prompt; UNKNOWN → no further action
+        self.assertEqual(emit.steps(), ["email"])    # instant form: email shown before the page loads
+        no_stall = [m for m in emit.msgs if "Google shows" in str(m.get("message", ""))]
+        self.assertEqual(no_stall, [])               # brief UNKNOWN must not surface a stall message
+        fsm.tick()                                   # EMAIL observed → still one email prompt (idempotent)
         self.assertEqual(emit.steps(), ["email"])
 
 
@@ -183,7 +184,8 @@ class TestUnknownStall(unittest.TestCase):
         fsm, inj, emit = make([PageState.UNKNOWN], err="Your session ended because there was no activity")
         for _ in range(_UNKNOWN_STALL_TICKS - 1):     # just below the stall threshold
             fsm.tick()
-        self.assertEqual(emit.msgs, [])
+        surfaced = [m for m in emit.msgs if "Google shows" in str(m.get("message", ""))]
+        self.assertEqual(surfaced, [])                # no stall message yet (only the startup email prompt)
         self.assertFalse(fsm.done)
 
     def test_persistent_unknown_recognized_terminal_ends(self):
@@ -212,6 +214,85 @@ class TestUnknownStall(unittest.TestCase):
             fsm.tick()
         surfaced = [m for m in emit.msgs if m["type"] == "rh_state" and "Google shows" in m.get("message", "")]
         self.assertEqual(surfaced, [])                # reset by EMAIL → never reached threshold again
+
+
+class TestInstantForm(unittest.TestCase):
+    """The email form is shown before Chromium renders; the login is held and injected
+    the moment the identifier page appears (user types while the browser loads)."""
+    def test_email_prompt_emitted_before_any_page(self):
+        fsm, inj, emit = make([PageState.UNKNOWN])
+        fsm.tick()                                   # page still loading
+        self.assertEqual(emit.steps(), ["email"])    # form already shown
+
+    def test_login_buffered_while_loading_then_injected_on_email(self):
+        fsm, inj, emit = make([PageState.UNKNOWN, PageState.EMAIL, PageState.PASSWORD])
+        fsm.tick()                                   # UNKNOWN (loading) — email prompt shown
+        fsm.submit("email", {"login": "user@x.com", "password": "pw"})  # user typed early
+        self.assertNotIn(("type", "user@x.com"), inj.calls)  # NOT injected yet (page not ready)
+        fsm.tick()                                   # EMAIL appears → inject buffered login
+        self.assertIn(("type", "user@x.com"), inj.calls)
+        self.assertIn(("key", "Return"), inj.calls)
+
+    def test_login_injected_immediately_when_page_already_up(self):
+        fsm, inj, emit = make([PageState.EMAIL, PageState.PASSWORD])
+        fsm.tick()                                   # EMAIL already observed
+        fsm.submit("email", {"login": "a@b.c", "password": "pw"})  # page ready → inject now
+        self.assertIn(("type", "a@b.c"), inj.calls)
+
+
+class TestFieldVerify(unittest.TestCase):
+    """Clipboard read-back confirms what actually landed in the visible field before Enter."""
+    def _fsm(self, readback):
+        obs = ScriptedObserver([PageState.EMAIL, PageState.PASSWORD])
+        inj = RecordingInjector(field_readback=readback)
+        emit = RecordingEmitter()
+        return RemoteHandFSM("s1", obs, inj, emit), inj, emit
+
+    def test_match_submits(self):
+        fsm, inj, emit = self._fsm(readback="good@x.com")
+        fsm.tick()
+        fsm.submit("email", {"login": "good@x.com", "password": "pw"})
+        self.assertIn(("key", "Return"), inj.calls)  # verified → submitted
+
+    def test_mismatch_reprompts_and_does_not_submit(self):
+        fsm, inj, emit = self._fsm(readback="garbled")  # field never holds what we typed
+        fsm.tick()
+        fsm.submit("email", {"login": "good@x.com", "password": "pw"})
+        self.assertNotIn(("key", "Return"), inj.calls)          # never submitted the wrong value
+        warn = [m for m in emit.msgs if m["type"] == "rh_prompt" and m.get("level") == "warning"]
+        self.assertEqual(warn[-1]["step"], "email")
+        self.assertIn("garbled", warn[-1]["title"])             # precise: shows what the form received
+
+    def test_blocked_readback_proceeds(self):
+        # Password fields (and any blocked copy) read back '' → unverifiable → best-effort submit.
+        fsm, inj, emit = self._fsm(readback="")
+        fsm.tick()
+        fsm.submit("email", {"login": "good@x.com", "password": "pw"})
+        self.assertIn(("key", "Return"), inj.calls)
+
+
+class TestTransientErrorNotTerminal(unittest.TestCase):
+    """A single garbled OCR frame classified ERROR must not kill a valid flow; an
+    unrecognized error only terminates if it persists, and then reports the real text."""
+    def test_single_unrecognized_error_frame_does_not_terminate(self):
+        # ERROR once (unrecognized), then the page settles to PASSWORD → must continue.
+        fsm, inj, emit = make([PageState.ERROR, PageState.PASSWORD, PageState.SUCCESS],
+                              err="garbled ocr noise xyz")
+        fsm.tick()                                   # transient ERROR → wait, don't die
+        self.assertFalse(fsm.done)
+        fsm.tick(); fsm.tick()                       # PASSWORD → SUCCESS
+        self.assertEqual(fsm.result, "success")
+
+    def test_persistent_unrecognized_error_terminates_with_snippet(self):
+        fsm, inj, emit = make([PageState.ERROR] * (_ERROR_CONFIRM_TICKS + 1),
+                              err="Something weird happened on Google")
+        for _ in range(_ERROR_CONFIRM_TICKS + 1):
+            fsm.tick()
+        self.assertTrue(fsm.done)
+        self.assertEqual(fsm.result, "error")
+        last = emit.msgs[-1]
+        self.assertEqual(last["state"], "error")
+        self.assertIn("Something weird happened", last["message"])  # real page text, not opaque
 
 
 if __name__ == "__main__":

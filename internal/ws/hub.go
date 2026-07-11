@@ -29,6 +29,7 @@ type Hub struct {
 	clients         map[net.Conn]bool
 	onAuthDone      func()       // optional callback invoked when an auth_done Broadcast fires — used by serve.go to trigger pipeline reinit out of standby mode
 	onClientMessage func([]byte) // optional: raw inbound client frames (e.g. Remote-Hand rh_input) routed to the sidecar bridge
+	onConnect       func()       // optional: fired when a client connects — lets Remote-Hand replay the last prompt to a late-joining ws
 }
 
 // NewHub returns a ready-to-use WebSocket hub.
@@ -48,7 +49,8 @@ func (h *Hub) SetOnAuthDone(fn func()) {
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn, _, _, err := ws.UpgradeHTTP(r, w)
 	if err != nil { return }
-	h.mu.Lock(); h.clients[conn] = true; h.mu.Unlock()
+	h.mu.Lock(); h.clients[conn] = true; onConn := h.onConnect; h.mu.Unlock()
+	if onConn != nil { go onConn() } // replay the last Remote-Hand prompt to this late-joining client
 	defer func() { h.mu.Lock(); delete(h.clients, conn); h.mu.Unlock(); conn.Close() }()
 	for { // read loop: keep-alive, inbound rh_input routing, disconnect detection
 		data, _, err := wsutil.ReadClientData(conn)
@@ -64,6 +66,14 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Hub) SetOnClientMessage(fn func([]byte)) {
 	h.mu.Lock(); defer h.mu.Unlock()
 	h.onClientMessage = fn
+}
+
+// SetOnConnect registers a callback fired (in a goroutine) whenever a client
+// connects. Remote-Hand uses it to replay the last hello+prompt so a ws that
+// attaches a few ticks after /start still renders the form (no lost first prompt).
+func (h *Hub) SetOnConnect(fn func()) {
+	h.mu.Lock(); defer h.mu.Unlock()
+	h.onConnect = fn
 }
 
 // BroadcastRaw sends pre-serialized JSON to all clients verbatim — used to
