@@ -16,7 +16,15 @@ type Broadcaster interface {
 	BroadcastRaw([]byte)
 	SetOnClientMessage(func([]byte))
 	SetOnConnect(func())
+	SetOnClientsGone(func())
+	ClientCount() int
 }
+
+// abandonGrace is how long a session may have ZERO connected ws clients before it is
+// treated as abandoned (user closed the app / navigated away) and its display freed. It
+// must exceed the ws reconnect gap so a transient drop during an active flow doesn't reap
+// a live session — presence-based teardown, not a blind timeout.
+const abandonGrace = 45 * time.Second
 
 // Manager runs many concurrent Remote-Hand sessions over one Hub. It allocates a
 // display per session (§13), spawns a sidecar via a Bridge, and routes inbound
@@ -30,8 +38,9 @@ type Manager struct {
 	timeout  time.Duration
 	extraEnv []string // e.g. RH_FAKE for tests; empty in production (real mode)
 
-	mu       sync.Mutex
-	sessions map[string]*mgrSession
+	mu         sync.Mutex
+	sessions   map[string]*mgrSession
+	graceTimer *time.Timer // armed when the last ws client leaves; reaps abandoned sessions
 
 	// prepareSession maps a provider (e.g. "gdrive") to the OAuth URL the sidecar
 	// should open, AND arms server-side token capture as a side effect (serve.go
@@ -65,8 +74,53 @@ func NewManager(hub Broadcaster, pool *DisplayPool, script string, timeout time.
 	m := &Manager{hub: hub, pool: pool, script: script, timeout: timeout,
 		extraEnv: extraEnv, sessions: make(map[string]*mgrSession)}
 	hub.SetOnClientMessage(m.routeInput)
-	hub.SetOnConnect(m.replayToNewClient) // late-joining ws → re-send the last prompt
+	hub.SetOnConnect(m.onClientConnected)   // late-joining ws → cancel abandon grace + replay prompt
+	hub.SetOnClientsGone(m.onClientsGone)   // last ws left → arm abandon grace
 	return m
+}
+
+// onClientConnected: a ws attached — cancel any pending abandon-reap (the user is back)
+// and replay the last prompt so the reconnecting client re-renders the form.
+func (m *Manager) onClientConnected() {
+	m.mu.Lock()
+	if m.graceTimer != nil {
+		m.graceTimer.Stop()
+		m.graceTimer = nil
+	}
+	m.mu.Unlock()
+	m.replayToNewClient()
+}
+
+// onClientsGone: the last ws disconnected. If a session is live, arm a grace timer; if no
+// client reconnects before it fires, the login was abandoned → free the display.
+func (m *Manager) onClientsGone() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.sessions) == 0 {
+		return
+	}
+	if m.graceTimer != nil {
+		m.graceTimer.Stop()
+	}
+	m.graceTimer = time.AfterFunc(abandonGrace, m.reapAbandoned)
+}
+
+// reapAbandoned ends every live session IF still no client is connected — the grace elapsed
+// with no reconnect, so the user really left (double-checked against a last-moment reconnect).
+func (m *Manager) reapAbandoned() {
+	if m.hub.ClientCount() > 0 {
+		return // a client is present after all — not abandoned
+	}
+	m.mu.Lock()
+	m.graceTimer = nil
+	sids := make([]string, 0, len(m.sessions))
+	for sid := range m.sessions {
+		sids = append(sids, sid)
+	}
+	m.mu.Unlock()
+	for _, sid := range sids {
+		m.End(sid)
+	}
 }
 
 // sendAndCache forwards a sidecar frame to Flutter and remembers the last hello/prompt
