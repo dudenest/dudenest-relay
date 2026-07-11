@@ -396,6 +396,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if rhScript == "" {
 		rhScript = "/usr/local/lib/dudenest/remotehand/rh_sidecar.py"
 	}
+	go EnsureSidecar(Version) // top up the method-3 sidecar+deps after a binary-only auto-update (non-blocking)
 	rhMgr := remotehand.NewManager(wsHub, remotehand.NewDisplayPool(rhDisplay), rhScript, cfg.SessionTimeout())
 	rhMgr.SetPrepare(func(provider string) (string, error) { // provider → OAuth URL + arm server-side token capture (reuses method-2 helpers)
 		if provider != "gdrive" {
