@@ -7,6 +7,7 @@ no `navigator.webdriver`, no browser automation hook — injected events are
 `isTrusted=true`, indistinguishable from a physical keyboard/mouse.
 
 Full design & rationale: `~/.AI/dudenest-application/RELAY-REMOTE-HAND-PLAN.md`.
+Operational reference/tutorial: `docs/REMOTE-HAND-REFERENCE.md`.
 
 ## Why a Python sidecar (not in the Go relay)
 
