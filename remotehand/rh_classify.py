@@ -38,6 +38,10 @@ _RULES: list[tuple[PageState, list[str]]] = [
         r"code (we )?(texted|sent) (you|to)",
         r"enter (the )?code (we )?(texted|sent)",
     ]),
+    (PageState.SEND_CODE, [
+        r"get a verification code.*google will send (a )?verification code to",
+        r"google will send (a )?verification code to .{0,80}(standard message|message and data)",
+    ]),
     (PageState.PHONE, [
         r"enter (a )?phone number",
         r"get a verification code",

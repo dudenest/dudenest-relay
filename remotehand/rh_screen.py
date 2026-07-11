@@ -22,7 +22,7 @@ class Observer(Protocol):
     def observe(self) -> PageState: ...
     def capture_captcha(self) -> bytes | None: ...
     def error_text(self) -> str: ...
-    def locate(self, text: str) -> tuple[int, int] | None: ...
+    def locate(self, text: str, min_y: int = 0) -> tuple[int, int] | None: ...
 
 
 class ScrotObserver:
@@ -59,7 +59,7 @@ class ScrotObserver:
         except Exception:
             return ""
 
-    def locate(self, text: str) -> tuple[int, int] | None:
+    def locate(self, text: str, min_y: int = 0) -> tuple[int, int] | None:
         """Find the on-screen center of a word (e.g. a 'Continue'/'Allow' button)
         via OCR word boxes — so the FSM can click buttons Enter can't activate."""
         try:
@@ -69,10 +69,14 @@ class ScrotObserver:
             data = pytesseract.image_to_data(Image.open(io.BytesIO(self.grab())),
                                               output_type=pytesseract.Output.DICT)
             target = text.strip().lower()
+            matches = []
             for i, word in enumerate(data["text"]):
                 if word.strip().lower() == target:
-                    return (data["left"][i] + data["width"][i] // 2,
-                            data["top"][i] + data["height"][i] // 2)
+                    y = data["top"][i] + data["height"][i] // 2
+                    if y >= min_y:
+                        matches.append((data["left"][i] + data["width"][i] // 2, y))
+            if matches:
+                return sorted(matches, key=lambda p: (p[1], p[0]))[-1]
         except Exception:
             pass
         return None
@@ -103,4 +107,4 @@ class ScriptedObserver:
 
     def capture_captcha(self) -> bytes | None: return self._captcha
     def error_text(self) -> str: return self._err
-    def locate(self, text: str) -> tuple[int, int] | None: return self._locate
+    def locate(self, text: str, min_y: int = 0) -> tuple[int, int] | None: return self._locate

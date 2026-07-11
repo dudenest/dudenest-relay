@@ -74,6 +74,20 @@ class TestTwoFactor(unittest.TestCase):
         self.assertIn(("type", "+48123"), inj.calls)
         self.assertIn(("type", "998877"), inj.calls)
 
+    def test_known_phone_send_code_then_sms(self):
+        obs = ScriptedObserver([PageState.SEND_CODE, PageState.SMS, PageState.SUCCESS], locate=(1060, 844))
+        inj = RecordingInjector()
+        emit = RecordingEmitter()
+        fsm = RemoteHandFSM("s1", obs, inj, emit)
+        fsm.tick()                                   # SEND_CODE → prompt confirmation, no phone field
+        prompts = [m for m in emit.msgs if m["type"] == "rh_prompt"]
+        self.assertEqual(prompts[-1]["step"], "send_code")
+        self.assertEqual(prompts[-1]["fields"], [])
+        fsm.submit("send_code", {})
+        self.assertIn(("click", 1060, 844, 1), inj.calls)
+        fsm.tick()                                   # SMS → prompt code
+        self.assertEqual(emit.steps(), ["email", "send_code", "sms_code"])
+
 
 class TestConsentAutoAccept(unittest.TestCase):
     def test_consent_clicks_located_button(self):

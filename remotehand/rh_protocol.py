@@ -19,7 +19,7 @@ from typing import Any
 class PageState(str, Enum):
     """What the login page currently shows (classified visually, no DOM/CDP)."""
     EMAIL = "email"; PASSWORD = "password"; CONSENT = "consent"
-    PHONE = "phone"; SMS = "sms_code"; CAPTCHA = "captcha"
+    PHONE = "phone"; SEND_CODE = "send_code"; SMS = "sms_code"; CAPTCHA = "captcha"
     SUCCESS = "success"; ERROR = "error"; UNKNOWN = "unknown"
 
 

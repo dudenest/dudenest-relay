@@ -88,7 +88,7 @@ class RemoteHandFSM:
         {
             PageState.EMAIL: self._on_email, PageState.PASSWORD: self._on_password,
             PageState.CONSENT: self._on_consent, PageState.PHONE: self._on_phone,
-            PageState.SMS: self._on_sms, PageState.CAPTCHA: self._on_captcha,
+            PageState.SEND_CODE: self._on_send_code, PageState.SMS: self._on_sms, PageState.CAPTCHA: self._on_captcha,
             PageState.SUCCESS: self._on_success, PageState.ERROR: self._on_error,
         }.get(st, self._on_unknown)()
         return st
@@ -113,6 +113,9 @@ class RemoteHandFSM:
         elif step == "phone":
             self._type_and_next(values.get("phone", ""), replace=self._replace_next, verify_field="phone")
             self._state("working", "submitting phone")
+        elif step == "send_code":
+            self._click_send_code()
+            self._state("working", "asking Google to send the verification code")
         elif step == "sms_code":
             self._type_and_next(values.get("code", ""), replace=self._replace_next, verify_field="code")
             self._state("working", "submitting code")
@@ -161,6 +164,19 @@ class RemoteHandFSM:
     def _on_phone(self) -> None:
         self._prompt_once("phone", "Verify it's you",
                           [Field("phone", "Phone number", "tel")])
+
+    def _on_send_code(self) -> None:
+        self._prompt_once("send_code", "Google will send a verification code to your phone", [])
+
+    def _click_send_code(self) -> None:
+        # The page has no input field. It asks permission to send an SMS to a known,
+        # masked number. Avoid matching the body word 'send' in 'Google will send...'
+        # by preferring lower-screen button text; fallback to keyboard activation.
+        pos = self._obs.locate("Send", min_y=720) or self._obs.locate("Next", min_y=720)
+        if pos is not None:
+            self._inj.click(*pos)
+        else:
+            self._inj.press_key("Tab"); self._inj.press_key("Return")
 
     def _on_sms(self) -> None:
         self._prompt_once("sms_code", "Enter the code we texted you",

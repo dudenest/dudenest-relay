@@ -10,6 +10,7 @@ from rh_classify import classify_text, classify_image, make_classifier, classify
 EMAIL = "Sign in\nUse your Google Account\nEmail or phone\nForgot email?\nNext"
 PASSWORD = "Welcome\ndemo@example.com\nEnter your password\nShow password\nNext"
 PHONE = "2-Step Verification\nGet a verification code\nEnter a phone number where you can receive"
+SEND_CODE = "Verify it's you\nGet a verification code\nGoogle will send a verification code to +++ +++ +90. Standard message and data rates may apply.\nSend"
 SMS = "2-Step Verification\nEnter the code\nG-882211\nA text message with a code was sent"
 CAPTCHA = "Type the text you hear or see\nI'm not a robot"
 CONSENT = "Dudenest wants to access your Google Account\nAllow\nCancel"
@@ -22,6 +23,7 @@ class TestClassifyText(unittest.TestCase):
     def test_email(self): self.assertEqual(classify_text(EMAIL), PageState.EMAIL)
     def test_password(self): self.assertEqual(classify_text(PASSWORD), PageState.PASSWORD)
     def test_phone(self): self.assertEqual(classify_text(PHONE), PageState.PHONE)
+    def test_send_code_to_known_phone(self): self.assertEqual(classify_text(SEND_CODE), PageState.SEND_CODE)
     def test_sms(self): self.assertEqual(classify_text(SMS), PageState.SMS)
     def test_captcha(self): self.assertEqual(classify_text(CAPTCHA), PageState.CAPTCHA)
     def test_consent(self): self.assertEqual(classify_text(CONSENT), PageState.CONSENT)
@@ -48,6 +50,10 @@ class TestClassifyText(unittest.TestCase):
         self.assertEqual(
             classify_text("2-Step Verification\nGet a verification code\nEnter a phone number"),
             PageState.PHONE)
+
+    def test_known_phone_send_code_not_misread_as_phone(self):
+        self.assertEqual(classify_text("Get a verification code\nGoogle will send a verification code to +48 ***"),
+                         PageState.SEND_CODE)
 
 
 class TestPriority(unittest.TestCase):
