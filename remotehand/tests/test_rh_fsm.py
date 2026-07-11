@@ -126,14 +126,22 @@ class TestUnverifiedAppAutoAccept(unittest.TestCase):
     def test_clicks_advanced_then_continue(self):
         obs = LocateByWordObserver(
             [PageState.UNVERIFIED_APP, PageState.UNVERIFIED_APP, PageState.CONSENT],
-            {"advanced": (370, 576), "continue": (370, 652)},
+            {"advanced": (370, 576), "goto": (355, 696), "dudenest-relay": (417, 697)},
             err="Google hasn't verified this app")
         inj = RecordingInjector(); emit = RecordingEmitter(); fsm = RemoteHandFSM("s1", obs, inj, emit)
         fsm.tick()
         self.assertIn(("click", 370, 576, 1), inj.calls)
-        obs._err = "Continue only if you understand the risks and trust the developer"
+        obs._err = "Continue only if you understand the risks and trust the developer\nGoto dudenest-relay (unsafe)"
         fsm.tick()
-        self.assertIn(("click", 370, 652, 1), inj.calls)
+        self.assertIn(("click", 355, 696, 1), inj.calls)
+
+    def test_unverified_app_does_not_click_explanatory_continue_text(self):
+        obs = LocateByWordObserver([PageState.UNVERIFIED_APP], {"continue": (370, 652)},
+                                   err="Continue only if you understand the risks and trust the developer")
+        inj = RecordingInjector(); emit = RecordingEmitter(); fsm = RemoteHandFSM("s1", obs, inj, emit)
+        fsm.tick()
+        self.assertNotIn(("click", 370, 652, 1), inj.calls)
+        self.assertEqual(emit.msgs[-1]["state"], "error")
 
 
 class TestConsentAutoAccept(unittest.TestCase):

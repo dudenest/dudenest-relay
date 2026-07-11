@@ -226,12 +226,15 @@ class RemoteHandFSM:
 
     def _on_unverified_app(self) -> None:
         text = self._obs.error_text() or ""
-        if re.search(r"continue only if you understand the risks|go to .+unsafe|continue to", text, re.I):
+        if re.search(r"continue only if you understand the risks|go\s*to .+unsafe|goto .+unsafe|continue to", text, re.I):
             if "unverified_continue" not in self._prompted:
                 self._prompted.add("unverified_continue")
-                pos = self._obs.locate("Continue", min_y=560) or self._obs.locate("Go", min_y=560)
+                # The 'Continue only if...' line is explanatory text, NOT the link.
+                # The actionable link OCRs as 'Goto dudenest-relay (unsafe)' on Google.
+                pos = (self._obs.locate("Goto", min_y=620) or self._obs.locate("Go", min_y=620)
+                       or self._obs.locate("dudenest-relay", min_y=620) or self._obs.locate("(unsafe)", min_y=620))
                 if pos is None:
-                    self._state("error", "Could not find Google's unverified-app continue link")
+                    self._state("error", "Could not find Google's unverified-app unsafe link")
                     return
                 self._inj.click(*pos)
                 self._state("working", "continuing past Google unverified-app warning")
