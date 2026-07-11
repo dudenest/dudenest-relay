@@ -36,6 +36,19 @@ class TestClassifyText(unittest.TestCase):
     def test_case_insensitive(self):
         self.assertEqual(classify_text("ENTER YOUR PASSWORD"), PageState.PASSWORD)
 
+    def test_consent_with_line_wrapped_heading(self):
+        # Real OCR wraps the heading across lines; must still be CONSENT (was misread as EMAIL
+        # because 'Sign in with Google' matched and the wrapped 'wants access' did not).
+        wrapped = ("Sign in with Google\ndudenest-relay wants\naccess to your Google\nAccount\n"
+                   "dudenest.demo@gmail.com\nCancel  Continue")
+        self.assertEqual(classify_text(wrapped), PageState.CONSENT)
+
+    def test_phone_page_not_misread_as_sms(self):
+        # PHONE page mentions 'verification code' (to receive) — must stay PHONE, not SMS.
+        self.assertEqual(
+            classify_text("2-Step Verification\nGet a verification code\nEnter a phone number"),
+            PageState.PHONE)
+
 
 class TestPriority(unittest.TestCase):
     """Terminal/specific states win over the generic EMAIL 'sign in' phrase."""

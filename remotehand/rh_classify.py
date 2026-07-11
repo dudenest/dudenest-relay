@@ -34,9 +34,9 @@ _RULES: list[tuple[PageState, list[str]]] = [
     (PageState.SMS, [
         r"enter the code",
         r"g-\s?\d{2,}",
-        r"2-step verification.*code",
-        r"enter (the )?verification code",
+        r"enter (the )?verification code",  # NOT 'get a verification code' (that's the PHONE page)
         r"code (we )?(texted|sent) (you|to)",
+        r"enter (the )?code (we )?(texted|sent)",
     ]),
     (PageState.PHONE, [
         r"enter (a )?phone number",
@@ -69,9 +69,16 @@ _RULES: list[tuple[PageState, list[str]]] = [
 ]
 
 
+def _norm(text: str) -> str:
+    """Lowercase + collapse ALL whitespace to single spaces. OCR wraps long headings
+    across lines ('wants\\naccess to your Google\\nAccount'), which breaks space-based
+    phrase patterns — normalizing makes them match regardless of line breaks."""
+    return " ".join(text.lower().split())
+
+
 def classify_text(text: str) -> PageState:
     """Classify already-OCR'd text. Pure function — the unit-tested core."""
-    t = text.lower()
+    t = _norm(text)
     for state, patterns in _RULES:
         if any(re.search(p, t) for p in patterns):
             return state
@@ -107,7 +114,7 @@ def classify_error(text: str) -> tuple[str | None, str]:
     field is one of login|password|phone|code to re-prompt that field so the user
     can correct their input; None means a terminal error (give up). Unknown errors
     are treated as terminal (safe default — don't loop on an unclassifiable page)."""
-    t = text.lower()
+    t = _norm(text)
     for field, msg, patterns in _ERROR_MAP:
         if any(re.search(p, t) for p in patterns):
             return field, msg
