@@ -55,22 +55,25 @@ class XdotoolInjector:
         self._run("click", str(button))
         time.sleep(random.uniform(self._lo, self._hi) / 1000.0)
 
-    def _clip(self, *args: str, data: bytes | None = None) -> bytes:
-        return subprocess.run(["xclip", "-selection", "clipboard", *args], input=data,
-                              env={**os.environ, "DISPLAY": self._display},
-                              check=False, capture_output=True).stdout
-
     def read_field(self) -> str:
         """Select-all + copy the focused field and return the clipboard text — the
         deterministic way to confirm what actually landed in the Google form before we
         press Enter (OCR is too noisy to trust for this). Returns '' when the browser
         blocks copy (type=password) — the caller treats '' as 'unverifiable', not 'empty'."""
+        env = {**os.environ, "DISPLAY": self._display}
         try:
-            self._clip(data=b"")            # clear stale clipboard so a blocked copy reads ''
+            # Clear the clipboard first so a blocked copy (password) reads '' not a stale value.
+            # CRITICAL: xclip DAEMONIZES when setting a selection and keeps inherited fds open,
+            # so capture_output would hang forever (the sidecar froze here after typing, never
+            # reaching Enter) — send its fds to DEVNULL and cap with a timeout instead.
+            subprocess.run(["xclip", "-selection", "clipboard"], input=b"", env=env, check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
             self.press_key("ctrl+a"); self.press_key("ctrl+c")
             time.sleep(0.15)
-            text = self._clip("-o").decode("utf-8", "replace")
-        except FileNotFoundError:            # xclip not installed → cannot verify
+            out = subprocess.run(["xclip", "-selection", "clipboard", "-o"], env=env, check=False,
+                                 capture_output=True, timeout=2)  # -o reads then exits (no daemon)
+            text = out.stdout.decode("utf-8", "replace")
+        except (FileNotFoundError, subprocess.TimeoutExpired):  # xclip missing or wedged → can't verify
             return ""
         self._run("key", "--clearmodifiers", "End")  # deselect (cursor to end) before the caller hits Enter
         return text
