@@ -21,6 +21,10 @@ from rh_protocol import PageState
 # Ordered: specific/terminal states first, generic (email) last. First match wins.
 # Patterns are regexes matched against lowercased OCR text.
 _RULES: list[tuple[PageState, list[str]]] = [
+    (PageState.SUCCESS, [   # relay callback page after the token is captured — end + free the display
+        r"authorization complete",
+        r"you can close this (page|window|tab)",
+    ]),
     (PageState.ERROR, [
         r"couldn.?t find (your|this|his) (google )?account",
         r"wrong password",

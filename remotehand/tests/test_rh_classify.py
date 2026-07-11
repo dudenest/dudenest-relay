@@ -53,6 +53,12 @@ class TestClassifyText(unittest.TestCase):
             classify_text("2-Step Verification\nGet a verification code\nEnter a phone number"),
             PageState.PHONE)
 
+    def test_oauth_callback_page_is_success(self):
+        # Relay callback page shown after the token is captured — must end the session so the
+        # display is freed (else a second 'Relay assisted' finds no free display).
+        self.assertEqual(classify_text("Authorization complete. You can close this page."),
+                         PageState.SUCCESS)
+
     def test_known_phone_send_code_not_misread_as_phone(self):
         self.assertEqual(classify_text("Get a verification code\nGoogle will send a verification code to +48 ***"),
                          PageState.SEND_CODE)
