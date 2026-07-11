@@ -146,21 +146,27 @@ class RemoteHandFSM:
                 self._type_and_next(self._buffered["password"])
                 self._buffered["password"] = ""  # zeroize buffer after use
                 self._state("working", "submitting password")
+        elif "password_injected" in self._prompted:
+            return  # page transition lag after auto-inject; don't flash an empty password prompt
         else:  # not provided earlier → ask now
             self._prompt_once("password", "Enter your password",
                               [Field("password", "Password", "password")])
 
     def _on_consent(self) -> None:  # auto-accept the OAuth consent screen
         if "consent" not in self._prompted:
-            self._prompted.add("consent")
             # Enter does NOT activate Google's consent button (it isn't focused) —
             # locate "Continue"/"Allow" via OCR and click it (Faza 2 fix).
-            pos = self._obs.locate("Continue") or self._obs.locate("Allow")
+            pos = self._obs.locate("Continue", min_y=500) or self._obs.locate("Allow", min_y=500)
             if pos is not None:
+                self._prompted.add("consent")
                 self._inj.click(*pos)
+                self._state("working", "accepting consent")
+            elif "consent_scrolled" not in self._prompted:
+                self._prompted.add("consent_scrolled")
+                self._inj.press_key("End")
+                self._state("working", "scrolling consent screen")
             else:
-                self._inj.press_key("Return")  # fallback if the button text isn't found
-            self._state("working", "accepting consent")
+                self._state("error", "Could not find Google's consent button")
 
     def _on_phone(self) -> None:
         self._prompt_once("phone", "Verify it's you",

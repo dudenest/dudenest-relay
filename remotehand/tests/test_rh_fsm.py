@@ -57,6 +57,13 @@ class TestHappyPathBufferedPassword(unittest.TestCase):
         fsm.tick()
         self.assertEqual(fsm._buffered.get("password"), "")  # zeroized
 
+    def test_no_empty_password_prompt_while_password_page_lingers(self):
+        fsm, inj, emit = make([PageState.EMAIL, PageState.PASSWORD, PageState.PASSWORD])
+        fsm.tick(); fsm.submit("email", {"login": "a", "password": "pw"})
+        fsm.tick(); fsm.tick()
+        prompts = [m for m in emit.msgs if m["type"] == "rh_prompt" and m["step"] == "password"]
+        self.assertEqual(prompts, [])
+
 
 class TestPasswordPromptedSeparately(unittest.TestCase):
     """If no password was buffered, the password page prompts for it."""
@@ -157,7 +164,17 @@ class TestConsentAutoAccept(unittest.TestCase):
     def test_consent_falls_back_to_return_when_button_not_found(self):
         fsm, inj, emit = make([PageState.CONSENT, PageState.SUCCESS])  # locate=None
         fsm.tick()
-        self.assertIn(("key", "Return"), inj.calls)
+        self.assertIn(("key", "End"), inj.calls)
+
+    def test_consent_scrolls_then_clicks_button(self):
+        obs = LocateByWordObserver([PageState.CONSENT, PageState.CONSENT], {"continue": (1000, 900)})
+        inj = RecordingInjector(); emit = RecordingEmitter(); fsm = RemoteHandFSM("s1", obs, inj, emit)
+        obs._locs = {}
+        fsm.tick()
+        self.assertIn(("key", "End"), inj.calls)
+        obs._locs = {"continue": (1000, 900)}
+        fsm.tick()
+        self.assertIn(("click", 1000, 900, 1), inj.calls)
 
 
 class TestCaptcha(unittest.TestCase):
