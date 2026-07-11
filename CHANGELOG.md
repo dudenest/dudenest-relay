@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.24.0] — 2026-07-11 — Method 3: Remote-Hand CDP-free mediated login
+
+### Added
+- **Remote-Hand (method 3): CDP-free mediated Google login.** A native Flutter dynamic form drives a vanilla Chromium on the relay via OS-level XTEST injection (xdotool) and reads the screen with OCR (Tesseract) — no CDP, no `navigator.webdriver`, undetectable as automation. Endpoints `POST /relay/oauth3/start|end|input`; per-session Python sidecar bridged over stdio; credentials sealed to the sidecar with NaCl sealed_box (zero-knowledge — the edge never sees plaintext).
+- FSM handles the full flow: email+password, 2FA phone / SMS code / known-phone send-code, captcha, Google "unverified app" (Advanced → unsafe link), consent (scroll + click Continue/Allow), and error re-prompts (wrong password/code/phone/account, session-expired) with the offending field surfaced.
+- Deterministic field verification: clipboard read-back confirms what actually landed in each visible field before Enter; unrecognized errors carry the real on-screen text to Flutter instead of a generic failure.
+- **Self-provisioning:** the binary tops up the method-3 sidecar (`rh_*.py`) and small deps (tesseract/xdotool/scrot/xclip, pynacl/pytesseract) on startup, so a binary-only auto-update delivers a working method 3 (best-effort, version-marked). `scripts/install.sh` also installs these.
+
+### Fixed
+- Reliable HTTP `rh_input` (instead of a lossy ws); display freed on sidecar exit, on OAuth-callback success page, and via presence-based reap when the last ws client leaves and none returns; Chromium process-group kill on teardown (no orphaned browsers breaking the display); instant email form with relay prompt-replay on ws reconnect; Escape-before-Enter (Google's autocomplete popup was eating Enter); `read_field` no longer hangs the sidecar (xclip clipboard-set daemon + `capture_output` deadlock); OCR whitespace normalization (line-wrapped consent heading was misread).
+
 ## [v0.23.10] — 2026-07-02
 ### Changed
 - Default backup/hub URL → `https://hub.dudenest.com` (retire `backup.dudenest.com`). Reads `HUB_URL` (primary) / `BACKUP_URL` (fallback) from env. Bootstrap response key `hub_url` (was `backup_url`).
