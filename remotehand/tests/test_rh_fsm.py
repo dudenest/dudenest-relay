@@ -37,10 +37,10 @@ class TestHappyPathBufferedPassword(unittest.TestCase):
         self.assertTrue(fsm.done)
         self.assertEqual(fsm.result, "success")
         self.assertIn("success", emit.states())
-        # injector saw: email+Return, then buffered password+Return
+        # injector saw: email + Escape(dismiss popup) + Return, then buffered password + Escape + Return
         self.assertEqual(inj.calls, [
-            ("type", "demo@x.com"), ("key", "Return"),
-            ("type", "secret"), ("key", "Return"),
+            ("type", "demo@x.com"), ("key", "Escape"), ("key", "Return"),
+            ("type", "secret"), ("key", "Escape"), ("key", "Return"),
         ])
 
     def test_password_buffer_zeroized_after_use(self):
@@ -141,7 +141,8 @@ class TestError(unittest.TestCase):
         self.assertEqual(prompts[-1]["step"], "email")
         self.assertEqual(prompts[-1]["level"], "warning")
         fsm.submit("email", {"login": "correct@example.com", "password": "pw"})
-        self.assertEqual(inj.calls[:3], [("key", "ctrl+a"), ("type", "correct@example.com"), ("key", "Return")])
+        self.assertEqual(inj.calls[:4],
+                         [("key", "ctrl+a"), ("type", "correct@example.com"), ("key", "Escape"), ("key", "Return")])
 
 
 class TestIdempotency(unittest.TestCase):

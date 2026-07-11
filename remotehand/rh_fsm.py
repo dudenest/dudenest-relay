@@ -261,6 +261,9 @@ class RemoteHandFSM:
         self._inj.type_text(text)
         if verify_field and text and not self._field_ok(text, verify_field):
             return False  # mismatch surfaced + re-prompted; do NOT submit the wrong value
+        # Dismiss Google's autocomplete/passkey popup first — it grabs the Enter key and the
+        # form never submits (the clipboard read-back refreshes that popup). Then submit.
+        self._inj.press_key("Escape")
         self._inj.press_key("Return")
         return True
 
