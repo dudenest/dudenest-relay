@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Changed
+- **Method-3 anti-detection (B4/B5).** Google was disabling accounts signed in through the relay — the cause was the automation fingerprint, not the (residential) IP. Fixes: **(B4)** the OAuth browser now reuses a **persistent** `--user-data-dir` (`/var/lib/dudenest/remotehand/profile`) instead of a throwaway per-session dir, so cookies and Google's "trusted device" survive across logins (stale `Singleton*` locks are cleared, cookies kept). **(B5)** the fleet now installs **real Google Chrome** (amd64 Debian/Ubuntu; arm falls back to Chromium) and the method-3 launcher prefers it over open-source Chromium, whose fingerprint Google can distinguish. The installer also adds a **timezone-from-IP** sync (`dudenest-tz-sync` oneshot + daily timer) so the browser's JS timezone matches the egress IP's geolocation. `provision` logs a hint when a binary-only update is still on Chromium.
+
 ## [v0.24.1] — 2026-07-12
 
 ### Fixed

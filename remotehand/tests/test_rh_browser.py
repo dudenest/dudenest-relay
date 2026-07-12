@@ -4,16 +4,17 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from rh_browser import build_command, prepare_profile
+import rh_browser  # noqa: E402
+from rh_browser import build_command, chrome_binary, prepare_profile
 
 
 class TestBuildCommand(unittest.TestCase):
     def setUp(self):
         self.cmd = build_command("https://accounts.google.com/o/oauth2/v2/auth?x=1",
-                                 "/tmp/rh-sess1")
+                                 "/tmp/rh-sess1", binary="google-chrome-stable")
 
-    def test_launches_chromium_with_url_and_profile(self):
-        self.assertEqual(self.cmd[0], "chromium")
+    def test_launches_browser_with_url_and_profile(self):
+        self.assertEqual(self.cmd[0], "google-chrome-stable")
         self.assertEqual(self.cmd[-1], "https://accounts.google.com/o/oauth2/v2/auth?x=1")
         self.assertIn("--user-data-dir=/tmp/rh-sess1", self.cmd)
 
@@ -24,6 +25,25 @@ class TestBuildCommand(unittest.TestCase):
 
     def test_hides_automation_controlled(self):
         self.assertIn("--disable-blink-features=AutomationControlled", self.cmd)
+
+
+class TestChromeBinary(unittest.TestCase):
+    def test_prefers_real_chrome_over_chromium(self):
+        seen = {"google-chrome-stable": "/usr/bin/google-chrome-stable", "chromium": "/usr/bin/chromium"}
+        orig = rh_browser.shutil.which
+        rh_browser.shutil.which = lambda c: seen.get(c)
+        try:
+            self.assertEqual(chrome_binary(), "/usr/bin/google-chrome-stable")
+        finally:
+            rh_browser.shutil.which = orig
+
+    def test_falls_back_to_chromium_when_no_chrome(self):
+        orig = rh_browser.shutil.which
+        rh_browser.shutil.which = lambda c: "/usr/bin/chromium" if c == "chromium" else None
+        try:
+            self.assertEqual(chrome_binary(), "/usr/bin/chromium")
+        finally:
+            rh_browser.shutil.which = orig
 
 
 class TestPrepareProfile(unittest.TestCase):

@@ -78,23 +78,24 @@ APT_PKGS=(
   unattended-upgrades apt-listchanges
 )
 APT_OPTS=(-y --no-install-recommends -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confnew)
-# Chromium handling differs per distro: on Debian use the deb `chromium`; on Ubuntu the
-# `chromium` deb is empty and `chromium-browser` is a snap (breaks --user-data-dir + --no-sandbox).
-# Install Google Chrome from Google's apt repo on Ubuntu, then symlink to /usr/local/bin/chromium
-# so the relay binary's hardcoded `chromedp.ExecPath("chromium")` still resolves.
-case "$DISTRO_ID" in
-  debian)
-    APT_PKGS+=(chromium chromium-sandbox) ;;
-  ubuntu)
-    if ! [[ -f /etc/apt/sources.list.d/google-chrome.list ]]; then
-      install -d -m 755 /etc/apt/keyrings
-      curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
-      echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
-      ok "Added Google Chrome apt repo"
-    fi
-    APT_PKGS+=(google-chrome-stable) ;;
-  *) warn "Untested distro '$DISTRO_ID' — trying Debian package set" ; APT_PKGS+=(chromium) ;;
-esac
+# Browser: use REAL Google Chrome (B5). Its fingerprint (branding, WebGL renderer, media, fonts)
+# matches an ordinary consumer desktop; open-source Chromium is distinguishable and trips Google's
+# anti-abuse on OAuth sign-ins. Google ships chrome only for amd64 — arm relays fall back to
+# chromium. We symlink whatever we get to /usr/local/bin/chromium so chromedp.ExecPath("chromium")
+# and the method-3 launcher both resolve it.
+DEB_ARCH="$(dpkg --print-architecture 2>/dev/null || echo unknown)"
+if [[ "$DEB_ARCH" == "amd64" && ( "$DISTRO_ID" == "debian" || "$DISTRO_ID" == "ubuntu" ) ]]; then
+  if ! [[ -f /etc/apt/sources.list.d/google-chrome.list ]]; then
+    install -d -m 755 /etc/apt/keyrings
+    curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
+    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+    ok "Added Google Chrome apt repo"
+  fi
+  APT_PKGS+=(google-chrome-stable)
+else
+  warn "Google Chrome unavailable for ${DISTRO_ID}/${DEB_ARCH} — falling back to open-source chromium"
+  APT_PKGS+=(chromium chromium-sandbox)
+fi
 MISSING=()
 for p in "${APT_PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 || MISSING+=("$p"); done
 if [[ ${#MISSING[@]} -gt 0 ]]; then
@@ -106,9 +107,9 @@ if [[ ${#MISSING[@]} -gt 0 ]]; then
   apt-get install "${APT_OPTS[@]}" "${MISSING[@]}"
 fi
 # Pick the browser binary the relay can use (chromedp.ExecPath("chromium") relies on $PATH lookup
-# of `chromium`, so we expose Google Chrome under that name on Ubuntu).
+# of `chromium`, so we expose the browser under that name). Prefer real Chrome over Chromium.
 BROWSER_BIN=""
-for cand in /usr/bin/chromium /usr/bin/google-chrome-stable /usr/bin/google-chrome /usr/bin/chromium-browser; do
+for cand in /usr/bin/google-chrome-stable /usr/bin/google-chrome /usr/bin/chromium /usr/bin/chromium-browser; do
   [[ -x "$cand" ]] && { BROWSER_BIN="$cand"; break; }
 done
 [[ -n "$BROWSER_BIN" ]] || fail "No Chromium/Chrome binary found after apt install"
@@ -116,6 +117,48 @@ if [[ ! -x /usr/local/bin/chromium || "$(readlink -f /usr/local/bin/chromium 2>/
   ln -sfn "$BROWSER_BIN" /usr/local/bin/chromium
 fi
 ok "All required packages installed (browser: $BROWSER_BIN → /usr/local/bin/chromium)"
+
+# B5: keep the system timezone matching the public egress IP. The method-3 browser reports its
+# JS timezone (Intl/Date) from the system tz; if that disagrees with the IP's geolocation Google
+# reads it as an inconsistency signal. A boot-time oneshot + daily timer follow IP/location changes.
+cat > /usr/local/sbin/dudenest-tz-sync <<'TZS'
+#!/bin/bash
+# Set system timezone from the public egress IP so browser JS tz == network location (anti-abuse).
+set -uo pipefail
+TZ_NEW="$(curl -fsS --max-time 10 https://ipapi.co/timezone 2>/dev/null || true)"
+[ -z "$TZ_NEW" ] && TZ_NEW="$(curl -fsS --max-time 10 'http://ip-api.com/line/?fields=timezone' 2>/dev/null || true)"
+if [ -n "$TZ_NEW" ] && [ -f "/usr/share/zoneinfo/$TZ_NEW" ]; then
+  timedatectl set-timezone "$TZ_NEW" && echo "dudenest-tz-sync: timezone → $TZ_NEW"
+else
+  echo "dudenest-tz-sync: could not resolve timezone from IP (kept $(cat /etc/timezone 2>/dev/null))"
+fi
+TZS
+chmod 755 /usr/local/sbin/dudenest-tz-sync
+cat > /etc/systemd/system/dudenest-tz-sync.service <<'TZU'
+[Unit]
+Description=Sync system timezone to public egress IP (method-3 anti-abuse)
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dudenest-tz-sync
+[Install]
+WantedBy=multi-user.target
+TZU
+cat > /etc/systemd/system/dudenest-tz-sync.timer <<'TZT'
+[Unit]
+Description=Daily timezone re-sync to public egress IP
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1d
+Persistent=true
+[Install]
+WantedBy=timers.target
+TZT
+systemctl daemon-reload
+systemctl enable --now dudenest-tz-sync.timer >/dev/null 2>&1 || true
+/usr/local/sbin/dudenest-tz-sync || true
+ok "Timezone-from-IP sync installed (dudenest-tz-sync.timer)"
 
 # ── step 2: dude user + groups ───────────────────────────────────────────────
 step "Step 2/9: User '$DUDE_USER'"

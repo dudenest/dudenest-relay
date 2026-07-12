@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // Method-3 (Remote-Hand) needs a Python sidecar + small OCR/input tools that a binary-only
@@ -61,6 +62,7 @@ func EnsureSidecar(version string) {
 	}
 	ensureSidecarAptDeps()
 	ensureSidecarPipDeps()
+	ensureBrowserIsChrome()
 	if ok {
 		_ = os.WriteFile(marker, []byte(ref), 0o644)
 		log.Printf("provision: method-3 sidecar %s ready in %s", ref, sidecarDir)
@@ -90,6 +92,24 @@ func downloadTo(url, dest string) error {
 	}
 	f.Close()
 	return os.Rename(tmp, dest)
+}
+
+// ensureBrowserIsChrome logs a hint when the method-3 browser is still open-source Chromium
+// instead of real Google Chrome (B5). Installing Chrome (apt repo + package) is install.sh's job;
+// a binary-only update can't add an apt repo, so here we only surface the gap — never mutate.
+func ensureBrowserIsChrome() {
+	path, err := exec.LookPath("chromium") // symlink install.sh points at the chosen browser
+	if err != nil {
+		return
+	}
+	real, _ := filepath.EvalSymlinks(path)
+	if strings.Contains(strings.ToLower(real), "chrome") { // google-chrome[-stable]
+		return
+	}
+	if _, err := exec.LookPath("google-chrome-stable"); err == nil {
+		return // real Chrome present under its own name
+	}
+	log.Printf("provision: method-3 browser is %q (open-source Chromium) — run scripts/install.sh to install Google Chrome (B5 anti-abuse)", real)
 }
 
 // ensureSidecarAptDeps installs the OCR/input tools if any is missing — only as root with
