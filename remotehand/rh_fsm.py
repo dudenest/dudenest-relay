@@ -80,7 +80,17 @@ class RemoteHandFSM:
             self._started = True  # is always the identifier page, so the user types while Chromium loads
             self._prompt_email_once()
         st = self._obs.observe()
+        prev = self.last_state
         self.last_state = st
+        # 2FA can loop (Google re-sends the code, re-asks the phone). Leaving a 2FA step re-arms
+        # its one-shot prompt so re-entering prompts again; and a freshly-sent code (send_code →
+        # SMS) re-arms the code entry — fixes Flutter stuck on the old "send code" prompt while the
+        # relay already shows the code field.
+        _loop = {PageState.SEND_CODE: "send_code", PageState.SMS: "sms_code", PageState.PHONE: "phone"}
+        if prev in _loop and st is not prev:
+            self._prompted.discard(_loop[prev])
+        if prev is PageState.SEND_CODE and st is PageState.SMS:
+            self._prompted.discard("sms_code")
         if st is not PageState.UNKNOWN:  # a recognized page resets stall detection
             self._unknown_ticks = 0
             self._unknown_surfaced = False

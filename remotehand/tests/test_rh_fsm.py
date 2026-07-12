@@ -382,6 +382,18 @@ class TestTransientErrorNotTerminal(unittest.TestCase):
         self.assertIn("Something weird happened", last["message"])  # real page text, not opaque
 
 
+class TestTwoFactorLoop(unittest.TestCase):
+    """Google can re-send the code: SMS → send-code → SMS must re-prompt the code field
+    (else Flutter stays on the stale 'send code' prompt while the relay shows the entry)."""
+    def test_second_code_reprompts_sms_field(self):
+        fsm, inj, emit = make([PageState.SMS, PageState.SEND_CODE, PageState.SMS, PageState.SUCCESS])
+        fsm.tick()  # SMS → prompt sms_code
+        fsm.tick()  # SEND_CODE → prompt send_code (leaving SMS re-arms sms_code)
+        fsm.tick()  # SMS again → re-prompt the code field for the second code
+        steps = [m.get("step") for m in emit.msgs if m["type"] == "rh_prompt"]
+        self.assertEqual(steps.count("sms_code"), 2)
+
+
 class TestRecaptchaCheckbox(unittest.TestCase):
     """reCAPTCHA 'I'm not a robot' checkbox — machine-solvable: click the box + Next, no user prompt."""
     def test_clicks_checkbox_then_next_no_user_prompt(self):
