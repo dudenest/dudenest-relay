@@ -354,6 +354,8 @@ class RemoteHandFSM:
             self.result = "error"
             self._state("error", msg)
         elif snippet:  # unrecognized — show what Google displays instead of a blank spinner
+            saved = self._obs.save_unknown()  # capture PNG+OCR so it can become a catalog entry (Phase 2)
+            _log(f"_on_unknown captured unrecognized screen → {saved}")
             self._state("working", f"Waiting — Google shows: {snippet}")
 
     # ---- helpers ----

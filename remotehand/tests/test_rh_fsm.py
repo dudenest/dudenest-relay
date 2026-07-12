@@ -292,6 +292,7 @@ class TestUnknownStall(unittest.TestCase):
         surfaced = [m for m in emit.msgs if m["type"] == "rh_state" and "Google shows" in m.get("message", "")]
         self.assertEqual(len(surfaced), 1)            # latched — surfaced exactly once
         self.assertIn("extra step", surfaced[0]["message"])
+        self.assertGreaterEqual(fsm._obs.saved_unknown, 1)  # captured the screen for cataloging (Phase 2)
 
     def test_unknown_counter_resets_on_recognized_page(self):
         # UNKNOWN just under threshold, then a real page, then UNKNOWN again must not fire early.

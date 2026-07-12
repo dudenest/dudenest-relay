@@ -23,6 +23,7 @@ class Observer(Protocol):
     def capture_captcha(self) -> bytes | None: ...
     def error_text(self) -> str: ...
     def locate(self, text: str, min_y: int = 0) -> tuple[int, int] | None: ...
+    def save_unknown(self) -> str | None: ...
 
 
 class ScrotObserver:
@@ -58,6 +59,24 @@ class ScrotObserver:
             return ocr_text(self.grab())
         except Exception:
             return ""
+
+    def save_unknown(self, directory: str = "/var/lib/dudenest/remotehand/unknown") -> str | None:
+        """Persist an unrecognised screen (PNG + OCR text) so it can be reviewed and turned into
+        a catalog entry (Phase 2 of the screen-catalog plan). Best-effort; never raises."""
+        try:
+            import os
+            import time
+            from rh_classify import ocr_text
+            os.makedirs(directory, exist_ok=True)
+            png = self.grab()
+            base = os.path.join(directory, "unknown-" + time.strftime("%Y%m%d-%H%M%S"))
+            with open(base + ".png", "wb") as f:
+                f.write(png)
+            with open(base + ".txt", "w", encoding="utf-8") as f:
+                f.write(ocr_text(png))
+            return base + ".png"
+        except Exception:
+            return None
 
     def locate(self, text: str, min_y: int = 0) -> tuple[int, int] | None:
         """Find the on-screen center of a word (e.g. a 'Continue'/'Allow' button)
@@ -140,6 +159,7 @@ class ScriptedObserver:
         self._err = err
         self._locate = locate
         self._i = 0
+        self.saved_unknown = 0
 
     def observe(self) -> PageState:
         st = self._states[min(self._i, len(self._states) - 1)]
@@ -149,3 +169,4 @@ class ScriptedObserver:
     def capture_captcha(self) -> bytes | None: return self._captcha
     def error_text(self) -> str: return self._err
     def locate(self, text: str, min_y: int = 0) -> tuple[int, int] | None: return self._locate
+    def save_unknown(self, directory=None) -> str | None: self.saved_unknown += 1; return None

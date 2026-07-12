@@ -22,7 +22,7 @@ const sidecarDir = "/usr/local/lib/dudenest/remotehand"
 const rawBase = "https://raw.githubusercontent.com/dudenest/dudenest-relay"
 
 var sidecarFiles = []string{
-	"rh_protocol.py", "rh_input.py", "rh_screen.py", "rh_fsm.py",
+	"rh_protocol.py", "rh_catalog.py", "rh_input.py", "rh_screen.py", "rh_fsm.py",
 	"rh_classify.py", "rh_crypto.py", "rh_browser.py", "rh_sidecar.py",
 }
 

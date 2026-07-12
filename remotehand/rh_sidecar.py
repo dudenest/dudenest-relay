@@ -56,7 +56,8 @@ class GatedObserver:
     def advance(self) -> None: self._i += 1
     def capture_captcha(self) -> bytes | None: return self._captcha
     def error_text(self) -> str: return self._err
-    def locate(self, text: str) -> tuple[int, int] | None: return None
+    def locate(self, text: str, min_y: int = 0) -> tuple[int, int] | None: return None
+    def save_unknown(self, directory=None) -> str | None: return None
 
 
 class Sidecar:

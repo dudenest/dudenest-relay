@@ -330,7 +330,7 @@ RH_DIR="/usr/local/lib/dudenest/remotehand"
 RH_BASE="https://raw.githubusercontent.com/$RELAY_REPO/main/remotehand"
 mkdir -p "$RH_DIR"
 RH_OK=1
-for f in rh_protocol.py rh_input.py rh_screen.py rh_fsm.py rh_classify.py rh_crypto.py rh_browser.py rh_sidecar.py; do
+for f in rh_protocol.py rh_catalog.py rh_input.py rh_screen.py rh_fsm.py rh_classify.py rh_crypto.py rh_browser.py rh_sidecar.py; do
   curl -fsSL "$RH_BASE/$f" -o "$RH_DIR/$f" || { warn "remote-hand: fetch $f failed"; RH_OK=0; }
 done
 if [[ $RH_OK -eq 1 ]]; then
