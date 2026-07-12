@@ -382,5 +382,28 @@ class TestTransientErrorNotTerminal(unittest.TestCase):
         self.assertIn("Something weird happened", last["message"])  # real page text, not opaque
 
 
+class TestRecaptchaCheckbox(unittest.TestCase):
+    """reCAPTCHA 'I'm not a robot' checkbox — machine-solvable: click the box + Next, no user prompt."""
+    def test_clicks_checkbox_then_next_no_user_prompt(self):
+        obs = LocateByWordObserver([PageState.CAPTCHA] * 7 + [PageState.PHONE],
+                                   {"robot": (790, 585), "next": (983, 733)},
+                                   err="Confirm you're not a robot\nI'm not a robot")
+        inj = RecordingInjector(); emit = RecordingEmitter()
+        fsm = RemoteHandFSM("s1", obs, inj, emit)
+        for _ in range(7):
+            fsm.tick()
+        self.assertIn(("click", 685, 585, 1), inj.calls)   # ticked the checkbox (robot_x - 105)
+        self.assertIn(("click", 983, 733, 1), inj.calls)   # clicked Next after verify
+        steps = [m.get("step") for m in emit.msgs if m["type"] == "rh_prompt"]
+        self.assertNotIn("captcha_static", steps)          # never asked the user to type a captcha
+
+    def test_image_challenge_still_prompts_user(self):
+        # A non-checkbox captcha ("select all…") must still surface to the user.
+        fsm, inj, emit = make([PageState.CAPTCHA], captcha=b"PNG", err="Select all images with a bus")
+        fsm.tick()
+        steps = [m.get("step") for m in emit.msgs if m["type"] == "rh_prompt"]
+        self.assertIn("captcha_static", steps)
+
+
 if __name__ == "__main__":
     unittest.main()

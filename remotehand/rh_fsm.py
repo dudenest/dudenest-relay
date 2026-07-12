@@ -65,6 +65,7 @@ class RemoteHandFSM:
         self._unknown_ticks = 0                # consecutive UNKNOWN observations (stall detection)
         self._unknown_surfaced = False         # latch: surface an unrecognized screen only once
         self._error_streak = 0                 # consecutive UNRECOGNIZED error observations (noise filter)
+        self._recaptcha_ticks = 0              # ticks spent on the "I'm not a robot" checkbox (click → verify → Next)
         self._started = False                  # instant-form: email prompt emitted before the browser renders
         self.done = False
         self.result: str | None = None
@@ -85,6 +86,8 @@ class RemoteHandFSM:
             self._unknown_surfaced = False
         if st is not PageState.ERROR:    # a non-error observation clears the unrecognized-error streak
             self._error_streak = 0
+        if st is not PageState.CAPTCHA:  # left the captcha page → reset the reCAPTCHA click sequence
+            self._recaptcha_ticks = 0
         {
             PageState.EMAIL: self._on_email, PageState.PASSWORD: self._on_password,
             PageState.CONSENT: self._on_consent, PageState.PHONE: self._on_phone,
@@ -220,6 +223,24 @@ class RemoteHandFSM:
                           [Field("code", "Verification code", "code")])
 
     def _on_captcha(self) -> None:  # §8.1 tightly-cropped challenge image
+        text = (self._obs.error_text() or "").lower()
+        # reCAPTCHA "I'm not a robot" checkbox — click the box (~105px left of the "robot"
+        # label), give it a beat to verify, then click Next. Machine-solvable, so we do NOT
+        # ask the user (they'd only see a checkbox they can't reach). Verified live: click
+        # locate('robot')-105 ticks the box → Next advances.
+        if re.search(r"i.?m not a robot|confirm you.?re not a robot", text):
+            self._recaptcha_ticks += 1
+            if self._recaptcha_ticks == 1:
+                pos = self._obs.locate("robot")
+                if pos is not None:
+                    self._inj.click(pos[0] - 105, pos[1])
+                self._state("working", "confirming you're not a robot")
+            elif 5 <= self._recaptcha_ticks <= 10:  # ~3s after the tick → verified → submit
+                nxt = self._obs.locate("Next")
+                if nxt is not None:
+                    self._inj.click(*nxt)
+            return
+        # image / "select all squares" challenge — needs a human; ask the user (existing behavior)
         if "captcha" not in self._prompted:
             self._prompted.add("captcha")
             import base64
