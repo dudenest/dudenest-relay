@@ -153,7 +153,8 @@ def main() -> None:
             oauth_url = os.environ.get("RH_OAUTH_URL", "")
             if oauth_url:  # launch the vanilla browser to the OAuth URL on this display
                 from rh_browser import launch
-                proc = launch(oauth_url, display, os.environ.get("RH_PROFILE", f"/tmp/rh-{session_id}"))
+                # B4: persistent profile (not /tmp/rh-<session>) so cookies + Google 'trusted device' survive across logins
+                proc = launch(oauth_url, display, os.environ.get("RH_PROFILE", "/var/lib/dudenest/remotehand/profile"))
                 _log(f"browser launched pid={proc.pid}")
             observer = ScrotObserver(display, classifier=make_classifier())
             sc = Sidecar(observer, XdotoolInjector(display), keys, _stdout_writer, session_id)
