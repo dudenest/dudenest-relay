@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [v0.24.2] — 2026-07-12
 
 ### Fixed
 - **Double-nested cloud folder (`dudenest/dudenest/…`).** The base folder "dudenest" was applied twice — once by `PathFor` (`PathRoot` default "dudenest") and again by the provider's own base folder (`--gdrive-path` / `--mega-path`, default "dudenest") — so every upload since v0.17.2 landed at `dudenest/dudenest/photos/…`. `PathRoot` now defaults to "" (the provider owns the single base); new uploads store at `dudenest/photos/…`. Read-compatible: existing files keep their recorded location and still resolve (their extra prefix maps to where they physically are), and CloudID-based access is path-independent.
