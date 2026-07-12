@@ -151,7 +151,7 @@ type AccountPolicyConfig struct {
 
 	// --- Path layout ---
 	PathScheme string `json:"path_scheme"` // "year_month" (default) | "year_month_day" | "flat"
-	PathRoot   string `json:"path_root"`   // default "dudenest"
+	PathRoot   string `json:"path_root"`   // default "" — provider owns the base folder; extra prefix only if set (non-"" double-nests)
 
 	// --- Drain / Remove ---
 	DrainMaxConcurrentMigrations int   `json:"drain_max_concurrent_migrations"`
@@ -189,7 +189,7 @@ func DefaultPolicy() AccountPolicyConfig {
 		RebalanceOnAdd:                 "manual",
 		RebalanceImbalanceThresholdPct: 30,
 		PathScheme:                     "year_month", // per user decision §11 #5: zostaje YYYY/MM
-		PathRoot:                       "dudenest",
+		PathRoot:                       "", // provider base ("dudenest") is the only root; non-"" double-nests (fixed 2026-07)
 		DrainMaxConcurrentMigrations:   4,
 		DrainBatchSizeBytes:            100 * 1024 * 1024,
 		DrainBandwidthLimitMBPerSec:    0,
@@ -206,21 +206,22 @@ func DefaultPolicy() AccountPolicyConfig {
 // timestamp the file should be filed under. Pure function — no I/O. Used by both the upload
 // and move (rebucket) paths so they always agree.
 func (cfg AccountPolicyConfig) PathFor(folder, name string, when time.Time) string {
-	root := cfg.PathRoot
-	if root == "" {
-		root = "dudenest"
+	// The cloud provider already roots every file under its own base folder (--gdrive-path /
+	// --mega-path, default "dudenest"). PathRoot is an OPTIONAL extra prefix ON TOP of that; a
+	// non-empty default here double-nested every upload as dudenest/dudenest/… (fixed 2026-07).
+	// Default "" → the provider base is the only root. Set PathRoot only to deliberately nest deeper.
+	prefix := ""
+	if cfg.PathRoot != "" {
+		prefix = cfg.PathRoot + "/"
 	}
 	when = when.UTC()
 	switch cfg.PathScheme {
 	case "year_month_day":
-		return fmt.Sprintf("%s/%s/%04d/%02d/%02d/%s", root, folder, when.Year(), int(when.Month()), when.Day(), name)
+		return fmt.Sprintf("%s%s/%04d/%02d/%02d/%s", prefix, folder, when.Year(), int(when.Month()), when.Day(), name)
 	case "flat":
-		return fmt.Sprintf("%s/%s/%s", root, folder, name)
-	case "year_month":
-		fallthrough
-	default:
-		// Default + unknown values fall back to year_month (current production scheme).
-		return fmt.Sprintf("%s/%s/%04d/%02d/%s", root, folder, when.Year(), int(when.Month()), name)
+		return fmt.Sprintf("%s%s/%s", prefix, folder, name)
+	default: // year_month (current production scheme) + unknown values
+		return fmt.Sprintf("%s%s/%04d/%02d/%s", prefix, folder, when.Year(), int(when.Month()), name)
 	}
 }
 

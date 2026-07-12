@@ -283,6 +283,23 @@ func (s *Scanner) findProvider(providerID string) types.CloudProvider {
 //   - provider not loaded
 //   - provider doesn't implement CloudFullLister (e.g. mega/local)
 //   - status.WholeDriveBootstrapped already true (use ResetWholeDriveBootstrap to re-trigger)
+// knownCloudIDs snapshots the CloudIDs already tracked in the blockmap (relay uploads + prior
+// foreign). Scan callers use it to skip re-registering an already-known file — RegisterForeign
+// itself does not dedup, so every caller that walks the cloud MUST filter through this set or it
+// duplicates relay-uploaded files as stray Foreign FileMaps.
+func (s *Scanner) knownCloudIDs() map[string]bool {
+	maps, _ := s.pipeline.ListFiles()
+	known := make(map[string]bool, len(maps))
+	for _, fm := range maps {
+		for _, r := range fm.Replicas {
+			if r.CloudID != "" {
+				known[r.CloudID] = true
+			}
+		}
+	}
+	return known
+}
+
 func (s *Scanner) BootstrapWholeDrive(providerID string) error {
 	prov := s.findProvider(providerID)
 	if prov == nil { return nil }
@@ -291,11 +308,19 @@ func (s *Scanner) BootstrapWholeDrive(providerID string) error {
 	st, _ := s.loadStatus(providerID)
 	if st == nil { st = &Status{ProviderID: providerID} }
 	if st.WholeDriveBootstrapped { return nil }
+	// Dedup set: CloudIDs already in our blockmap (relay uploads + prior foreign). RegisterForeign
+	// does NOT dedup itself, so without this the bootstrap re-registers every relay-uploaded file as
+	// a duplicate Foreign FileMap — it then shows twice, the foreign copy misfiled under Files
+	// (its Location is a bare name, so folderFromFileMap can't see the photos/ prefix).
+	known := s.knownCloudIDs()
 	total := 0
 	err := lister.ListAll(func(entries []types.Entry) bool {
 		for _, e := range entries {
-			if e.IsDir { continue }
-			if err := s.pipeline.RegisterForeign(providerID, e.CloudID, e.Name, e.Path, e.Size, e.MTime); err == nil { total++ }
+			if e.IsDir || known[e.CloudID] { continue }
+			if err := s.pipeline.RegisterForeign(providerID, e.CloudID, e.Name, e.Path, e.Size, e.MTime); err == nil {
+				known[e.CloudID] = true // guard against duplicate entries within the same walk
+				total++
+			}
 		}
 		return true // continue paginating
 	})
@@ -357,14 +382,17 @@ func (s *Scanner) IncrementalPoll(providerID string) error {
 	if err != nil { return fmt.Errorf("poll: %w", err) }
 	added := 0
 	removed := 0
+	known := s.knownCloudIDs() // skip files already tracked (incl. this relay's own uploads) — RegisterForeign does not dedup
 	for _, c := range changes {
 		if c.Removed {
 			if err := s.pipeline.DeleteByCloudID(providerID, c.CloudID); err == nil { removed++ }
 			continue
 		}
-		if c.IsDir { continue }
-		// RegisterForeign is idempotent — dedup-skips by CloudID, so re-edits of already-tracked files are no-ops.
-		if err := s.pipeline.RegisterForeign(providerID, c.CloudID, c.Name, c.Path, c.Size, c.MTime); err == nil { added++ }
+		if c.IsDir || known[c.CloudID] { continue }
+		if err := s.pipeline.RegisterForeign(providerID, c.CloudID, c.Name, c.Path, c.Size, c.MTime); err == nil {
+			known[c.CloudID] = true
+			added++
+		}
 	}
 	st.ChangesPageToken = newTok
 	st.ChangesLastPollAt = time.Now().UTC()
@@ -410,13 +438,7 @@ func (s *Scanner) runScan(providerID string, prov types.CloudProvider, lister ty
 		s.mu.Unlock()
 	}()
 	// Build dedup set: all CloudIDs already present in our blockmap.
-	maps, _ := s.pipeline.ListFiles()
-	known := make(map[string]bool, 1024)
-	for _, fm := range maps {
-		for _, r := range fm.Replicas {
-			if r.CloudID != "" { known[r.CloudID] = true }
-		}
-	}
+	known := s.knownCloudIDs()
 	// Start at the configured base folder root (prefix="").
 	startFolder := ""
 	if r.status.State == StatePaused && r.status.CurrentFolder != "" { startFolder = r.status.CurrentFolder }

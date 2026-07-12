@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Double-nested cloud folder (`dudenest/dudenest/…`).** The base folder "dudenest" was applied twice — once by `PathFor` (`PathRoot` default "dudenest") and again by the provider's own base folder (`--gdrive-path` / `--mega-path`, default "dudenest") — so every upload since v0.17.2 landed at `dudenest/dudenest/photos/…`. `PathRoot` now defaults to "" (the provider owns the single base); new uploads store at `dudenest/photos/…`. Read-compatible: existing files keep their recorded location and still resolve (their extra prefix maps to where they physically are), and CloudID-based access is path-independent.
+- **File shown twice, the copy misfiled under Files.** The scan engine's whole-drive bootstrap and Changes poll called `RegisterForeign` for every cloud file *without* checking already-known CloudIDs (the "idempotent, dedup-skips" claim was never true), so each relay-uploaded photo was re-registered as a stray Foreign FileMap with a bare-name location → classified as Files. Both scan paths now filter through the blockmap's known-CloudID set (shared `knownCloudIDs` helper) before registering.
+
 ### Changed
 - **Method-3 anti-detection (B4/B5).** Google was disabling accounts signed in through the relay — the cause was the automation fingerprint, not the (residential) IP. Fixes: **(B4)** the OAuth browser now reuses a **persistent** `--user-data-dir` (`/var/lib/dudenest/remotehand/profile`) instead of a throwaway per-session dir, so cookies and Google's "trusted device" survive across logins (stale `Singleton*` locks are cleared, cookies kept). **(B5)** the fleet now installs **real Google Chrome** (amd64 Debian/Ubuntu; arm falls back to Chromium) and the method-3 launcher prefers it over open-source Chromium, whose fingerprint Google can distinguish. The installer also adds a **timezone-from-IP** sync (`dudenest-tz-sync` oneshot + daily timer) so the browser's JS timezone matches the egress IP's geolocation. `provision` logs a hint when a binary-only update is still on Chromium.
 

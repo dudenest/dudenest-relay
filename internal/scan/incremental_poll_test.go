@@ -14,12 +14,13 @@ type fakePipeline struct {
 	mu              sync.Mutex
 	registerCalls   []registerCall
 	deleteCalls     []deleteCall
+	knownMaps       []*types.FileMap // returned by ListFiles — drives the scan dedup set
 }
 
 type registerCall struct{ providerID, cloudID, name, path string; size int64; mtime time.Time }
 type deleteCall struct{ providerID, cloudID string }
 
-func (f *fakePipeline) ListFiles() ([]*types.FileMap, error) { return nil, nil }
+func (f *fakePipeline) ListFiles() ([]*types.FileMap, error) { return f.knownMaps, nil }
 func (f *fakePipeline) RegisterForeign(providerID, cloudID, name, path string, size int64, mtime time.Time) error {
 	f.mu.Lock(); defer f.mu.Unlock()
 	f.registerCalls = append(f.registerCalls, registerCall{providerID, cloudID, name, path, size, mtime})
@@ -147,6 +148,28 @@ func TestBootstrapWholeDrive_IndexesAllPagesIdempotent(t *testing.T) {
 	if err := s.ResetWholeDriveBootstrap(fl.ID()); err != nil { t.Fatalf("reset: %v", err) }
 	if err := s.BootstrapWholeDrive(fl.ID()); err != nil { t.Fatalf("post-reset: %v", err) }
 	if len(fp.registerCalls) != 6 { t.Fatalf("post-reset: want 6 total (fake pipeline doesn't dedup), got %d", len(fp.registerCalls)) }
+}
+
+// Bootstrap must NOT re-register a file the relay already tracks (upload FileMap with that CloudID),
+// or the file shows twice — the foreign copy misfiled under Files. Regression for the demo bug.
+func TestBootstrapWholeDrive_SkipsKnownCloudIDs(t *testing.T) {
+	now := time.Now().UTC()
+	fp := &fakePipeline{knownMaps: []*types.FileMap{{
+		FileID:   "upload-1",
+		Replicas: []types.Replica{{CloudID: "a", Location: "gdrive:x@y.com:photos/2026/07/known.jpg"}},
+	}}}
+	fl := &fakeFullLister{
+		fakePoller: &fakePoller{id: "gdrive:x@y.com"},
+		pages: [][]types.Entry{{
+			{CloudID: "a", Name: "known.jpg", Path: "photos/2026/07/known.jpg", Size: 100, MTime: now}, // already tracked → skip
+			{CloudID: "b", Name: "direct.pdf", Path: "direct.pdf", Size: 200, MTime: now},               // genuinely foreign → register
+		}},
+	}
+	s, err := New(fp, makeProviderFn(fl), t.TempDir())
+	if err != nil { t.Fatalf("scanner.New: %v", err) }
+	if err := s.BootstrapWholeDrive(fl.ID()); err != nil { t.Fatalf("bootstrap: %v", err) }
+	if len(fp.registerCalls) != 1 { t.Fatalf("want 1 RegisterForeign (skip known CloudID a), got %d", len(fp.registerCalls)) }
+	if fp.registerCalls[0].cloudID != "b" { t.Fatalf("registered wrong file: got %q, want b", fp.registerCalls[0].cloudID) }
 }
 
 // Providers without CloudFullLister (only CloudChangesPoller, or none) skip bootstrap silently.

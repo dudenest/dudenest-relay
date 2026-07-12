@@ -225,16 +225,24 @@ func TestDisplayID_PaddingRules(t *testing.T) {
 func TestPathFor_DefaultsToYearMonth(t *testing.T) {
 	cfg := types.DefaultPolicy()
 	when := time.Date(2026, 5, 22, 14, 30, 0, 0, time.UTC)
+	// Default PathRoot is "" — the provider owns the base "dudenest" folder, so PathFor must NOT
+	// prepend it (a non-"" root double-nested every upload as dudenest/dudenest/…; fixed 2026-07).
 	got := cfg.PathFor("photos", "IMG_001.jpg", when)
-	want := "dudenest/photos/2026/05/IMG_001.jpg"
+	want := "photos/2026/05/IMG_001.jpg"
 	if got != want {
 		t.Errorf("PathFor default: got %q, want %q", got, want)
 	}
 	cfg.PathScheme = "year_month_day"
 	got = cfg.PathFor("photos", "IMG_001.jpg", when)
-	want = "dudenest/photos/2026/05/22/IMG_001.jpg"
+	want = "photos/2026/05/22/IMG_001.jpg"
 	if got != want {
 		t.Errorf("PathFor day scheme: got %q, want %q", got, want)
+	}
+	// Explicit PathRoot still nests deliberately (opt-in).
+	cfg.PathScheme = "year_month"
+	cfg.PathRoot = "archive"
+	if got := cfg.PathFor("files", "a.bin", when); got != "archive/files/2026/05/a.bin" {
+		t.Errorf("PathFor explicit root: got %q", got)
 	}
 }
 
