@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.24.1] — 2026-07-12
+
+### Fixed
+- **Dedup index now cleaned on delete.** `DeleteFile` removes the file's SHA-256 entry from `sha_index` (new `Index.RemoveFile`). Previously the index kept the entry after a file was deleted, so re-uploading identical content dedup-hit a now-deleted canonical and produced a folder-less alias — the re-uploaded photo vanished from `/photos` and downloads broke. This silently capped the demo seed at 137/200 (63 photos looped delete→re-upload→alias forever). If a removed canonical still has live aliases, the hash now resolves empty so the next identical upload self-heals into a fresh canonical.
+
+### Added
+- **Remote-Hand screen catalog.** Screen classification moved to a single declarative source (`rh_catalog.py`): each known Google screen is a `Screen(id, state, patterns, action)` entry; `rh_classify` is now a thin interpreter over it. Unrecognized screens are captured (PNG + OCR text under `.../remotehand/unknown/`) for review and later cataloging. reCAPTCHA "I'm not a robot" checkbox is auto-solved and 2FA prompts re-arm when Google re-sends a code.
+
 ## [v0.24.0] — 2026-07-11 — Method 3: Remote-Hand CDP-free mediated login
 
 ### Added

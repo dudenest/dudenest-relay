@@ -129,6 +129,33 @@ func (i *Index) InsertAlias(hash, fileID string) error {
 	return i.save()
 }
 
+// RemoveFile deletes any entry (canonical or alias) matching fileID, wherever it lives in the index.
+// Without this, deleting a file and re-uploading identical content would dedup-hit the stale entry
+// and produce a folder-less alias pointing at the now-deleted canonical (data integrity break; it
+// also silently capped the demo seed at 137/200). If removing a canonical leaves only aliases,
+// Lookup returns "" for that hash so the next identical upload proceeds as a fresh canonical (self-
+// heals). Empty entry lists drop the hash key. No-op (no error) if fileID is unknown.
+func (i *Index) RemoveFile(fileID string) error {
+	if fileID == "" { return fmt.Errorf("fileID required") }
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	changed := false
+	for hash, entries := range i.byHash {
+		kept := entries[:0:0]
+		for _, e := range entries {
+			if e.FileID == fileID { changed = true; continue }
+			kept = append(kept, e)
+		}
+		if len(kept) == 0 {
+			delete(i.byHash, hash)
+		} else {
+			i.byHash[hash] = kept
+		}
+	}
+	if !changed { return nil }
+	return i.save()
+}
+
 // Stats returns a snapshot for ops/admin endpoints. Cheap (in-memory only).
 func (i *Index) Stats() (totalHashes, totalEntries, aliasCount int) {
 	i.mu.RLock()

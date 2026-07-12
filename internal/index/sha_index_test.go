@@ -48,6 +48,33 @@ func TestCanonicalPreferredOverAlias(t *testing.T) {
 	}
 }
 
+// F1-6: RemoveFile drops the entry so re-upload of identical content is treated as fresh (no dead alias).
+func TestRemoveFile(t *testing.T) {
+	dir := t.TempDir()
+	idx := New(dir)
+	_ = idx.Insert("hashE", "file-canon")
+	if err := idx.RemoveFile("file-canon"); err != nil { t.Fatalf("remove: %v", err) }
+	if got := idx.Lookup("hashE"); got != "" { t.Errorf("after remove: got %q, want empty (re-upload must re-store)", got) }
+	if h, _, _ := idx.Stats(); h != 0 { t.Errorf("empty hash key should be dropped, got %d hashes", h) }
+	// Persisted removal survives reload.
+	idx2 := New(dir)
+	if err := idx2.Load(); err != nil { t.Fatalf("load: %v", err) }
+	if got := idx2.Lookup("hashE"); got != "" { t.Errorf("after reload: got %q, want empty", got) }
+	// Unknown fileID is a no-op, not an error.
+	if err := idx.RemoveFile("file-nonexistent"); err != nil { t.Errorf("remove unknown: %v", err) }
+}
+
+// F1-7: Removing the canonical while an alias remains → Lookup returns "" so the next upload self-heals.
+func TestRemoveCanonicalLeavesAliasSelfHealing(t *testing.T) {
+	dir := t.TempDir()
+	idx := New(dir)
+	_ = idx.Insert("hashF", "file-canon")
+	_ = idx.InsertAlias("hashF", "file-alias")
+	if err := idx.RemoveFile("file-canon"); err != nil { t.Fatalf("remove: %v", err) }
+	if got := idx.Lookup("hashF"); got != "" { t.Errorf("all-alias hash must Lookup empty, got %q", got) }
+	if h, _, a := idx.Stats(); h != 1 || a != 1 { t.Errorf("expected 1 hash 1 alias remaining, got %d hashes %d aliases", h, a) }
+}
+
 // F1-5: Stats counts hashes/entries/aliases correctly.
 func TestStats(t *testing.T) {
 	dir := t.TempDir()

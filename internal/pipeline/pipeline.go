@@ -351,6 +351,11 @@ func (p *Pipeline) DeleteFile(fileID string) error {
 			firstErr = fmt.Errorf("delete replica %s: %w", r.ID, dErr)
 		}
 	}
+	if p.idx != nil && fm.Hash != "" { // drop the dedup entry so re-uploading identical content re-stores cleanly (no dead-canonical alias)
+		if ierr := p.idx.RemoveFile(fileID); ierr != nil {
+			log.Printf("delete: sha_index remove failed for %s: %v (cloud replicas already deleted)", fileID, ierr)
+		}
+	}
 	return firstErr
 }
 
