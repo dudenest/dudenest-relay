@@ -19,6 +19,13 @@ from rh_protocol import Field, PageState, rh_prompt, rh_state
 
 _UNKNOWN_STALL_TICKS = 10  # ~8s at 0.8s/tick before treating a stuck UNKNOWN as an unexpected screen
 _ERROR_CONFIRM_TICKS = 3   # an UNRECOGNIZED error must persist this many observations before we give up
+# B3: terminals where nothing is left to see/do → end the session so the user can restart. Anything
+# else terminal (account blocked/unavailable) or unrecognized is SERIOUS: capture it and keep the
+# browser alive so a human can read exactly what Google shows and take over, instead of flashing by.
+_RESTARTABLE_TERMINALS = frozenset({
+    "Too many attempts — try again later",
+    "Session expired (idle too long) — please start again",
+})
                            # (a single garbled OCR frame on a loading page must not kill the flow)
 
 # OCR boilerplate to drop from the on-screen snippet we surface to Flutter (browser chrome,
@@ -307,23 +314,30 @@ class RemoteHandFSM:
             _log(f"_on_error recoverable: field={field!r} msg={msg!r}")
             self._reprompt(field, msg)
             return
-        if msg != "Sign-in failed":  # recognized terminal (session expired / too many / disabled)
+        if msg != "Sign-in failed":  # recognized terminal
             self._error_shown = True
-            _log(f"_on_error terminal: msg={msg!r}")
-            self.done = True; self.result = "error"; self._state("error", msg)
+            if msg in _RESTARTABLE_TERMINALS:  # nothing to see/do → end so the user can start over
+                _log(f"_on_error terminal (restartable): msg={msg!r}")
+                self.done = True; self.result = "error"; self._state("error", msg)
+            else:  # B3: serious (account blocked/unavailable) → capture + keep session alive for a human
+                saved = self._obs.save_unknown()
+                _log(f"_on_error terminal (serious, kept alive): msg={msg!r} → {saved}")
+                self.result = "error"; self._state("error", msg)  # no done=True: browser stays for takeover
             return
         # UNRECOGNIZED error: a single frame is almost always OCR noise on a page that is
         # still settling (a garbled frame must NOT kill the flow — that terminated a valid
-        # login on a normal password page). Only give up if it persists, and then tell
-        # Flutter exactly what Google is showing instead of an opaque 'Sign-in failed'.
+        # login on a normal password page). Only give up if it persists.
         self._error_streak += 1
         if self._error_streak < _ERROR_CONFIRM_TICKS:
             return  # re-observe; tick() clears the streak the moment a known page appears
         self._error_shown = True
+        saved = self._obs.save_unknown()  # B3: persist the unrecognized screen for review/cataloging
         snippet = _screen_snippet(err_text)
-        _log(f"_on_error unrecognized persisted x{self._error_streak}: {snippet!r}")
-        self.done = True; self.result = "error"
-        self._state("error", f"Sign-in failed. Google shows: {snippet}" if snippet else "Sign-in failed")
+        _log(f"_on_error unrecognized persisted x{self._error_streak}: {snippet!r} → {saved}")
+        # B3: do NOT auto-close — keep the browser/display alive so a human can read the screen and take
+        # over (the manager timeout still reaps a truly abandoned session). Surface the real text.
+        self.result = "error"
+        self._state("error", f"Google shows: {snippet}" if snippet else "Sign-in failed — unrecognized screen")
 
     def _reprompt(self, field: str, msg: str) -> None:
         step, specs = self._REPROMPT[field]

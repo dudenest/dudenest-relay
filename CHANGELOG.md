@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Changed
+- **Method-3 keeps serious/unknown screens on screen instead of flashing by (B3).** When Google shows a blocking screen (e.g. "this account is unavailable") or an unrecognized page, the FSM now captures it (screenshot + OCR under `.../remotehand/unknown/`) and **keeps the browser/display alive** with the real screen text surfaced, so a human can read it and take over — previously it force-closed the session and the screen vanished before the user could see it. Only genuinely restartable terminals (session expired, too many attempts) still auto-end.
+
 ## [v0.24.2] — 2026-07-12
 
 ### Fixed

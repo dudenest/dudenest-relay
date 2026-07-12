@@ -371,13 +371,16 @@ class TestTransientErrorNotTerminal(unittest.TestCase):
         fsm.tick(); fsm.tick()                       # PASSWORD → SUCCESS
         self.assertEqual(fsm.result, "success")
 
-    def test_persistent_unrecognized_error_terminates_with_snippet(self):
+    def test_persistent_unrecognized_error_surfaces_snippet_but_keeps_alive(self):
+        # B3: a persisted unrecognized screen is captured and surfaced with its real text, but the
+        # session is NOT force-closed — the browser/display stays so a human can read it / take over.
         fsm, inj, emit = make([PageState.ERROR] * (_ERROR_CONFIRM_TICKS + 1),
                               err="Something weird happened on Google")
         for _ in range(_ERROR_CONFIRM_TICKS + 1):
             fsm.tick()
-        self.assertTrue(fsm.done)
+        self.assertFalse(fsm.done)                          # kept alive (was: terminated)
         self.assertEqual(fsm.result, "error")
+        self.assertGreaterEqual(fsm._obs.saved_unknown, 1)  # captured for review
         last = emit.msgs[-1]
         self.assertEqual(last["state"], "error")
         self.assertIn("Something weird happened", last["message"])  # real page text, not opaque
@@ -416,6 +419,35 @@ class TestRecaptchaCheckbox(unittest.TestCase):
         fsm.tick()
         steps = [m.get("step") for m in emit.msgs if m["type"] == "rh_prompt"]
         self.assertIn("captcha_static", steps)
+
+
+class TestB3SeriousScreensKeptAlive(unittest.TestCase):
+    """B3: serious/unknown terminal screens are captured + the session stays alive for a human,
+    instead of flashing by (the account-blocked screen the user could not see)."""
+
+    def test_account_unavailable_captures_and_keeps_alive(self):
+        fsm, inj, emit = make([PageState.ERROR], err="Sorry, couldn't sign you in")
+        fsm.tick()
+        self.assertFalse(fsm.done)                                   # NOT force-closed
+        self.assertEqual(fsm.result, "error")
+        self.assertGreaterEqual(fsm._obs.saved_unknown, 1)           # screen captured for the human
+        msgs = [m for m in emit.msgs if m["type"] == "rh_state" and m["state"] == "error"]
+        self.assertTrue(any("unavailable" in m["message"].lower() for m in msgs))
+
+    def test_session_expired_is_restartable_and_closes(self):
+        fsm, inj, emit = make([PageState.ERROR], err="Your session has expired")
+        fsm.tick()
+        self.assertTrue(fsm.done)                                    # restartable → end so user restarts
+        self.assertEqual(fsm.result, "error")
+
+    def test_unrecognized_screen_persisted_captures_and_keeps_alive(self):
+        fsm, inj, emit = make([PageState.ERROR] * 5, err="brand new google screen nobody has seen yet")
+        for _ in range(5):
+            fsm.tick()
+        self.assertFalse(fsm.done)                                   # unknown screen → kept alive, not killed
+        self.assertGreaterEqual(fsm._obs.saved_unknown, 1)           # captured for review/cataloging
+        surfaced = [m for m in emit.msgs if m["type"] == "rh_state" and "Google shows" in m.get("message", "")]
+        self.assertTrue(surfaced)                                    # real screen text surfaced, not opaque fail
 
 
 if __name__ == "__main__":
