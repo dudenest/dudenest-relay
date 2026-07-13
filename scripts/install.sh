@@ -86,7 +86,7 @@ DEB_ARCH="$(dpkg --print-architecture 2>/dev/null || echo unknown)"
 if [[ "$DEB_ARCH" == "amd64" && ( "$DISTRO_ID" == "debian" || "$DISTRO_ID" == "ubuntu" ) ]]; then
   if ! [[ -f /etc/apt/sources.list.d/google-chrome.list ]]; then
     install -d -m 755 /etc/apt/keyrings
-    curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
+    curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --batch --yes --dearmor -o /etc/apt/keyrings/google-chrome.gpg
     echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
     ok "Added Google Chrome apt repo"
   fi

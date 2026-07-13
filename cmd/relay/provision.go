@@ -151,7 +151,7 @@ func ensureAntiAbuseHost() {
 	script := `set -e
 export DEBIAN_FRONTEND=noninteractive
 install -d -m 755 /etc/apt/keyrings
-if [ ! -f /etc/apt/sources.list.d/google-chrome.list ]; then curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg; echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main' > /etc/apt/sources.list.d/google-chrome.list; apt-get update -qq; fi
+if [ ! -f /etc/apt/sources.list.d/google-chrome.list ] || [ ! -f /etc/apt/keyrings/google-chrome.gpg ]; then curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --batch --yes --dearmor -o /etc/apt/keyrings/google-chrome.gpg; echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main' > /etc/apt/sources.list.d/google-chrome.list; apt-get update -qq; fi
 dpkg --configure -a || true
 apt-get install -y --fix-broken || true
 chrome_ok() { [ -x /usr/bin/google-chrome-stable ] && [ "$(dpkg-query -W -f='${Status}' google-chrome-stable 2>/dev/null || true)" = "install ok installed" ]; }
