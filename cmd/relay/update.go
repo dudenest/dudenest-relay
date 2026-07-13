@@ -40,8 +40,9 @@ func updateCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Current version: %s\n", Version)
 			if url, target := os.Getenv("DUDENEST_RELAY_DOWNLOAD_URL"), os.Getenv("DUDENEST_RELAY_TARGET_VERSION"); url != "" && target != "" {
+				defer clearSystemdUpdateEnv()
 				fmt.Printf("Hub-provided target: %s\n", target)
-				if Version != "dev" && Version == target {
+				if Version != "dev" && !versionGreater(target, Version) {
 					fmt.Println("Already up to date.")
 					return nil
 				}
@@ -140,6 +141,45 @@ func githubToken() string {
 		}
 	}
 	return ""
+}
+
+func clearSystemdUpdateEnv() {
+	if runtime.GOOS == "linux" {
+		_ = exec.Command("systemctl", "unset-environment", "DUDENEST_RELAY_DOWNLOAD_URL", "DUDENEST_RELAY_TARGET_VERSION").Run()
+	}
+}
+
+func versionGreater(a, b string) bool {
+	ax, ay, az, okA := parseVersion(a)
+	bx, by, bz, okB := parseVersion(b)
+	if !okA || !okB {
+		return a > b
+	}
+	if ax != bx {
+		return ax > bx
+	}
+	if ay != by {
+		return ay > by
+	}
+	return az > bz
+}
+
+func parseVersion(v string) (int, int, int, bool) {
+	v = strings.TrimPrefix(v, "v")
+	parts := strings.Split(v, ".")
+	if len(parts) != 3 {
+		return 0, 0, 0, false
+	}
+	var out [3]int
+	for i, p := range parts {
+		for _, r := range p {
+			if r < '0' || r > '9' {
+				return 0, 0, 0, false
+			}
+			out[i] = out[i]*10 + int(r-'0')
+		}
+	}
+	return out[0], out[1], out[2], true
 }
 
 func archSuffix() string {
