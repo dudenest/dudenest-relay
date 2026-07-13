@@ -189,6 +189,16 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 TZT
+if command -v avahi-daemon >/dev/null 2>&1 || [ -d /etc/avahi/services ]; then
+install -d -m 755 /etc/avahi/services
+cat >/etc/avahi/services/dudenest-relay.service <<'AVAHI'
+<?xml version="1.0" standalone='no'?><!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group><name replace-wildcards="yes">Dudenest Relay on %h</name><service><type>_dudenest-relay._tcp</type><port>8086</port><txt-record>version=VERSION_PLACEHOLDER</txt-record><txt-record>path=/pairing/info</txt-record></service></service-group>
+AVAHI
+perl -0pi -e 's/VERSION_PLACEHOLDER/'"$DUDENEST_RELAY_VERSION"'/g' /etc/avahi/services/dudenest-relay.service 2>/dev/null || true
+systemctl enable --now avahi-daemon >/dev/null 2>&1 || true
+systemctl try-restart avahi-daemon >/dev/null 2>&1 || true
+fi
 viewer_service=dudenest-kiosk.service
 if [ -f /etc/systemd/system/dudenest-console-viewer.service ]; then viewer_service=dudenest-console-viewer.service; fi
 if [ -f "/etc/systemd/system/$viewer_service" ]; then perl -0pi -e 's#dudenest noVNC kiosk#dudenest noVNC console viewer#i; s#/usr/local/bin/chromium#/usr/local/bin/dudenest-browser#g; s#/usr/bin/chromium#/usr/local/bin/dudenest-browser#g; s#/usr/bin/google-chrome-stable#/usr/local/bin/dudenest-browser#g' "/etc/systemd/system/$viewer_service"; fi
@@ -199,7 +209,7 @@ systemctl enable --now dudenest-tz-sync.timer >/dev/null 2>&1 || true
 [ -f "/etc/systemd/system/$viewer_service" ] && systemctl try-restart "$viewer_service" >/dev/null 2>&1 || true
 `
 	cmd := exec.Command("bash", "-c", script)
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(), "DUDENEST_RELAY_VERSION="+Version)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		log.Printf("provision: B5 host migration failed: %v (%s)", err, tail(out, 400))
 		return

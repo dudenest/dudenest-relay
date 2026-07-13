@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **LAN discovery prototype prepared.** Relay serves unauthenticated `GET /pairing/info` with safe public metadata only, and installer/provisioning advertises `_dudenest-relay._tcp` via Avahi/mDNS with `path=/pairing/info` for future local pairing.
 - **Remote-Hand Chrome first-run surfaces are suppressed.** The Chrome launcher now passes `--no-first-run`, `--no-default-browser-check`, notification/discovery/translate disables, and the FSM can dismiss the Chrome Welcome screen if it still appears.
 - **Installer/provisioner keep kiosk compatibility pending a full rename.** The current visual console service remains behavior-compatible; full `dudenest-console-viewer.service` migration is tracked as a small follow-up to avoid a risky fleet rename in this security release.
 - **Method-3 keeps serious/unknown screens on screen instead of flashing by (B3).** When Google shows a blocking screen (e.g. "this account is unavailable") or an unrecognized page, the FSM now captures it (screenshot + OCR under `.../remotehand/unknown/`) and **keeps the browser/display alive** with the real screen text surfaced, so a human can read it and take over — previously it force-closed the session and the screen vanished before the user could see it. Only genuinely restartable terminals (session expired, too many attempts) still auto-end.

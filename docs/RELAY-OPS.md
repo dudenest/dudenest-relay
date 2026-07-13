@@ -20,6 +20,10 @@ This is the most common source of confusion when reading the dudenest sources. B
 
 **Implication for design docs in this repo**: when a plan mentions "Docker secret" or "Swarm secret", it almost always refers to the **backup side** (or another SaaS component the relay talks to), not the relay itself. The relay only ever speaks HTTP to those services. If you see a design suggesting the relay runs in a container, that's a mistake — the explicit decision (with full rationale in §"DEPRECATED: Swarm deployment" below) is that it does not.
 
+### LAN discovery prototype
+
+The relay exposes unauthenticated `GET /pairing/info` on the local API port for future LAN pairing. It returns only safe public metadata (`relay_id`, `version`, `status=claimed|unclaimed`, `public_url`, `pairing_mode=local`, `path`) and must never include `relay_secret`, `jwt_secret`, cloud/provider accounts, tokens, backups, or file metadata. Installer/provisioning advertises `_dudenest-relay._tcp` via Avahi/mDNS on port `8086` with TXT `path=/pairing/info`; Avahi failures are non-fatal.
+
 ---
 
 ## 🧩 Architecture: Full-Stack Relay (v0.8.0+)

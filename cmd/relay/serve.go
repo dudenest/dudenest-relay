@@ -399,7 +399,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 	} // preload owner from creds (set before ListenAndServe, no races)
 	mux.Handle("/ws", requireAuthHandlerWithReg(lr, wsHub)) // WebSocket: protected relay→Flutter auth/Remote-Hand channel
 	authSrv.RegisterRoutesWithAuth(mux, func(h http.HandlerFunc) http.HandlerFunc { return requireAuthWithReg(lr, h) })
-	mux.HandleFunc("/relay/bootstrap", makeBootstrapHandler(authConfigDir)) // ZT provisioner delivers creds via ZT network
+	mux.HandleFunc("/pairing/info", makePairingInfoHandler(authConfigDir, cfg.Backup.PublicURL)) // public LAN discovery metadata only; no secrets
+	mux.HandleFunc("/relay/bootstrap", makeBootstrapHandler(authConfigDir))                      // ZT provisioner delivers creds via ZT network
 	mux.HandleFunc("/files", requireAuthWithReg(lr, fs.handleList))
 	mux.HandleFunc("/files/", requireAuthWithReg(lr, fs.handleFile))
 	mux.HandleFunc("/admin/version", requireAuthWithReg(lr, fs.handleAdminVersion)) // Flutter Update screen — read current + latest release info
@@ -1046,6 +1047,30 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func makePairingInfoHandler(configDir, publicURL string) http.HandlerFunc {
+	type safeCreds struct {
+		RelayID     string `json:"relay_id"`
+		UserID      string `json:"user_id,omitempty"`
+		RelaySecret string `json:"-"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		var c safeCreds
+		if data, err := os.ReadFile(filepath.Join(configDir, "relay_creds.json")); err == nil {
+			_ = json.Unmarshal(data, &c)
+		}
+		status := "unclaimed"
+		if c.UserID != "" {
+			status = "claimed"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"relay_id": c.RelayID, "version": Version, "status": status, "public_url": publicURL, "pairing_mode": "local", "path": "/pairing/info"}) //nolint:errcheck
+	}
 }
 
 // makeBootstrapHandler returns a handler for POST /relay/bootstrap.

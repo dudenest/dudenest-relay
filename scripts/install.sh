@@ -76,6 +76,7 @@ APT_PKGS=(
   tigervnc-standalone-server tigervnc-common tigervnc-tools
   novnc python3-websockify websockify
   tesseract-ocr xdotool scrot xclip python3-pil python3-pip  # remote-hand method 3: CDP-free OCR read + XTEST input + clipboard field-verify
+  avahi-daemon avahi-utils  # LAN discovery prototype: _dudenest-relay._tcp → /pairing/info, no secrets
   unattended-upgrades apt-listchanges
 )
 APT_OPTS=(-y --no-install-recommends -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confnew)
@@ -567,9 +568,15 @@ EOF
 if [[ -f /etc/systemd/system/dudenest-kiosk.service ]]; then systemctl stop dudenest-kiosk.service >/dev/null 2>&1 || true; systemctl disable dudenest-kiosk.service >/dev/null 2>&1 || true; fi
 
 systemctl daemon-reload
+mkdir -p /etc/avahi/services
+cat > /etc/avahi/services/dudenest-relay.service <<EOF
+<?xml version="1.0" standalone='no'?><!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group><name replace-wildcards="yes">Dudenest Relay on %h</name><service><type>_dudenest-relay._tcp</type><port>8086</port><txt-record>version=install</txt-record><txt-record>path=/pairing/info</txt-record></service></service-group>
+EOF
 for svc in tigervnc-99 novnc dudenest-relay dudenest-relay-update.timer dudenest-console-viewer; do
   systemctl enable "$svc" >/dev/null 2>&1
 done
+systemctl enable avahi-daemon >/dev/null 2>&1 || true
 # Replace legacy relay.service (older relay-poc setup) with the new dudenest-relay.service.
 # Only swap if the new service can actually start with /etc/dudenest/relay.env present.
 if systemctl is-enabled --quiet relay.service 2>/dev/null && [[ -f "$CONFIG_DIR/relay.env" ]]; then
@@ -583,7 +590,8 @@ systemctl restart novnc       || warn "novnc failed to start"
 systemctl restart dudenest-relay || warn "dudenest-relay failed to start"
 systemctl restart dudenest-relay-update.timer
 systemctl restart dudenest-console-viewer 2>/dev/null || warn "dudenest-console-viewer failed (Chrome console viewer on :0)"
-ok "All 5 systemd units enabled and started"
+systemctl restart avahi-daemon 2>/dev/null || warn "avahi-daemon failed (LAN discovery disabled)"
+ok "Relay systemd units enabled and started"
 
 # ── step 9: ZT auto-provisioning wait ────────────────────────────────────────
 step "Step 9/9: ZeroTier hub auto-provisioning"
