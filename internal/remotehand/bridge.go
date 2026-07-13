@@ -22,7 +22,6 @@ import (
 	"os"
 	"os/exec"
 	"sync"
-	"syscall"
 )
 
 // Bridge owns one sidecar subprocess and pipes its stdio.
@@ -59,7 +58,7 @@ func (b *Bridge) Start(ctx context.Context) error {
 		return fmt.Errorf("bridge already started")
 	}
 	cmd := exec.CommandContext(ctx, "python3", b.script)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // own process group → kill sidecar+Chromium tree together
+	setProcessGroup(cmd) // own process group on Unix → kill sidecar+Chromium tree together
 	cmd.Env = append(os.Environ(),
 		"DISPLAY="+b.display, "RH_DISPLAY="+b.display, "RH_SESSION="+b.sessionID)
 	cmd.Env = append(cmd.Env, b.env...)
@@ -122,11 +121,7 @@ func (b *Bridge) Close() error {
 		_ = b.stdin.Close()
 	}
 	if b.cmd != nil && b.cmd.Process != nil {
-		// Kill the whole process group (negative pid) so Chromium and its child tree
-		// die with the sidecar — a lone Process.Kill leaves orphaned Chromium procs
-		// that pile up on the display and break window mapping (the 'no form' bug).
-		_ = syscall.Kill(-b.cmd.Process.Pid, syscall.SIGKILL)
-		_ = b.cmd.Process.Kill() // fallback if the group kill didn't apply
+		killProcessTree(b.cmd)
 		go func(c *exec.Cmd) { _ = c.Wait() }(b.cmd) // reap without holding the lock
 	}
 	return nil
