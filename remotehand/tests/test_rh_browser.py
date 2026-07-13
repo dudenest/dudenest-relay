@@ -26,6 +26,10 @@ class TestBuildCommand(unittest.TestCase):
     def test_hides_automation_controlled(self):
         self.assertIn("--disable-blink-features=AutomationControlled", self.cmd)
 
+    def test_disables_chrome_first_run_surfaces(self):
+        for flag in ("--no-first-run", "--no-default-browser-check", "--disable-notifications", "--disable-device-discovery-notifications", "--disable-translate"):
+            self.assertIn(flag, self.cmd)
+
 
 class TestChromeBinary(unittest.TestCase):
     def test_prefers_dudenest_browser_then_real_chrome(self):

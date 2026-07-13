@@ -27,7 +27,8 @@ def chrome_binary() -> str:
 def build_command(url: str, profile_dir: str, window: str = "1280,1024", binary: str | None = None) -> list[str]:
     return [
         binary or chrome_binary(), "--no-sandbox", "--disable-dev-shm-usage", "--disable-infobars",
-        "--disable-extensions", "--disable-blink-features=AutomationControlled",
+        "--disable-extensions", "--disable-blink-features=AutomationControlled", "--no-first-run",
+        "--no-default-browser-check", "--disable-notifications", "--disable-device-discovery-notifications", "--disable-translate",
         "--user-data-dir=" + profile_dir, "--window-size=" + window,
         "--window-position=0,0", "--new-window", url,
     ]

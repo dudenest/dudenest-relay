@@ -19,6 +19,11 @@ class TestCatalog(unittest.TestCase):
         self.assertEqual(s.id, "captcha")
         self.assertEqual(s.action, "recaptcha")
 
+    def test_chrome_welcome_maps_to_welcome(self):
+        s = match_screen("Welcome to Google Chrome\nHelp make Chrome better\nOK")
+        self.assertEqual(s.id, "chrome_welcome")
+        self.assertEqual(s.state, PageState.WELCOME)
+
     def test_consent_line_wrapped_still_matches(self):
         s = match_screen("Sign in with Google\ndudenest-relay wants\naccess to your Google\nAccount")
         self.assertEqual(s.state, PageState.CONSENT)

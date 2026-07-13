@@ -189,11 +189,14 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 TZT
-if [ -f /etc/systemd/system/dudenest-kiosk.service ]; then perl -0pi -e 's#/usr/local/bin/chromium#/usr/local/bin/dudenest-browser#g; s#/usr/bin/chromium#/usr/local/bin/dudenest-browser#g; s#/usr/bin/google-chrome-stable#/usr/local/bin/dudenest-browser#g' /etc/systemd/system/dudenest-kiosk.service; fi
+viewer_service=dudenest-kiosk.service
+if [ -f /etc/systemd/system/dudenest-console-viewer.service ]; then viewer_service=dudenest-console-viewer.service; fi
+if [ -f "/etc/systemd/system/$viewer_service" ]; then perl -0pi -e 's#dudenest noVNC kiosk#dudenest noVNC console viewer#i; s#/usr/local/bin/chromium#/usr/local/bin/dudenest-browser#g; s#/usr/bin/chromium#/usr/local/bin/dudenest-browser#g; s#/usr/bin/google-chrome-stable#/usr/local/bin/dudenest-browser#g' "/etc/systemd/system/$viewer_service"; fi
 systemctl daemon-reload
+[ -f "/etc/systemd/system/$viewer_service" ] && systemctl enable --now "$viewer_service" >/dev/null 2>&1 || true
 systemctl enable --now dudenest-tz-sync.timer >/dev/null 2>&1 || true
 /usr/local/sbin/dudenest-tz-sync || true
-systemctl try-restart dudenest-kiosk.service >/dev/null 2>&1 || true
+[ -f "/etc/systemd/system/$viewer_service" ] && systemctl try-restart "$viewer_service" >/dev/null 2>&1 || true
 `
 	cmd := exec.Command("bash", "-c", script)
 	cmd.Env = os.Environ()

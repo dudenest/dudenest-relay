@@ -20,7 +20,7 @@ class PageState(str, Enum):
     """What the login page currently shows (classified visually, no DOM/CDP)."""
     EMAIL = "email"; PASSWORD = "password"; CONSENT = "consent"
     PHONE = "phone"; SEND_CODE = "send_code"; SMS = "sms_code"; CAPTCHA = "captcha"
-    UNVERIFIED_APP = "unverified_app"; SUCCESS = "success"; ERROR = "error"; UNKNOWN = "unknown"
+    UNVERIFIED_APP = "unverified_app"; WELCOME = "welcome"; SUCCESS = "success"; ERROR = "error"; UNKNOWN = "unknown"
 
 
 @dataclass

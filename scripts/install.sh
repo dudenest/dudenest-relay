@@ -514,7 +514,7 @@ EOF
 # without coupling to graphical-session.target (which isn't reliable when no user is logged in
 # via a real greeter).
 # Helper script that polls for the kiosk Chromium window via wmctrl and forces maximize.
-# Called from dudenest-kiosk.service ExecStartPost. Keeps inline systemd quoting sane.
+# Called from dudenest-console-viewer.service ExecStartPost. Keeps inline systemd quoting sane.
 cat > /usr/local/bin/dudenest-maximize-kiosk <<'EOF'
 #!/bin/bash
 export DISPLAY=:0
@@ -539,9 +539,9 @@ if [[ ! -f /var/lib/dudenest/kiosk-chrome/Default/Preferences ]]; then
 {"browser":{"custom_chrome_frame":false,"window_placement":{"maximized":true}}}
 PREFEOF
 fi
-cat > /etc/systemd/system/dudenest-kiosk.service <<EOF
+cat > /etc/systemd/system/dudenest-console-viewer.service <<EOF
 [Unit]
-Description=Dudenest noVNC kiosk — Chromium on :0 showing http://localhost:$NOVNC_PORT/dudenest.html
+Description=Dudenest noVNC console viewer — Chrome on :0 showing http://localhost:$NOVNC_PORT/dudenest.html
 After=lightdm.service novnc.service
 Wants=lightdm.service novnc.service
 [Service]
@@ -564,9 +564,10 @@ RestartSec=8
 [Install]
 WantedBy=multi-user.target
 EOF
+if [[ -f /etc/systemd/system/dudenest-kiosk.service ]]; then systemctl stop dudenest-kiosk.service >/dev/null 2>&1 || true; systemctl disable dudenest-kiosk.service >/dev/null 2>&1 || true; fi
 
 systemctl daemon-reload
-for svc in tigervnc-99 novnc dudenest-relay dudenest-relay-update.timer dudenest-kiosk; do
+for svc in tigervnc-99 novnc dudenest-relay dudenest-relay-update.timer dudenest-console-viewer; do
   systemctl enable "$svc" >/dev/null 2>&1
 done
 # Replace legacy relay.service (older relay-poc setup) with the new dudenest-relay.service.
@@ -581,7 +582,7 @@ systemctl restart tigervnc-99 || warn "tigervnc-99 failed to start — check: jo
 systemctl restart novnc       || warn "novnc failed to start"
 systemctl restart dudenest-relay || warn "dudenest-relay failed to start"
 systemctl restart dudenest-relay-update.timer
-systemctl restart dudenest-kiosk 2>/dev/null || warn "dudenest-kiosk failed (Chromium kiosk on :0)"
+systemctl restart dudenest-console-viewer 2>/dev/null || warn "dudenest-console-viewer failed (Chrome console viewer on :0)"
 ok "All 5 systemd units enabled and started"
 
 # ── step 9: ZT auto-provisioning wait ────────────────────────────────────────

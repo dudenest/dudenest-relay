@@ -109,7 +109,7 @@ class RemoteHandFSM:
             PageState.EMAIL: self._on_email, PageState.PASSWORD: self._on_password,
             PageState.CONSENT: self._on_consent, PageState.PHONE: self._on_phone,
             PageState.SEND_CODE: self._on_send_code, PageState.SMS: self._on_sms, PageState.CAPTCHA: self._on_captcha,
-            PageState.UNVERIFIED_APP: self._on_unverified_app, PageState.SUCCESS: self._on_success,
+            PageState.UNVERIFIED_APP: self._on_unverified_app, PageState.WELCOME: self._on_welcome, PageState.SUCCESS: self._on_success,
             PageState.ERROR: self._on_error,
         }.get(st, self._on_unknown)()
         return st
@@ -291,6 +291,20 @@ class RemoteHandFSM:
                 return
             self._inj.click(*pos)
             self._state("working", "opening Google unverified-app advanced options")
+
+    def _on_welcome(self) -> None:
+        if "welcome" in self._prompted:
+            return
+        self._prompted.add("welcome")
+        cb = self._obs.locate("Help make", min_y=300) or self._obs.locate("default browser", min_y=300)
+        if cb is not None:
+            self._inj.click(cb[0] - 30, cb[1])
+        ok = self._obs.locate("OK", min_y=450) or self._obs.locate("Start", min_y=450) or self._obs.locate("Get started", min_y=450)
+        if ok is not None:
+            self._inj.click(*ok)
+            self._state("working", "closing Chrome welcome screen")
+        else:
+            self._state("working", "Chrome welcome screen detected — waiting for it to clear", takeover=True)
 
     def _on_success(self) -> None:
         self.done = True; self.result = "success"

@@ -108,22 +108,40 @@ func (srv *Server) cfgForToken(t *types.GDriveToken) *oauth2.Config {
 	return srv.oauthCfg
 }
 
+type AuthWrapper func(http.HandlerFunc) http.HandlerFunc
+
 // RegisterRoutes adds all browser-auth and provider routes to mux.
 func (srv *Server) RegisterRoutes(mux *http.ServeMux) {
+	srv.registerRoutesWithAuth(mux, requireAuth, true)
+}
+
+func (srv *Server) RegisterRoutesNoProviders(mux *http.ServeMux) {
+	srv.registerRoutesWithAuth(mux, requireAuth, false)
+}
+
+func (srv *Server) RegisterRoutesWithAuth(mux *http.ServeMux, wrap AuthWrapper) {
+	srv.registerRoutesWithAuth(mux, wrap, true)
+}
+
+func (srv *Server) registerRoutesWithAuth(mux *http.ServeMux, wrap AuthWrapper, providers bool) {
+	if wrap == nil {
+		wrap = requireAuth
+	}
 	// Method A: Flutter-side OAuth (user's IP for login ✅)
-	mux.HandleFunc("/auth/url", requireAuth(srv.handleAuthURL))
-	mux.HandleFunc("/auth/exchange", requireAuth(srv.handleExchange))
+	mux.HandleFunc("/auth/url", wrap(srv.handleAuthURL))
+	mux.HandleFunc("/auth/exchange", wrap(srv.handleExchange))
 	// Method B: Browser automation (chromedp on relay, self-hosted only)
-	mux.HandleFunc("/auth/session", requireAuth(srv.handleSession))
-	mux.HandleFunc("/auth/input", requireAuth(srv.handleInput))
-	mux.HandleFunc("/auth/click", requireAuth(srv.handleClick))
-	mux.HandleFunc("/auth/status/", requireAuth(srv.handleStatus))
-	mux.HandleFunc("/auth/close/", requireAuth(srv.handleClose))
+	mux.HandleFunc("/auth/session", wrap(srv.handleSession))
+	mux.HandleFunc("/auth/input", wrap(srv.handleInput))
+	mux.HandleFunc("/auth/click", wrap(srv.handleClick))
+	mux.HandleFunc("/auth/status/", wrap(srv.handleStatus))
+	mux.HandleFunc("/auth/close/", wrap(srv.handleClose))
 	// Method C: noVNC proxy (relay:8086/vnc/* → localhost:6080/*)
-	mux.Handle("/vnc", http.HandlerFunc(srv.handleVNCProxy))
-	mux.Handle("/vnc/", http.HandlerFunc(srv.handleVNCProxy))
-	// Providers list
-	mux.HandleFunc("/providers", requireAuth(srv.handleProviders))
+	mux.HandleFunc("/vnc", wrap(srv.handleVNCProxy))
+	mux.HandleFunc("/vnc/", wrap(srv.handleVNCProxy))
+	if providers {
+		mux.HandleFunc("/providers", wrap(srv.handleProviders))
+	}
 }
 
 // requireAuth validates JWT Bearer token from dudenest-backend.

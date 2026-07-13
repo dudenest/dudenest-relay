@@ -65,7 +65,7 @@ func serveCmd() *cobra.Command {
 // gracefully shut down and the function returns nil — the outer loop then retries getPipeline()
 // and upgrades to the full server WITHOUT a process restart (no systemd cycle, no Flutter disconnect storm).
 // If ListenAndServe fails for any other reason, that error is returned instead.
-func degradedServerWithAuth(listen, reason, configDir string, authSrv interface{ RegisterRoutes(*http.ServeMux) }, wsHub http.Handler, tryReg func(string), reload <-chan struct{}) error {
+func degradedServerWithAuth(listen, reason, configDir string, authSrv interface{ RegisterRoutesNoProviders(*http.ServeMux) }, wsHub http.Handler, tryReg func(string), reload <-chan struct{}) error {
 	log.Printf("⚠️  relay: entering standby mode — %s", reason)
 	log.Printf("⚠️  relay: /files=503, /auth active — re-authorize via Flutter app")
 	tickerCtx, tickerCancel := context.WithCancel(context.Background())
@@ -89,8 +89,8 @@ func degradedServerWithAuth(listen, reason, configDir string, authSrv interface{
 		jsonErr(w, "relay in standby: "+reason, http.StatusServiceUnavailable)
 	}
 	mux := http.NewServeMux()
-	authSrv.RegisterRoutes(mux) // /auth/* active even in standby — user can add/re-auth providers
-	mux.Handle("/ws", wsHub)
+	authSrv.RegisterRoutesNoProviders(mux) // /auth/* active in standby; /providers disabled until full owner+relay-token mode
+	mux.Handle("/ws", requireJWTHandler(wsHub))
 	mux.HandleFunc("/relay/bootstrap", makeBootstrapHandler(configDir)) // ZT: receive creds even in standby
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -118,6 +118,26 @@ func degradedServerWithAuth(listen, reason, configDir string, authSrv interface{
 		_ = srv.Shutdown(ctx) //nolint:errcheck
 		return nil            // signal to caller: retry getPipeline()
 	}
+}
+
+func requireJWTHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			if tok := r.URL.Query().Get("token"); tok != "" {
+				authHeader = "Bearer " + tok
+			}
+		}
+		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+			jsonErr(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if _, err := auth.ValidateJWT(strings.TrimPrefix(authHeader, "Bearer ")); err != nil {
+			jsonErr(w, "invalid token: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
@@ -372,13 +392,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}
 	}
 	mux := http.NewServeMux()
-	authSrv.RegisterRoutes(mux)
-	mux.Handle("/ws", wsHub) // WebSocket: Flutter connects for relay→Flutter auth requests
 	fs := &fileServer{p: p, thumbCache: tc, backupClient: bc, maxUploadBytes: cfg.MaxUploadBytes(), metaDir: metaDir, manifestMaxFiles: cfg.Cache.ManifestMaxFiles, lazySidecarsOnList: cfg.Cache.LazySidecarsOnList}
 	lr := &lazyRegistrar{configDir: authConfigDir, masterKey: key, fs: fs, backupURL: cfg.Backup.URL, publicURL: cfg.Backup.PublicURL, debounce: cfg.Debounce()}
 	if ownerFromCreds != "" {
 		lr.setOwner(ownerFromCreds)
 	} // preload owner from creds (set before ListenAndServe, no races)
+	mux.Handle("/ws", requireAuthHandlerWithReg(lr, wsHub)) // WebSocket: protected relay→Flutter auth/Remote-Hand channel
+	authSrv.RegisterRoutesWithAuth(mux, func(h http.HandlerFunc) http.HandlerFunc { return requireAuthWithReg(lr, h) })
 	mux.HandleFunc("/relay/bootstrap", makeBootstrapHandler(authConfigDir)) // ZT provisioner delivers creds via ZT network
 	mux.HandleFunc("/files", requireAuthWithReg(lr, fs.handleList))
 	mux.HandleFunc("/files/", requireAuthWithReg(lr, fs.handleFile))
@@ -408,9 +428,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}
 		return url, nil
 	})
-mux.HandleFunc("/relay/oauth3/start", requireAuthWithReg(lr, rhMgr.StartHandler()))  // begin method-3 session → {session_id}
-		mux.HandleFunc("/relay/oauth3/end", requireAuthWithReg(lr, rhMgr.EndHandler()))      // tear down method-3 session
-		mux.HandleFunc("/relay/oauth3/input", requireAuthWithReg(lr, rhMgr.InputHandler())) // Flutter → sidecar input (HTTP POST, reliable)
+	mux.HandleFunc("/relay/oauth3/start", requireAuthWithReg(lr, rhMgr.StartHandler())) // begin method-3 session → {session_id}
+	mux.HandleFunc("/relay/oauth3/end", requireAuthWithReg(lr, rhMgr.EndHandler()))     // tear down method-3 session
+	mux.HandleFunc("/relay/oauth3/input", requireAuthWithReg(lr, rhMgr.InputHandler())) // Flutter → sidecar input (HTTP POST, reliable)
 	// Phase β: account/policy admin endpoints (CRUD via Flutter Settings → Cloud Accounts).
 	// Same auth wrapper as /files — only the paired user's Flutter can mutate.
 	if globalAdminAccounts != nil {
@@ -954,8 +974,7 @@ func (fs *fileServer) handleDelete(w http.ResponseWriter, r *http.Request, fileI
 func requireAuthWithReg(lr *lazyRegistrar, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
-		// ?token= query param: fallback for web video player (HTMLVideoElement can't send custom headers).
-		// Requests using this path skip Layer 3 (no X-Relay-Token available in URL-only auth).
+		// ?token= query param: browser fallback for WS/noVNC/media clients that cannot set custom headers.
 		queryTokenAuth := false
 		if authHeader == "" {
 			if tok := r.URL.Query().Get("token"); tok != "" {
@@ -985,10 +1004,16 @@ func requireAuthWithReg(lr *lazyRegistrar, next http.HandlerFunc) http.HandlerFu
 		// Only enforced when owner is known — prevents bootstrap deadlock for old relays without user_id in CRDB.
 		// Old relays: ownerUserID="" on startup → L3 skipped → tryRegister fires → sets ownerUserID + updates CRDB
 		//             → Flutter gets relay_token from /user/relays → next request includes token → L3 enforced.
-		if lr != nil && !queryTokenAuth { // Layer 3 skipped for ?token= requests (web video: no X-Relay-Token in URL)
+		if lr != nil {
 			if ownerID := lr.getOwner(); ownerID != "" {
 				if relaySecret := os.Getenv("RELAY_SECRET"); relaySecret != "" {
 					rtoken := r.Header.Get("X-Relay-Token")
+					if rtoken == "" {
+						rtoken = r.URL.Query().Get("relay_token")
+					}
+					if queryTokenAuth && rtoken == "" && strings.HasPrefix(r.URL.Path, "/files/") {
+						goto layer3ok
+					} // legacy media URLs; never applies to /providers,/ws,/vnc,/admin,/auth
 					if !relaytoken.Verify(rtoken, relaySecret, claims.Sub) {
 						log.Printf("security L3 rejected: sub=%q relay_token_present=%v path=%s", claims.Sub, rtoken != "", r.URL.Path)
 						jsonErr(w, "forbidden: invalid or expired relay token", http.StatusForbidden)
@@ -997,11 +1022,16 @@ func requireAuthWithReg(lr *lazyRegistrar, next http.HandlerFunc) http.HandlerFu
 				}
 			}
 		}
+	layer3ok:
 		if lr != nil && claims.Sub != "" {
 			go lr.tryRegister(claims.Sub) // non-blocking; sync.Once ensures runs exactly once
 		}
 		next.ServeHTTP(w, r)
 	}
+}
+
+func requireAuthHandlerWithReg(lr *lazyRegistrar, next http.Handler) http.Handler {
+	return http.HandlerFunc(requireAuthWithReg(lr, next.ServeHTTP))
 }
 
 // corsMiddleware adds CORS headers for Flutter web clients.
