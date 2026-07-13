@@ -41,6 +41,7 @@ warn()  { echo "  ⚠ $*"; }
 fail()  { echo ""; echo "  ✗ ERROR: $*" >&2; exit 1; }
 have()  { command -v "$1" >/dev/null 2>&1; }
 require() { have "$1" || fail "Required tool not found: $1"; }
+pkg_ok() { [[ -x "/usr/bin/$1" ]] && [[ "$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null || true)" == "install ok installed" ]]; }
 
 require curl
 [[ $EUID -eq 0 ]] || fail "Run as root: sudo bash install.sh"
@@ -94,7 +95,9 @@ else
   fail "Google Chrome unavailable for ${DISTRO_ID}/${DEB_ARCH}; Remote-Hand real-account OAuth is disabled on this host/arch"
 fi
 MISSING=()
-for p in "${APT_PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 || MISSING+=("$p"); done
+for p in "${APT_PKGS[@]}"; do
+  if [[ "$p" == "google-chrome-stable" ]]; then pkg_ok google-chrome-stable || MISSING+=("$p"); else dpkg -s "$p" >/dev/null 2>&1 || MISSING+=("$p"); fi
+done
 if [[ ${#MISSING[@]} -gt 0 ]]; then
   echo "  Installing ${#MISSING[@]} package(s): ${MISSING[*]}"
   apt-get update -qq
@@ -102,6 +105,7 @@ if [[ ${#MISSING[@]} -gt 0 ]]; then
   dpkg --configure -a 2>/dev/null || true
   apt-get install --fix-broken "${APT_OPTS[@]}" 2>/dev/null || true
   apt-get install "${APT_OPTS[@]}" "${MISSING[@]}"
+  if printf '%s\n' "${MISSING[@]}" | grep -qx google-chrome-stable && ! pkg_ok google-chrome-stable; then apt-get install "${APT_OPTS[@]}" --reinstall google-chrome-stable; fi
 fi
 # Pick the browser binary the relay can use. `dudenest-browser` is the canonical launcher;
 # `/usr/local/bin/chromium` remains only as a legacy compatibility symlink to Chrome.
@@ -109,6 +113,7 @@ BROWSER_BIN=""
 for cand in /usr/bin/google-chrome-stable /usr/bin/google-chrome; do
   [[ -x "$cand" ]] && { BROWSER_BIN="$cand"; break; }
 done
+pkg_ok google-chrome-stable || fail "google-chrome-stable package not healthy after apt install/reinstall"
 [[ -n "$BROWSER_BIN" ]] || fail "Google Chrome binary not found after apt install"
 ln -sfn "$BROWSER_BIN" /usr/local/bin/dudenest-browser
 ln -sfn "$BROWSER_BIN" /usr/local/bin/chromium  # legacy compatibility; target is Chrome

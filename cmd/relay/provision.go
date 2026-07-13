@@ -152,7 +152,11 @@ func ensureAntiAbuseHost() {
 export DEBIAN_FRONTEND=noninteractive
 install -d -m 755 /etc/apt/keyrings
 if [ ! -f /etc/apt/sources.list.d/google-chrome.list ]; then curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg; echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main' > /etc/apt/sources.list.d/google-chrome.list; apt-get update -qq; fi
-dpkg -s google-chrome-stable >/dev/null 2>&1 || { apt-get update -qq; apt-get install -y --no-install-recommends google-chrome-stable; }
+dpkg --configure -a || true
+apt-get install -y --fix-broken || true
+chrome_ok() { [ -x /usr/bin/google-chrome-stable ] && [ "$(dpkg-query -W -f='${Status}' google-chrome-stable 2>/dev/null || true)" = "install ok installed" ]; }
+if ! chrome_ok; then apt-get update -qq; apt-get install -y --no-install-recommends --reinstall google-chrome-stable; fi
+chrome_ok || { echo "google-chrome-stable not healthy after install/reinstall" >&2; exit 1; }
 ln -sfn /usr/bin/google-chrome-stable /usr/local/bin/dudenest-browser
 ln -sfn /usr/bin/google-chrome-stable /usr/local/bin/chromium
 apt-get purge -y chromium chromium-sandbox chromium-browser >/dev/null 2>&1 || true
