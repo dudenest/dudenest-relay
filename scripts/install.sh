@@ -7,7 +7,7 @@
 #   3. Chromium autostart on :0 showing http://localhost:6080/dudenest.html (kiosk-style viewer)
 #   4. TigerVNC headless on :99 (where the relay launches Chromium for Google OAuth)
 #   5. noVNC websockify on :6080 bridging :5999 → browser
-#   6. dudenest.html — custom noVNC client that crops the title bar (fills the viewport)
+#   6. dudenest.html + dudenest-form.html — full and form-only noVNC clients
 #   7. Relay binary from GitHub Releases (https://github.com/dudenest/dudenest-relay/releases/latest)
 #   8. 4 systemd units: tigervnc-99, novnc, dudenest-relay, dudenest-relay-update.{service,timer}
 #   9. Daily auto-update: timer runs `relay update` and restarts the service on new releases
@@ -344,7 +344,8 @@ connect();
 </body>
 </html>
 EOF
-ok "/usr/share/novnc/dudenest.html installed"
+curl -fsSL "$RAW_BASE/dudenest-form.html" -o /usr/share/novnc/dudenest-form.html || warn "Could not fetch dudenest-form.html — Remote-Hand takeover form view unavailable until next provision"
+ok "/usr/share/novnc/dudenest.html installed; dudenest-form.html installed when fetch succeeds"
 
 # ── step 6: ZeroTier ─────────────────────────────────────────────────────────
 step "Step 6/9: ZeroTier"

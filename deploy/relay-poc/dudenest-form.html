@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dudenest relay — form view</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+html,body { background:#000; overflow:hidden; height:100%; }
+/* #wrap = phone viewport; #screen holds the full remote canvas, transformed so only the configured
+   form rectangle (fx,fy,fw,fh on the remote :99 screen) is visible, scaled to fill the width. This
+   keeps the browser window full-size for the method-3 OCR/FSM — we crop only what the human sees. */
+#wrap { position:fixed; inset:0; overflow:hidden; }
+#screen { position:absolute; top:0; left:0; transform-origin: top left; }
+#dot { position:fixed; bottom:6px; right:8px; z-index:100; width:9px; height:9px; border-radius:50%; background:#555; }
+#dot.connected { background:#4caf50; }
+</style>
+</head>
+<body>
+<div id="wrap"><div id="screen"></div></div>
+<div id="dot" title="VNC status"></div>
+<script type="module">
+import RFB from "./core/rfb.js";
+const q = new URLSearchParams(location.search);
+// form rectangle on remote :99 (default tuned for a centered Google OAuth card on 1280x1024)
+const [fx,fy,fw,fh] = (q.get("crop") || "415,150,450,620").split(",").map(Number);
+const screen = document.getElementById("screen"), dot = document.getElementById("dot");
+function applyCrop() {
+  const s = window.innerWidth / fw;                 // scale the form width to fill the phone width
+  screen.style.transform = `scale(${s}) translate(${-fx}px, ${-fy}px)`;
+}
+window.addEventListener("resize", applyCrop);
+const host = location.hostname, port = location.port || (location.protocol === "https:" ? "443" : "80");
+const proto = location.protocol === "https:" ? "wss:" : "ws:";
+const viaRelay = location.pathname.startsWith("/vnc");
+const wsPath = viaRelay ? "/vnc/websockify" : "/websockify";
+const session = q.get("session");
+const wsURL = proto + "//" + host + ":" + port + wsPath + (session ? "?session=" + encodeURIComponent(session) : "");
+let rfb;
+function connect() {
+  rfb = new RFB(screen, wsURL);
+  rfb.scaleViewport = false;   // we crop+scale ourselves; keep the canvas 1:1
+  rfb.resizeSession = false;
+  rfb.addEventListener("connect", () => { dot.className = "connected"; applyCrop(); });
+  rfb.addEventListener("disconnect", () => { dot.className = ""; setTimeout(connect, 3000); });
+}
+connect(); applyCrop();
+</script>
+</body>
+</html>

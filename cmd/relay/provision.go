@@ -21,11 +21,14 @@ import (
 
 const sidecarDir = "/usr/local/lib/dudenest/remotehand"
 const rawBase = "https://raw.githubusercontent.com/dudenest/dudenest-relay"
+const noVNCDir = "/usr/share/novnc"
 
 var sidecarFiles = []string{
 	"rh_protocol.py", "rh_catalog.py", "rh_input.py", "rh_screen.py", "rh_fsm.py",
 	"rh_classify.py", "rh_crypto.py", "rh_browser.py", "rh_sidecar.py",
 }
+
+var noVNCFiles = []string{"dudenest-form.html"}
 
 // small method-3 deps only (OCR read + XTEST input + clipboard verify); the browser and
 // desktop stack are install.sh's job.
@@ -60,6 +63,7 @@ func EnsureSidecar(version string) {
 			ok = false
 		}
 	}
+	ensureNoVNCFiles(ref)
 	ensureSidecarAptDeps()
 	ensureSidecarPipDeps()
 	ensureBrowserIsChrome()
@@ -68,6 +72,19 @@ func EnsureSidecar(version string) {
 		log.Printf("provision: method-3 sidecar %s ready in %s", ref, sidecarDir)
 	} else {
 		log.Printf("provision: method-3 sidecar incomplete (retry next start) — method 3 degraded")
+	}
+}
+
+func ensureNoVNCFiles(ref string) {
+	if err := os.MkdirAll(noVNCDir, 0o755); err != nil {
+		log.Printf("provision: mkdir %s: %v", noVNCDir, err)
+		return
+	}
+	for _, f := range noVNCFiles {
+		url := fmt.Sprintf("%s/%s/deploy/relay-poc/%s", rawBase, ref, f)
+		if err := downloadTo(url, filepath.Join(noVNCDir, f)); err != nil {
+			log.Printf("provision: fetch noVNC %s: %v", f, err)
+		}
 	}
 }
 

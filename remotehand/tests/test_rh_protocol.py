@@ -45,6 +45,10 @@ class TestMessages(unittest.TestCase):
                          {"type": "rh_state", "session_id": "s1", "request_id": "r1",
                           "state": "success", "message": "done"})
 
+    def test_rh_state_can_include_takeover_url(self):
+        m = rh_state("s1", "r1", "error", "Google shows captcha", "/vnc/dudenest-form.html?session=s1")
+        self.assertEqual(m["takeover_url"], "/vnc/dudenest-form.html?session=s1")
+
 
 class TestRhInputParse(unittest.TestCase):
     def test_parse_valid(self):

@@ -83,6 +83,7 @@ Canonical install on relay VM:
 | `/etc/systemd/system/novnc.service` | noVNC/websockify `:6080` → `localhost:5999`. |
 | `/etc/systemd/system/dudenest-kiosk.service` | Chromium kiosk on `:0` displaying `http://localhost:6080/dudenest.html`, so VM console shows `:99`. |
 | `/usr/share/novnc/dudenest.html` | Custom noVNC page for relay console. |
+| `/usr/share/novnc/dudenest-form.html` | Form-only noVNC view for human takeover: crops `:99` to the Google form rectangle and scales it to mobile width without resizing Chromium. |
 
 Important display model:
 
@@ -136,6 +137,14 @@ Runtime packages installed by `scripts/install.sh`: `tesseract-ocr`, `xdotool`, 
 ```json
 {"type":"rh_state","session_id":"rh-...","request_id":"rh","state":"working","message":"submitting code"}
 ```
+
+For B1 human takeover, serious/unknown states keep the browser alive and include a form-only noVNC URL:
+
+```json
+{"type":"rh_state","session_id":"rh-...","request_id":"rh","state":"error","message":"Google shows: ...","takeover_url":"/vnc/dudenest-form.html?session=rh-...&crop=415,150,450,620"}
+```
+
+`dudenest-form.html` accepts `crop=x,y,w,h` in remote `:99` pixels. The default `415,150,450,620` is tuned for the centered Google OAuth card on a 1280×1024 relay display. This is a **viewer crop only**: Chromium stays full-size for OCR/FSM stability.
 
 The relay may also broadcast existing `auth_done`; Flutter treats it as authoritative success because token capture happens server-side at the relay callback.
 

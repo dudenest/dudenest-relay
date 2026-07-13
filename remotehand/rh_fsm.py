@@ -322,7 +322,7 @@ class RemoteHandFSM:
             else:  # B3: serious (account blocked/unavailable) → capture + keep session alive for a human
                 saved = self._obs.save_unknown()
                 _log(f"_on_error terminal (serious, kept alive): msg={msg!r} → {saved}")
-                self.result = "error"; self._state("error", msg)  # no done=True: browser stays for takeover
+                self.result = "error"; self._state("error", msg, takeover=True)  # no done=True: browser stays for takeover
             return
         # UNRECOGNIZED error: a single frame is almost always OCR noise on a page that is
         # still settling (a garbled frame must NOT kill the flow — that terminated a valid
@@ -337,7 +337,7 @@ class RemoteHandFSM:
         # B3: do NOT auto-close — keep the browser/display alive so a human can read the screen and take
         # over (the manager timeout still reaps a truly abandoned session). Surface the real text.
         self.result = "error"
-        self._state("error", f"Google shows: {snippet}" if snippet else "Sign-in failed — unrecognized screen")
+        self._state("error", f"Google shows: {snippet}" if snippet else "Sign-in failed — unrecognized screen", takeover=True)
 
     def _reprompt(self, field: str, msg: str) -> None:
         step, specs = self._REPROMPT[field]
@@ -370,7 +370,7 @@ class RemoteHandFSM:
         elif snippet:  # unrecognized — show what Google displays instead of a blank spinner
             saved = self._obs.save_unknown()  # capture PNG+OCR so it can become a catalog entry (Phase 2)
             _log(f"_on_unknown captured unrecognized screen → {saved}")
-            self._state("working", f"Waiting — Google shows: {snippet}")
+            self._state("working", f"Waiting — Google shows: {snippet}", takeover=True)
 
     # ---- helpers ----
     def _type_and_next(self, text: str, replace: bool = False, verify_field: str | None = None) -> bool:
@@ -409,5 +409,8 @@ class RemoteHandFSM:
         self._prompted.add(step)
         self._emit.send(rh_prompt(self.session_id, self.request_id, step, title, fields))
 
-    def _state(self, state: str, message: str) -> None:
-        self._emit.send(rh_state(self.session_id, self.request_id, state, message))
+    def _takeover_url(self) -> str:
+        return f"/vnc/dudenest-form.html?session={self.session_id}&crop=415,150,450,620"
+
+    def _state(self, state: str, message: str, takeover: bool = False) -> None:
+        self._emit.send(rh_state(self.session_id, self.request_id, state, message, self._takeover_url() if takeover else ""))

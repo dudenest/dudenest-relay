@@ -433,6 +433,7 @@ class TestB3SeriousScreensKeptAlive(unittest.TestCase):
         self.assertGreaterEqual(fsm._obs.saved_unknown, 1)           # screen captured for the human
         msgs = [m for m in emit.msgs if m["type"] == "rh_state" and m["state"] == "error"]
         self.assertTrue(any("unavailable" in m["message"].lower() for m in msgs))
+        self.assertTrue(any(m.get("takeover_url", "").startswith("/vnc/dudenest-form.html?session=s1") for m in msgs))
 
     def test_session_expired_is_restartable_and_closes(self):
         fsm, inj, emit = make([PageState.ERROR], err="Your session has expired")
@@ -448,6 +449,7 @@ class TestB3SeriousScreensKeptAlive(unittest.TestCase):
         self.assertGreaterEqual(fsm._obs.saved_unknown, 1)           # captured for review/cataloging
         surfaced = [m for m in emit.msgs if m["type"] == "rh_state" and "Google shows" in m.get("message", "")]
         self.assertTrue(surfaced)                                    # real screen text surfaced, not opaque fail
+        self.assertIn("/vnc/dudenest-form.html", surfaced[-1].get("takeover_url", ""))
 
 
 if __name__ == "__main__":

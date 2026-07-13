@@ -58,10 +58,13 @@ def rh_prompt(session_id: str, request_id: str, step: str, title: str,
     return msg
 
 
-def rh_state(session_id: str, request_id: str, state: str, message: str = "") -> dict[str, Any]:
+def rh_state(session_id: str, request_id: str, state: str, message: str = "", takeover_url: str = "") -> dict[str, Any]:
     """Progress/terminal signal: working|need_input|success|error."""
-    return {"type": "rh_state", "session_id": session_id, "request_id": request_id,
-            "state": state, "message": message}
+    msg = {"type": "rh_state", "session_id": session_id, "request_id": request_id,
+           "state": state, "message": message}
+    if takeover_url:
+        msg["takeover_url"] = takeover_url
+    return msg
 
 
 @dataclass
