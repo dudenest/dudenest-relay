@@ -99,6 +99,14 @@ func (srv *Server) selectOAuthCfg(callbackURI string) *oauth2.Config {
 	return srv.oauthCfg
 }
 
+func (srv *Server) requireOAuthCfg(w http.ResponseWriter, callbackURI string) *oauth2.Config {
+	cfg := srv.selectOAuthCfg(callbackURI)
+	if cfg == nil {
+		jsonError(w, "OAuth credentials not provisioned yet", http.StatusServiceUnavailable)
+	}
+	return cfg
+}
+
 // cfgForToken returns the oauth2.Config that issued a token (matched by ClientID).
 // Falls back to desktop client for legacy tokens without ClientID stored.
 func (srv *Server) cfgForToken(t *types.GDriveToken) *oauth2.Config {
@@ -190,7 +198,11 @@ func (srv *Server) handleAuthURL(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "unsupported provider: "+provider, 400)
 		return
 	}
-	cfg := *srv.selectOAuthCfg(callbackURI) // copy — web vs desktop client based on callback URI
+	baseCfg := srv.requireOAuthCfg(w, callbackURI)
+	if baseCfg == nil {
+		return
+	}
+	cfg := *baseCfg // copy — web vs desktop client based on callback URI
 	if callbackURI != "" {
 		cfg.RedirectURL = callbackURI
 	}
@@ -228,7 +240,11 @@ func (srv *Server) handleExchange(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "code required", 400)
 		return
 	}
-	cfg := *srv.selectOAuthCfg(req.RedirectURI) // must use same client as handleAuthURL used
+	baseCfg := srv.requireOAuthCfg(w, req.RedirectURI)
+	if baseCfg == nil {
+		return
+	}
+	cfg := *baseCfg // must use same client as handleAuthURL used
 	if req.RedirectURI != "" {
 		cfg.RedirectURL = req.RedirectURI
 	}
@@ -312,6 +328,10 @@ func (srv *Server) cancelPrevCallback() {
 func (srv *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if srv.oauthCfg == nil || srv.oauthURL == "" {
+		jsonError(w, "OAuth credentials not provisioned yet", http.StatusServiceUnavailable)
 		return
 	}
 	var req sessionReq
@@ -405,6 +425,9 @@ func (srv *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 // are byte-for-byte identical. Called by serve.go when a method-3 session starts;
 // the returned OAuth URL is what the sidecar opens.
 func (srv *Server) StartAssistedCapture(oauthURL string) error {
+	if srv.oauthCfg == nil {
+		return fmt.Errorf("OAuth credentials not provisioned yet")
+	}
 	srv.cancelPrevCallback() // one callback server at a time on :callbackPort
 	cbCtx, cbCancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	srv.cbMu.Lock()

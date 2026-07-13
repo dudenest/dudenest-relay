@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -65,7 +66,7 @@ func serveCmd() *cobra.Command {
 // gracefully shut down and the function returns nil — the outer loop then retries getPipeline()
 // and upgrades to the full server WITHOUT a process restart (no systemd cycle, no Flutter disconnect storm).
 // If ListenAndServe fails for any other reason, that error is returned instead.
-func degradedServerWithAuth(listen, reason, configDir string, authSrv interface{ RegisterRoutesNoProviders(*http.ServeMux) }, wsHub http.Handler, tryReg func(string), reload <-chan struct{}) error {
+func degradedServerWithAuth(listen, reason, configDir, publicURL string, authSrv interface{ RegisterRoutesNoProviders(*http.ServeMux) }, wsHub http.Handler, tryReg func(string), reload <-chan struct{}) error {
 	log.Printf("⚠️  relay: entering standby mode — %s", reason)
 	log.Printf("⚠️  relay: /files=503, /auth active — re-authorize via Flutter app")
 	tickerCtx, tickerCancel := context.WithCancel(context.Background())
@@ -91,7 +92,8 @@ func degradedServerWithAuth(listen, reason, configDir string, authSrv interface{
 	mux := http.NewServeMux()
 	authSrv.RegisterRoutesNoProviders(mux) // /auth/* active in standby; /providers disabled until full owner+relay-token mode
 	mux.Handle("/ws", requireJWTHandler(wsHub))
-	mux.HandleFunc("/relay/bootstrap", makeBootstrapHandler(configDir)) // ZT: receive creds even in standby
+	mux.HandleFunc("/pairing/info", makePairingInfoHandler(configDir, publicURL)) // public LAN discovery stays available in standby
+	mux.HandleFunc("/relay/bootstrap", makeBootstrapHandler(configDir))           // ZT: receive creds even in standby
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "degraded", "reason": reason}) //nolint:errcheck
@@ -156,11 +158,19 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if gdriveSecretPath != authClientSecret {
 		gdriveSecretPath = authClientSecret
 	}
-	cs, err := browser.LoadClientSecret(authClientSecret) // load auth config before pipeline — needed for standby mode too
+	var cfg2 *oauth2.Config
+	var oauthURL string
+	cs, err := browser.LoadClientSecret(authClientSecret) // fresh installs may receive this later from /relay/bootstrap
 	if err != nil {
-		return fmt.Errorf("load client_secret: %w", err)
+		if errors.Is(err, os.ErrNotExist) {
+			log.Printf("⚠️  OAuth client_secret missing at %s — starting in bootstrap-only standby", authClientSecret)
+		} else {
+			return fmt.Errorf("load client_secret: %w", err)
+		}
+	} else {
+		cfg2 = browser.BuildOAuthConfig(cs, browser.CallbackURL(cfg.OAuth.CallbackPort))
+		oauthURL = browser.BuildAuthURL(cfg2)
 	}
-	cfg2 := browser.BuildOAuthConfig(cs, browser.CallbackURL(cfg.OAuth.CallbackPort))
 	var webCfg *oauth2.Config // web client for cfg.OAuth.WebRedirectURL callbacks (Flutter web)
 	if id, secret := os.Getenv("GDRIVE_WEB_CLIENT_ID"), os.Getenv("GDRIVE_WEB_CLIENT_SECRET"); id != "" && secret != "" {
 		webCfg = browser.BuildWebOAuthConfig(id, secret, cfg.OAuth.WebRedirectURL)
@@ -170,7 +180,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	maybeAnnounce(authConfigDir, cfg.Backup.URL) // ZT provisioning: announce to hub if no creds and ZT_ANNOUNCE=true
 	wsHub := ws.NewHub()
 	bm := blockmap.New(storePath) // blockmap for file_count in /auth/providers
-	authSrv := browser.NewServer(cfg.Server.Display, cfg.Server.Listen, browser.BuildAuthURL(cfg2), cfg2, webCfg, authConfigDir, wsHub, bm, cfg.OAuth.CallbackPort, cfg.NoVNC.BackendAddr, cfg.SessionTimeout())
+	authSrv := browser.NewServer(cfg.Server.Display, cfg.Server.Listen, oauthURL, cfg2, webCfg, authConfigDir, wsHub, bm, cfg.OAuth.CallbackPort, cfg.NoVNC.BackendAddr, cfg.SessionTimeout())
 	// tryReg: JWT-based registration trigger, created before getPipeline() so it fires even in standby.
 	// Validates Bearer token, extracts user_id from claims, registers relay with backup (saves relay_creds.json).
 	// Does not need pipeline/fileServer — only configDir + backupURL.
@@ -229,7 +239,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		case <-reload:
 		default:
 		} // drain stale signal so we wait fresh on the next standby cycle
-		if serr := degradedServerWithAuth(cfg.Server.Listen, fmt.Sprintf("pipeline init: %v", err), authConfigDir, authSrv, wsHub, tryReg, reload); serr != nil {
+		if serr := degradedServerWithAuth(cfg.Server.Listen, fmt.Sprintf("pipeline init: %v", err), authConfigDir, cfg.Backup.PublicURL, authSrv, wsHub, tryReg, reload); serr != nil {
 			return serr
 		}
 		log.Printf("✅ relay: exiting standby — re-initializing pipeline with newly authorized provider")
@@ -422,6 +432,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	rhMgr.SetPrepare(func(provider string) (string, error) { // provider → OAuth URL + arm server-side token capture (reuses method-2 helpers)
 		if provider != "gdrive" {
 			return "", fmt.Errorf("provider %q not supported for relay-assisted login", provider)
+		}
+		if cfg2 == nil {
+			return "", fmt.Errorf("OAuth client_secret not available yet; complete relay bootstrap first")
 		}
 		url := browser.BuildAuthURL(cfg2)
 		if err := authSrv.StartAssistedCapture(url); err != nil {

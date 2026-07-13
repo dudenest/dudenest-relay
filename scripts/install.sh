@@ -608,7 +608,11 @@ for i in $(seq 1 24); do  # up to 120s
   fi
   echo "  … waiting (${i}/24) — hub is authorizing ZT membership"
 done
-$BOOTSTRAP_DONE || warn "Provisioning still pending — relay runs in background. Logs: journalctl -u dudenest-relay -f"
+if $BOOTSTRAP_DONE; then
+  systemctl restart dudenest-relay || warn "dudenest-relay restart failed after provisioning — check: journalctl -u dudenest-relay"
+else
+  warn "Provisioning still pending — relay runs in background. Logs: journalctl -u dudenest-relay -f"
+fi
 
 # ── summary ──────────────────────────────────────────────────────────────────
 echo ""

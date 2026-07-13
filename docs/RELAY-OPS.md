@@ -89,6 +89,8 @@ What it installs:
 | 8 | 4 systemd units (`tigervnc-99`, `novnc`, `dudenest-relay`, `dudenest-relay-update.{service,timer}`) | `/etc/systemd/system/` |
 | 9 | Wait for ZT hub to authorize + provision `relay_id` | logs |
 
+Fresh relays intentionally start `dudenest-relay.service` before `/etc/dudenest/gdrive_client_secret.json` exists. In that state the API stays alive in bootstrap-only standby: `/health`, `/pairing/info`, `/relay/announce`, and `/relay/bootstrap` work, while OAuth routes return `503 OAuth credentials not provisioned yet`. After Step 9 receives `relay_creds.json` and the hub-delivered OAuth JSON, `install.sh` restarts `dudenest-relay` so OAuth config is loaded into memory. If Step 9 is still pending, keep the service running and inspect `journalctl -u dudenest-relay -f`; do not copy OAuth secrets by hand unless explicitly doing emergency recovery.
+
 Re-running on an existing relay (e.g. one bootstrapped before v0.8.0):
 - apt packages already installed → skipped
 - `dude` user exists → only group membership refreshed
