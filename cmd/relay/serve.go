@@ -591,19 +591,25 @@ func (lr *lazyRegistrar) tryRegister(userID string) {
 				os.WriteFile(filepath.Join(lr.configDir, "relay_creds.json"), data, 0o600) //nolint:errcheck
 			}
 			// Update CRDB so GET /user/relays returns this relay for its owner
-			if existing := lr.fs.backup(); existing != nil {
-				if err2 := existing.UpdateUserID(ownerID); err2 != nil {
-					log.Printf("⚠️  lazy register: update-user-id: %v", err2)
+			if lr.fs != nil {
+				if existing := lr.fs.backup(); existing != nil {
+					if err2 := existing.UpdateUserID(ownerID); err2 != nil {
+						log.Printf("⚠️  lazy register: update-user-id: %v", err2)
+					}
 				}
 			}
 		}
 		bc := backup.New(lr.masterKey, lr.configDir, lr.backupURL, lr.debounce, Version)
 		if bc != nil {
-			lr.fs.setBackup(bc)
+			if lr.fs != nil {
+				lr.fs.setBackup(bc)
+			}
 			log.Printf("✅ lazy register: backup enabled (relay_id=%s owner=%s)", creds.RelayID, ownerID)
-			if maps, err2 := lr.fs.p.ListFiles(); err2 == nil {
-				bc.Trigger(maps)
-			} // initial snapshot
+			if lr.fs != nil {
+				if maps, err2 := lr.fs.p.ListFiles(); err2 == nil {
+					bc.Trigger(maps)
+				}
+			} // initial snapshot only exists in full-server mode
 			bc.StartPingLoop(30 * time.Second) // s313 Phase 0: 30s default; hub adapts to 3s during release burst window via next_ping_seconds
 		}
 	})
