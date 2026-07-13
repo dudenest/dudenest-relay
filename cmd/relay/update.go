@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 
@@ -38,6 +39,23 @@ func updateCmd() *cobra.Command {
 		Short: "Check for updates and install latest release from GitHub",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Current version: %s\n", Version)
+			if url, target := os.Getenv("DUDENEST_RELAY_DOWNLOAD_URL"), os.Getenv("DUDENEST_RELAY_TARGET_VERSION"); url != "" && target != "" {
+				fmt.Printf("Hub-provided target: %s\n", target)
+				if Version != "dev" && Version == target {
+					fmt.Println("Already up to date.")
+					return nil
+				}
+				self, err := os.Executable()
+				if err != nil {
+					return fmt.Errorf("cannot determine own path: %w", err)
+				}
+				fmt.Printf("Downloading %s from hub-provided URL ...\n", target)
+				if err := downloadReplace(url, self); err != nil {
+					return fmt.Errorf("update failed: %w", err)
+				}
+				fmt.Printf("✅ Updated to %s — restart relay to apply\n", target)
+				return nil
+			}
 			fmt.Println("Checking GitHub for latest release ...")
 			release, err := fetchLatestRelease()
 			if err != nil {
@@ -133,6 +151,13 @@ func archSuffix() string {
 }
 
 func downloadReplace(url, dest string) error {
+	restoreImmutable, err := clearImmutableIfNeeded(dest)
+	if err != nil {
+		return err
+	}
+	if restoreImmutable {
+		defer func() { _ = exec.Command("chattr", "+i", dest).Run() }()
+	}
 	resp, err := http.Get(url) //nolint:noctx
 	if err != nil {
 		return err
@@ -147,9 +172,37 @@ func downloadReplace(url, dest string) error {
 		return fmt.Errorf("create temp file: %w", err)
 	}
 	if _, err := io.Copy(f, resp.Body); err != nil {
-		f.Close(); os.Remove(tmp) //nolint:errcheck
+		f.Close()
+		os.Remove(tmp) //nolint:errcheck
 		return fmt.Errorf("write: %w", err)
 	}
 	f.Close()
-	return os.Rename(tmp, dest) // atomic replace
+	if err := os.Rename(tmp, dest); err != nil {
+		return err
+	}
+	return nil
+}
+
+func clearImmutableIfNeeded(dest string) (bool, error) {
+	if runtime.GOOS != "linux" || os.Geteuid() != 0 {
+		return false, nil
+	}
+	if _, err := exec.LookPath("lsattr"); err != nil {
+		return false, nil
+	}
+	if _, err := exec.LookPath("chattr"); err != nil {
+		return false, nil
+	}
+	out, err := exec.Command("lsattr", "-d", dest).Output()
+	if err != nil {
+		return false, nil
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 || !strings.Contains(fields[0], "i") {
+		return false, nil
+	}
+	if out, err := exec.Command("chattr", "-i", dest).CombinedOutput(); err != nil {
+		return false, fmt.Errorf("clear immutable bit: %w (%s)", err, tail(out, 200))
+	}
+	return true, nil
 }

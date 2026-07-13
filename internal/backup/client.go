@@ -81,34 +81,50 @@ func (c *Client) Trigger(maps []*types.FileMap) {
 // Called at startup when relay already has credentials — ensures relay_url stays current
 // without re-registration (relay_id and backup history are preserved).
 func (c *Client) UpdateURL(publicURL string) error {
-	if c == nil || publicURL == "" { return nil }
+	if c == nil || publicURL == "" {
+		return nil
+	}
 	body, _ := json.Marshal(map[string]string{"relay_url": publicURL})
 	req, err := http.NewRequest(http.MethodPost, c.url+"/relay/update-url", bytes.NewReader(body))
-	if err != nil { return fmt.Errorf("update-url: new request: %w", err) }
+	if err != nil {
+		return fmt.Errorf("update-url: new request: %w", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Relay-ID", c.relayID)
 	req.Header.Set("X-Relay-Secret", c.secret)
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil { return fmt.Errorf("update-url: http post: %w", err) }
+	if err != nil {
+		return fmt.Errorf("update-url: http post: %w", err)
+	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK { return fmt.Errorf("update-url: status %d", resp.StatusCode) }
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("update-url: status %d", resp.StatusCode)
+	}
 	log.Printf("backup: relay_url updated in CRDB → %s", publicURL)
 	return nil
 }
 
 // UpdateUserID sets user_id in CRDB for this relay. Called on first JWT request for old relays. Safe to call on nil.
 func (c *Client) UpdateUserID(userID string) error {
-	if c == nil || userID == "" { return nil }
+	if c == nil || userID == "" {
+		return nil
+	}
 	body, _ := json.Marshal(map[string]string{"user_id": userID})
 	req, err := http.NewRequest(http.MethodPost, c.url+"/relay/update-user-id", bytes.NewReader(body))
-	if err != nil { return fmt.Errorf("update-user-id: new request: %w", err) }
+	if err != nil {
+		return fmt.Errorf("update-user-id: new request: %w", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Relay-ID", c.relayID)
 	req.Header.Set("X-Relay-Secret", c.secret)
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil { return fmt.Errorf("update-user-id: http post: %w", err) }
+	if err != nil {
+		return fmt.Errorf("update-user-id: http post: %w", err)
+	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK { return fmt.Errorf("update-user-id: status %d", resp.StatusCode) }
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("update-user-id: status %d", resp.StatusCode)
+	}
 	log.Printf("backup: user_id updated in CRDB → %s", userID)
 	return nil
 }
@@ -128,7 +144,11 @@ type PingResponse struct {
 // Fire-and-forget — the service downloads the new binary and restarts the relay, which
 // kills this process. We don't want to block the ping loop on it.
 // Overridable for tests via the package-level updateTrigger var.
-var updateTrigger = func() error {
+var updateTrigger = func(downloadURL, latestVersion string) error {
+	setEnv := exec.Command("systemctl", "set-environment", "DUDENEST_RELAY_DOWNLOAD_URL="+downloadURL, "DUDENEST_RELAY_TARGET_VERSION="+latestVersion)
+	if out, err := setEnv.CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl set-environment: %w (%s)", err, tail(out, 200))
+	}
 	cmd := exec.Command("systemctl", "start", "dudenest-relay-update.service")
 	return cmd.Start() // Start, not Run — don't wait for the service to finish (it restarts us mid-flight)
 }
@@ -139,20 +159,28 @@ var updateTrigger = func() error {
 //
 // Safe to call on nil.
 func (c *Client) Ping() (*PingResponse, error) {
-	if c == nil { return nil, nil }
+	if c == nil {
+		return nil, nil
+	}
 	body, _ := json.Marshal(map[string]string{
 		"relay_version": c.version,
 		"arch":          runtime.GOOS + "-" + runtime.GOARCH, // e.g. "linux-amd64" — hub uses this to pick the right download URL
 	})
 	req, err := http.NewRequest(http.MethodPost, c.url+"/relay/ping", bytes.NewReader(body))
-	if err != nil { return nil, fmt.Errorf("ping: new request: %w", err) }
+	if err != nil {
+		return nil, fmt.Errorf("ping: new request: %w", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Relay-ID", c.relayID)
 	req.Header.Set("X-Relay-Secret", c.secret)
 	httpResp, err := http.DefaultClient.Do(req)
-	if err != nil { return nil, fmt.Errorf("ping: http post: %w", err) }
+	if err != nil {
+		return nil, fmt.Errorf("ping: http post: %w", err)
+	}
 	defer httpResp.Body.Close()
-	if httpResp.StatusCode != http.StatusOK { return nil, fmt.Errorf("ping: status %d", httpResp.StatusCode) }
+	if httpResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ping: status %d", httpResp.StatusCode)
+	}
 	var resp PingResponse
 	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
 		// Older hub may return plain {"status":"ok"} which still decodes fine; only true JSON errors land here.
@@ -162,7 +190,7 @@ func (c *Client) Ping() (*PingResponse, error) {
 		c.relayID, c.version, resp.LatestVersion, resp.UpdateNow, resp.NextPingSeconds)
 	if resp.UpdateNow && resp.LatestVersion != "" && resp.LatestVersion != c.version && resp.DownloadURL != "" {
 		log.Printf("backup: fast-update: hub says newer version %s available, triggering systemd update unit", resp.LatestVersion)
-		if err := updateTrigger(); err != nil {
+		if err := updateTrigger(resp.DownloadURL, resp.LatestVersion); err != nil {
 			log.Printf("backup: fast-update: failed to trigger systemctl: %v (will retry next ping)", err)
 		}
 	}
@@ -178,7 +206,9 @@ func (c *Client) Ping() (*PingResponse, error) {
 // against hub bug/typo from accidentally hammering or stalling the whole fleet.
 // Safe to call on nil.
 func (c *Client) StartPingLoop(initial time.Duration) {
-	if c == nil { return }
+	if c == nil {
+		return
+	}
 	const (
 		minInterval = 1 * time.Second
 		maxInterval = 5 * time.Minute
@@ -194,8 +224,12 @@ func (c *Client) StartPingLoop(initial time.Duration) {
 			}
 			if resp != nil && resp.NextPingSeconds > 0 {
 				newInterval := time.Duration(resp.NextPingSeconds) * time.Second
-				if newInterval < minInterval { newInterval = minInterval }
-				if newInterval > maxInterval { newInterval = maxInterval }
+				if newInterval < minInterval {
+					newInterval = minInterval
+				}
+				if newInterval > maxInterval {
+					newInterval = maxInterval
+				}
 				if newInterval != interval {
 					log.Printf("backup: ping interval %s → %s (hub-driven)", interval, newInterval)
 					interval = newInterval
@@ -209,10 +243,10 @@ func (c *Client) StartPingLoop(initial time.Duration) {
 // v0.20.0+: BackupBlob (zero-knowledge AES-256-GCM) is the canonical field.
 // Legacy MapsJSON+ProvidersEnc kept in struct only for hub backward-compat decoding (NOT populated on send).
 type backupRequest struct {
-	MapsJSON      string   `json:"maps_json,omitempty"`      // EMPTY for v0.20.0+ — relay sends BackupBlob instead
-	ProvidersEnc  []byte   `json:"providers_enc,omitempty"`  // EMPTY for v0.20.0+ — encrypted inside BackupBlob
-	BackupBlob    []byte   `json:"backup_blob,omitempty"`    // NEW: AES-256-GCM(innerSnapshot) — hub stores opaque
-	ProviderIDs   []string `json:"provider_ids"`             // display only — non-sensitive index
+	MapsJSON      string   `json:"maps_json,omitempty"`     // EMPTY for v0.20.0+ — relay sends BackupBlob instead
+	ProvidersEnc  []byte   `json:"providers_enc,omitempty"` // EMPTY for v0.20.0+ — encrypted inside BackupBlob
+	BackupBlob    []byte   `json:"backup_blob,omitempty"`   // NEW: AES-256-GCM(innerSnapshot) — hub stores opaque
+	ProviderIDs   []string `json:"provider_ids"`            // display only — non-sensitive index
 	BackupVersion int64    `json:"backup_version"`
 }
 
@@ -228,6 +262,13 @@ type innerSnapshot struct {
 // Includes relay_id+version → prevents cross-relay swap and cross-version replay.
 func backupBlockID(relayID string, version int64) string {
 	return "relay-backup-v1:" + relayID + ":" + fmt.Sprintf("%d", version)
+}
+
+func tail(b []byte, n int) string {
+	if len(b) > n {
+		b = b[len(b)-n:]
+	}
+	return string(b)
 }
 
 func (c *Client) send(maps []*types.FileMap) error {
@@ -248,10 +289,14 @@ func (c *Client) send(maps []*types.FileMap) error {
 	backupVersion := time.Now().UnixMilli()
 	inner := innerSnapshot{Maps: maps, ProvidersEnc: providersEnc, ProviderIDs: providerIDs}
 	innerJSON, err := json.Marshal(inner)
-	if err != nil { return fmt.Errorf("marshal inner snapshot: %w", err) }
+	if err != nil {
+		return fmt.Errorf("marshal inner snapshot: %w", err)
+	}
 	_ = mapsJSON // kept for backward-compat reference; not sent
 	backupBlob, err := c.enc.Encrypt(backupBlockID(c.relayID, backupVersion), innerJSON)
-	if err != nil { return fmt.Errorf("encrypt backup blob: %w", err) }
+	if err != nil {
+		return fmt.Errorf("encrypt backup blob: %w", err)
+	}
 	body, err := json.Marshal(backupRequest{
 		BackupBlob:    backupBlob,
 		ProviderIDs:   providerIDs, // duplicated for hub ops index — non-sensitive
@@ -282,50 +327,70 @@ func (c *Client) send(maps []*types.FileMap) error {
 // restoreResponse matches the GET /relay/restore response from dudenest-hub.
 // Hub returns both legacy (maps_json/providers_enc) AND new (backup_blob) fields; client picks based on which is present.
 type restoreResponse struct {
-	RelayID       string  `json:"relay_id"`
-	MapsJSON      string  `json:"maps_json"`       // LEGACY: empty for v0.20.0+ backups
-	ProvidersEnc  []byte  `json:"providers_enc"`   // LEGACY: empty for v0.20.0+ backups
-	BackupBlob    []byte  `json:"backup_blob"`     // NEW: AES-256-GCM(innerSnapshot); empty for legacy backups
+	RelayID       string   `json:"relay_id"`
+	MapsJSON      string   `json:"maps_json"`     // LEGACY: empty for v0.20.0+ backups
+	ProvidersEnc  []byte   `json:"providers_enc"` // LEGACY: empty for v0.20.0+ backups
+	BackupBlob    []byte   `json:"backup_blob"`   // NEW: AES-256-GCM(innerSnapshot); empty for legacy backups
 	ProviderIDs   []string `json:"provider_ids"`
-	BackupVersion int64   `json:"backup_version"`
-	CreatedAt     string  `json:"created_at"`
+	BackupVersion int64    `json:"backup_version"`
+	CreatedAt     string   `json:"created_at"`
 }
 
 // Restore fetches the latest backup from dudenest-hub and writes maps + provider tokens to configDir.
 // Safe to call on nil. Returns (restored=true, nil) if backup was found and applied.
 func (c *Client) Restore() (bool, error) {
-	if c == nil { return false, nil }
+	if c == nil {
+		return false, nil
+	}
 	req, err := http.NewRequest(http.MethodGet, c.url+"/relay/restore", nil)
-	if err != nil { return false, fmt.Errorf("restore: new request: %w", err) }
+	if err != nil {
+		return false, fmt.Errorf("restore: new request: %w", err)
+	}
 	req.Header.Set("X-Relay-ID", c.relayID)
 	req.Header.Set("X-Relay-Secret", c.secret)
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil { return false, fmt.Errorf("restore: http get: %w", err) }
+	if err != nil {
+		return false, fmt.Errorf("restore: http get: %w", err)
+	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound { return false, nil } // no backup yet — normal
-	if resp.StatusCode != http.StatusOK { return false, fmt.Errorf("restore: backup returned %d", resp.StatusCode) }
+	if resp.StatusCode == http.StatusNotFound {
+		return false, nil
+	} // no backup yet — normal
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("restore: backup returned %d", resp.StatusCode)
+	}
 	var r restoreResponse
-	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil { return false, fmt.Errorf("restore: decode: %w", err) }
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		return false, fmt.Errorf("restore: decode: %w", err)
+	}
 	// Two-format handling: v0.20.0+ backups arrive as BackupBlob; legacy backups as MapsJSON+ProvidersEnc.
 	mapsJSON := r.MapsJSON
 	providersEnc := r.ProvidersEnc
 	if len(r.BackupBlob) > 0 {
 		innerJSON, err := c.enc.Decrypt(backupBlockID(c.relayID, r.BackupVersion), r.BackupBlob)
-		if err != nil { return false, fmt.Errorf("restore: decrypt blob (relay_id=%s version=%d): %w", c.relayID, r.BackupVersion, err) }
+		if err != nil {
+			return false, fmt.Errorf("restore: decrypt blob (relay_id=%s version=%d): %w", c.relayID, r.BackupVersion, err)
+		}
 		var inner innerSnapshot
-		if err := json.Unmarshal(innerJSON, &inner); err != nil { return false, fmt.Errorf("restore: unmarshal inner: %w", err) }
+		if err := json.Unmarshal(innerJSON, &inner); err != nil {
+			return false, fmt.Errorf("restore: unmarshal inner: %w", err)
+		}
 		mapsBytes, _ := json.Marshal(inner.Maps)
 		mapsJSON = string(mapsBytes)
 		providersEnc = inner.ProvidersEnc
 	}
-	if mapsJSON == "" { return false, nil }
+	if mapsJSON == "" {
+		return false, nil
+	}
 	mapsPath := filepath.Join(c.configDir, "maps.json")
 	if err := os.WriteFile(mapsPath, []byte(mapsJSON), 0o600); err != nil {
 		return false, fmt.Errorf("restore: write maps: %w", err)
 	}
 	if len(providersEnc) > 0 && c.enc != nil {
 		provJSON, err := c.enc.Decrypt("relay-providers-v1", providersEnc)
-		if err != nil { log.Printf("restore: decrypt providers failed: %v (skipping token restore)", err) } else {
+		if err != nil {
+			log.Printf("restore: decrypt providers failed: %v (skipping token restore)", err)
+		} else {
 			var tokens map[string]json.RawMessage
 			if err := json.Unmarshal(provJSON, &tokens); err == nil {
 				provDir := filepath.Join(c.configDir, "providers")
@@ -340,7 +405,9 @@ func (c *Client) Restore() (bool, error) {
 		}
 	}
 	format := "legacy"
-	if len(r.BackupBlob) > 0 { format = "zero-knowledge blob" }
+	if len(r.BackupBlob) > 0 {
+		format = "zero-knowledge blob"
+	}
 	log.Printf("restore: ✅ restored backup v%d (%s, %s) — %d providers", r.BackupVersion, r.CreatedAt, format, len(r.ProviderIDs))
 	return true, nil
 }

@@ -46,7 +46,7 @@ func EnsureSidecar(version string) {
 	ref := provisionRef(version)
 	ensureAntiAbuseHost()
 	marker := filepath.Join(sidecarDir, ".provisioned-"+ref)
-	if _, err := os.Stat(marker); err == nil {
+	if _, err := os.Stat(marker); err == nil && sidecarReady(ref) {
 		return // already provisioned for this version
 	}
 	if err := os.MkdirAll(sidecarDir, 0o755); err != nil {
@@ -61,9 +61,15 @@ func EnsureSidecar(version string) {
 			ok = false
 		}
 	}
-	ensureNoVNCFiles(ref)
-	ensureSidecarAptDeps()
-	ensureSidecarPipDeps()
+	if !ensureNoVNCFiles(ref) {
+		ok = false
+	}
+	if !ensureSidecarAptDeps() {
+		ok = false
+	}
+	if !ensureSidecarPipDeps() {
+		ok = false
+	}
 	if ok {
 		_ = os.WriteFile(marker, []byte(ref), 0o644)
 		log.Printf("provision: method-3 sidecar %s ready in %s", ref, sidecarDir)
@@ -72,17 +78,34 @@ func EnsureSidecar(version string) {
 	}
 }
 
-func ensureNoVNCFiles(ref string) {
+func ensureNoVNCFiles(ref string) bool {
 	if err := os.MkdirAll(noVNCDir, 0o755); err != nil {
 		log.Printf("provision: mkdir %s: %v", noVNCDir, err)
-		return
+		return false
 	}
+	ok := true
 	for _, f := range noVNCFiles {
 		url := fmt.Sprintf("%s/%s/deploy/relay-poc/%s", rawBase, ref, f)
 		if err := downloadTo(url, filepath.Join(noVNCDir, f)); err != nil {
 			log.Printf("provision: fetch noVNC %s: %v", f, err)
+			ok = false
 		}
 	}
+	return ok
+}
+
+func sidecarReady(ref string) bool {
+	for _, f := range sidecarFiles {
+		if _, err := os.Stat(filepath.Join(sidecarDir, f)); err != nil {
+			return false
+		}
+	}
+	for _, f := range noVNCFiles {
+		if _, err := os.Stat(filepath.Join(noVNCDir, f)); err != nil {
+			return false
+		}
+	}
+	return sidecarAptDepsReady() && sidecarPipDepsReady()
 }
 
 func downloadTo(url, dest string) error {
@@ -189,7 +212,16 @@ func isDebianLikeAMD64() bool {
 
 // ensureSidecarAptDeps installs the OCR/input tools if any is missing — only as root with
 // apt-get available (Debian/Ubuntu relay hosts). Silent no-op otherwise.
-func ensureSidecarAptDeps() {
+func sidecarAptDepsReady() bool {
+	for _, bin := range []string{"tesseract", "xdotool", "scrot", "xclip", "python3"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func ensureSidecarAptDeps() bool {
 	missing := false
 	for _, bin := range []string{"tesseract", "xdotool", "scrot", "xclip", "python3"} {
 		if _, err := exec.LookPath(bin); err != nil {
@@ -198,36 +230,48 @@ func ensureSidecarAptDeps() {
 		}
 	}
 	if !missing {
-		return
+		return true
 	}
 	if os.Geteuid() != 0 {
 		log.Printf("provision: method-3 deps missing but not root — run scripts/install.sh")
-		return
+		return false
 	}
 	if _, err := exec.LookPath("apt-get"); err != nil {
 		log.Printf("provision: method-3 deps missing and no apt-get — install manually: %v", sidecarAptDeps)
-		return
+		return false
 	}
-	args := append([]string{"install", "-y", "--no-install-recommends", "python3-pip", "python3-pil"}, sidecarAptDeps...)
-	cmd := exec.Command("apt-get", args...)
+	deps := append([]string{"python3-pip", "python3-pil"}, sidecarAptDeps...)
+	script := "apt-get update -qq && dpkg --configure -a && apt-get install -y --fix-broken && apt-get install -y --no-install-recommends " + strings.Join(deps, " ")
+	cmd := exec.Command("bash", "-c", script)
 	cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		log.Printf("provision: apt-get install failed: %v (%s)", err, tail(out, 200))
+		return false
 	} else {
 		log.Printf("provision: installed method-3 apt deps")
 	}
+	return sidecarAptDepsReady()
 }
 
-func ensureSidecarPipDeps() {
-	if exec.Command("python3", "-c", "import nacl, pytesseract").Run() == nil {
-		return // already importable
+func sidecarPipDepsReady() bool {
+	return exec.Command("python3", "-c", "import nacl, pytesseract").Run() == nil
+}
+
+func ensureSidecarPipDeps() bool {
+	if sidecarPipDepsReady() {
+		return true
 	}
-	cmd := exec.Command("pip3", "install", "--break-system-packages", "--quiet", "pynacl", "pytesseract")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		log.Printf("provision: pip install failed: %v (%s)", err, tail(out, 200))
-	} else {
-		log.Printf("provision: installed method-3 pip deps")
+	commands := [][]string{{"python3", "-m", "pip", "install", "--break-system-packages", "--quiet", "pynacl", "pytesseract"}, {"pip3", "install", "--break-system-packages", "--quiet", "pynacl", "pytesseract"}}
+	for _, args := range commands {
+		cmd := exec.Command(args[0], args[1:]...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("provision: pip install via %s failed: %v (%s)", strings.Join(args[:3], " "), err, tail(out, 200))
+			continue
+		}
+		log.Printf("provision: installed method-3 pip deps via %s", strings.Join(args[:3], " "))
+		return sidecarPipDepsReady()
 	}
+	return false
 }
 
 func tail(b []byte, n int) string {
