@@ -128,7 +128,7 @@ jobs:
             chmod +x /dist/relay-linux-amd64 && \
             scp -i /root/.ssh/id_relay -o UserKnownHostsFile=/root/.ssh/known_hosts -o StrictHostKeyChecking=yes /relay.env root@10.51.1.119:/root/.config/dudenest/relay.env && \
             scp -i /root/.ssh/id_relay -o UserKnownHostsFile=/root/.ssh/known_hosts -o StrictHostKeyChecking=yes /dist/relay-linux-amd64 root@10.51.1.119:/tmp/relay-new && \
-            ssh -i /root/.ssh/id_relay -o UserKnownHostsFile=/root/.ssh/known_hosts -o StrictHostKeyChecking=yes root@10.51.1.119 'mv /tmp/relay-new /usr/local/bin/relay && systemctl restart dudenest-relay && systemctl is-active dudenest-relay'
+            ssh -i /root/.ssh/id_relay -o UserKnownHostsFile=/root/.ssh/known_hosts -o StrictHostKeyChecking=yes root@10.51.1.119 'chattr -i /usr/local/bin/relay 2>/dev/null || true; mv /tmp/relay-new /usr/local/bin/relay && chmod 755 /usr/local/bin/relay && chattr +i /usr/local/bin/relay 2>/dev/null || true; systemctl restart dudenest-relay && systemctl is-active dudenest-relay'
           "
           docker rm -f $DEPLOYER
 
