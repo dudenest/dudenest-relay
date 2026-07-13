@@ -14,6 +14,7 @@ import (
 	"github.com/dudenest/dudenest-relay/internal/auth"
 	"github.com/dudenest/dudenest-relay/internal/browser"
 	"github.com/dudenest/dudenest-relay/internal/relaytoken"
+	"github.com/dudenest/dudenest-relay/internal/remotehand"
 	wsrelay "github.com/dudenest/dudenest-relay/internal/ws"
 )
 
@@ -99,5 +100,26 @@ func TestQueryJWTStillRequiresRelayTokenOutsideFiles(t *testing.T) {
 	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/vnc/dudenest.html?token="+jwt+"&relay_token="+good, nil))
 	if rr.Code == http.StatusUnauthorized || rr.Code == http.StatusForbidden {
 		t.Fatalf("/vnc owner query auth status=%d want proxied response", rr.Code)
+	}
+}
+
+func TestStandbyAccountRoutesDoNotFallThroughTo503(t *testing.T) {
+	auth.SetJWTSecret("test-jwt-secret")
+	mux := http.NewServeMux()
+	lr := &lazyRegistrar{}
+	rhMgr := remotehand.NewManager(wsrelay.NewHub(), remotehand.NewDisplayPool(":99"), "/no/such/sidecar.py", time.Minute)
+	registerStandbyAccountRoutes(mux, lr, rhMgr)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { jsonErr(w, "standby", http.StatusServiceUnavailable) })
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/providers", nil)
+	req.Header.Set("Authorization", "Bearer "+testJWT(t, "owner-1"))
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || rr.Body.String() != "[]" {
+		t.Fatalf("/providers standby status=%d body=%q, want 200 []", rr.Code, rr.Body.String())
+	}
+	rr = httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/relay/oauth3/start", nil))
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("/relay/oauth3/start standby status=%d body=%q, want 401 not catch-all 503", rr.Code, rr.Body.String())
 	}
 }

@@ -66,7 +66,7 @@ func serveCmd() *cobra.Command {
 // gracefully shut down and the function returns nil — the outer loop then retries getPipeline()
 // and upgrades to the full server WITHOUT a process restart (no systemd cycle, no Flutter disconnect storm).
 // If ListenAndServe fails for any other reason, that error is returned instead.
-func degradedServerWithAuth(listen, reason, configDir, publicURL string, authSrv interface{ RegisterRoutesNoProviders(*http.ServeMux) }, wsHub http.Handler, tryReg func(string), reload <-chan struct{}) error {
+func degradedServerWithAuth(listen, reason, configDir, publicURL string, authSrv interface{ RegisterRoutesNoProviders(*http.ServeMux) }, wsHub http.Handler, tryReg func(string), lr *lazyRegistrar, rhMgr *remotehand.Manager, reload <-chan struct{}) error {
 	log.Printf("⚠️  relay: entering standby mode — %s", reason)
 	log.Printf("⚠️  relay: /files=503, /auth active — re-authorize via Flutter app")
 	tickerCtx, tickerCancel := context.WithCancel(context.Background())
@@ -100,6 +100,7 @@ func degradedServerWithAuth(listen, reason, configDir, publicURL string, authSrv
 	})
 	mux.HandleFunc("/files", standbyFile)
 	mux.HandleFunc("/files/", standbyFile)
+	registerStandbyAccountRoutes(mux, lr, rhMgr)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "relay in standby: "+reason, http.StatusServiceUnavailable)
 	})
@@ -119,6 +120,18 @@ func degradedServerWithAuth(listen, reason, configDir, publicURL string, authSrv
 		defer cancel()
 		_ = srv.Shutdown(ctx) //nolint:errcheck
 		return nil            // signal to caller: retry getPipeline()
+	}
+}
+
+func registerStandbyAccountRoutes(mux *http.ServeMux, lr *lazyRegistrar, rhMgr *remotehand.Manager) {
+	mux.HandleFunc("/providers", requireAuthWithReg(lr, func(w http.ResponseWriter, r *http.Request) { // standby: empty list lets Flutter show Add Account instead of Error 503
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("[]")) //nolint:errcheck
+	}))
+	if rhMgr != nil { // RemoteHand must work in standby so metoda 3 can add the first cloud account
+		mux.HandleFunc("/relay/oauth3/start", requireAuthWithReg(lr, rhMgr.StartHandler()))
+		mux.HandleFunc("/relay/oauth3/end", requireAuthWithReg(lr, rhMgr.EndHandler()))
+		mux.HandleFunc("/relay/oauth3/input", requireAuthWithReg(lr, rhMgr.InputHandler()))
 	}
 }
 
@@ -226,6 +239,31 @@ func runServe(cmd *cobra.Command, args []string) error {
 		default:
 		}
 	})
+	standbyKey, _ := getKey()
+	lrStandby := &lazyRegistrar{configDir: authConfigDir, masterKey: standbyKey, backupURL: cfg.Backup.URL, publicURL: cfg.Backup.PublicURL, debounce: cfg.Debounce()}
+	rhDisplay := cfg.Server.Display
+	if rhDisplay == "" {
+		rhDisplay = ":99"
+	}
+	rhScript := os.Getenv("RH_SIDECAR_SCRIPT")
+	if rhScript == "" {
+		rhScript = "/usr/local/lib/dudenest/remotehand/rh_sidecar.py"
+	}
+	go EnsureSidecar(Version) // top up method-3 sidecar+deps after binary-only auto-update (non-blocking)
+	rhMgr := remotehand.NewManager(wsHub, remotehand.NewDisplayPool(rhDisplay), rhScript, cfg.SessionTimeout())
+	rhMgr.SetPrepare(func(provider string) (string, error) { // provider → OAuth URL + arm server-side token capture; works before first provider exists
+		if provider != "gdrive" {
+			return "", fmt.Errorf("provider %q not supported for relay-assisted login", provider)
+		}
+		if cfg2 == nil {
+			return "", fmt.Errorf("OAuth client_secret not available yet; complete relay bootstrap first")
+		}
+		url := browser.BuildAuthURL(cfg2)
+		if err := authSrv.StartAssistedCapture(url); err != nil {
+			return "", err
+		}
+		return url, nil
+	})
 	var p *pipeline.Pipeline
 	for {
 		p, err = getPipeline()
@@ -239,7 +277,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		case <-reload:
 		default:
 		} // drain stale signal so we wait fresh on the next standby cycle
-		if serr := degradedServerWithAuth(cfg.Server.Listen, fmt.Sprintf("pipeline init: %v", err), authConfigDir, cfg.Backup.PublicURL, authSrv, wsHub, tryReg, reload); serr != nil {
+		if serr := degradedServerWithAuth(cfg.Server.Listen, fmt.Sprintf("pipeline init: %v", err), authConfigDir, cfg.Backup.PublicURL, authSrv, wsHub, tryReg, lrStandby, rhMgr, reload); serr != nil {
 			return serr
 		}
 		log.Printf("✅ relay: exiting standby — re-initializing pipeline with newly authorized provider")
@@ -415,33 +453,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	mux.HandleFunc("/files/", requireAuthWithReg(lr, fs.handleFile))
 	mux.HandleFunc("/admin/version", requireAuthWithReg(lr, fs.handleAdminVersion)) // Flutter Update screen — read current + latest release info
 	mux.HandleFunc("/admin/update", requireAuthWithReg(lr, fs.handleAdminUpdate))   // Flutter Update screen — trigger immediate self-update + restart
-	// Method 3 (Remote-Hand): CDP-free mediated login. Manager spawns a Python
-	// sidecar per session on an allocated X display; Flutter drives a schema-driven
-	// form over /ws. See RELAY-REMOTE-HAND-PLAN.md. Sidecar path via env, default
-	// install location; Manager is lazy (spawns nothing until /relay/oauth3/start).
-	rhDisplay := cfg.Server.Display
-	if rhDisplay == "" {
-		rhDisplay = ":99"
-	}
-	rhScript := os.Getenv("RH_SIDECAR_SCRIPT")
-	if rhScript == "" {
-		rhScript = "/usr/local/lib/dudenest/remotehand/rh_sidecar.py"
-	}
-	go EnsureSidecar(Version) // top up the method-3 sidecar+deps after a binary-only auto-update (non-blocking)
-	rhMgr := remotehand.NewManager(wsHub, remotehand.NewDisplayPool(rhDisplay), rhScript, cfg.SessionTimeout())
-	rhMgr.SetPrepare(func(provider string) (string, error) { // provider → OAuth URL + arm server-side token capture (reuses method-2 helpers)
-		if provider != "gdrive" {
-			return "", fmt.Errorf("provider %q not supported for relay-assisted login", provider)
-		}
-		if cfg2 == nil {
-			return "", fmt.Errorf("OAuth client_secret not available yet; complete relay bootstrap first")
-		}
-		url := browser.BuildAuthURL(cfg2)
-		if err := authSrv.StartAssistedCapture(url); err != nil {
-			return "", err
-		}
-		return url, nil
-	})
+	// Method 3 (Remote-Hand): manager is created before standby loop so first-account assisted login works while /files is still 503.
 	mux.HandleFunc("/relay/oauth3/start", requireAuthWithReg(lr, rhMgr.StartHandler())) // begin method-3 session → {session_id}
 	mux.HandleFunc("/relay/oauth3/end", requireAuthWithReg(lr, rhMgr.EndHandler()))     // tear down method-3 session
 	mux.HandleFunc("/relay/oauth3/input", requireAuthWithReg(lr, rhMgr.InputHandler())) // Flutter → sidecar input (HTTP POST, reliable)
