@@ -28,20 +28,21 @@ class TestBuildCommand(unittest.TestCase):
 
 
 class TestChromeBinary(unittest.TestCase):
-    def test_prefers_real_chrome_over_chromium(self):
-        seen = {"google-chrome-stable": "/usr/bin/google-chrome-stable", "chromium": "/usr/bin/chromium"}
+    def test_prefers_dudenest_browser_then_real_chrome(self):
+        seen = {"dudenest-browser": "/usr/local/bin/dudenest-browser", "google-chrome-stable": "/usr/bin/google-chrome-stable", "chromium": "/usr/bin/chromium"}
         orig = rh_browser.shutil.which
         rh_browser.shutil.which = lambda c: seen.get(c)
         try:
-            self.assertEqual(chrome_binary(), "/usr/bin/google-chrome-stable")
+            self.assertEqual(chrome_binary(), "/usr/local/bin/dudenest-browser")
         finally:
             rh_browser.shutil.which = orig
 
-    def test_falls_back_to_chromium_when_no_chrome(self):
+    def test_fails_closed_when_only_chromium_exists(self):
         orig = rh_browser.shutil.which
         rh_browser.shutil.which = lambda c: "/usr/bin/chromium" if c == "chromium" else None
         try:
-            self.assertEqual(chrome_binary(), "/usr/bin/chromium")
+            with self.assertRaises(RuntimeError):
+                chrome_binary()
         finally:
             rh_browser.shutil.which = orig
 

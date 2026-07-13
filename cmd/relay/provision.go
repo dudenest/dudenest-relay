@@ -11,13 +11,11 @@ import (
 	"strings"
 )
 
-// Method-3 (Remote-Hand) needs a Python sidecar + small OCR/input tools that a binary-only
-// `relay update` does NOT deliver (update.go replaces only the executable). EnsureSidecar
-// tops those up on startup so a fleet relay that auto-updates gets a working method 3
-// without a full re-install. Best-effort and version-marked (runs once per version).
-//
-// NOTE: the X/VNC desktop + Chromium themselves come from scripts/install.sh — this only
-// provisions the sidecar layer on top of an already-provisioned relay host.
+// Method-3 (Remote-Hand) needs Python sidecar files plus anti-abuse host state that a
+// binary-only `relay update` historically did not deliver. EnsureSidecar now also applies
+// the B5 host migration (real Google Chrome on amd64 + timezone-from-IP) on every startup,
+// before the version marker can short-circuit sidecar downloads. Best-effort: never crash
+// relay startup, but log clearly if the host cannot be made safe for real-account testing.
 
 const sidecarDir = "/usr/local/lib/dudenest/remotehand"
 const rawBase = "https://raw.githubusercontent.com/dudenest/dudenest-relay"
@@ -30,8 +28,7 @@ var sidecarFiles = []string{
 
 var noVNCFiles = []string{"dudenest-form.html"}
 
-// small method-3 deps only (OCR read + XTEST input + clipboard verify); the browser and
-// desktop stack are install.sh's job.
+// small method-3 deps only (OCR read + XTEST input + clipboard verify).
 var sidecarAptDeps = []string{"tesseract-ocr", "xdotool", "scrot", "xclip"}
 
 // EnsureSidecar downloads the sidecar matching this binary's version and installs the small
@@ -47,6 +44,7 @@ func provisionRef(version string) string {
 
 func EnsureSidecar(version string) {
 	ref := provisionRef(version)
+	ensureAntiAbuseHost()
 	marker := filepath.Join(sidecarDir, ".provisioned-"+ref)
 	if _, err := os.Stat(marker); err == nil {
 		return // already provisioned for this version
@@ -66,7 +64,6 @@ func EnsureSidecar(version string) {
 	ensureNoVNCFiles(ref)
 	ensureSidecarAptDeps()
 	ensureSidecarPipDeps()
-	ensureBrowserIsChrome()
 	if ok {
 		_ = os.WriteFile(marker, []byte(ref), 0o644)
 		log.Printf("provision: method-3 sidecar %s ready in %s", ref, sidecarDir)
@@ -111,22 +108,83 @@ func downloadTo(url, dest string) error {
 	return os.Rename(tmp, dest)
 }
 
-// ensureBrowserIsChrome logs a hint when the method-3 browser is still open-source Chromium
-// instead of real Google Chrome (B5). Installing Chrome (apt repo + package) is install.sh's job;
-// a binary-only update can't add an apt repo, so here we only surface the gap — never mutate.
-func ensureBrowserIsChrome() {
-	path, err := exec.LookPath("chromium") // symlink install.sh points at the chosen browser
-	if err != nil {
+// ensureAntiAbuseHost applies B5 automatically after a binary-only update: real Google
+// Chrome on Debian/Ubuntu amd64, no open-source Chromium package left behind, a neutral
+// /usr/local/bin/dudenest-browser launcher, and daily timezone-from-IP sync. ARM cannot run
+// Google Chrome .deb; for real-account OAuth on ARM use a supported Chrome build/appliance.
+func ensureAntiAbuseHost() {
+	if os.Geteuid() != 0 {
+		log.Printf("provision: B5 host migration skipped (not root)")
 		return
 	}
-	real, _ := filepath.EvalSymlinks(path)
-	if strings.Contains(strings.ToLower(real), "chrome") { // google-chrome[-stable]
+	if _, err := exec.LookPath("apt-get"); err != nil {
+		log.Printf("provision: B5 host migration skipped (apt-get unavailable)")
 		return
 	}
-	if _, err := exec.LookPath("google-chrome-stable"); err == nil {
-		return // real Chrome present under its own name
+	if !isDebianLikeAMD64() {
+		log.Printf("provision: B5 real Chrome unavailable on this OS/arch — do not use real Google accounts until a real Chrome build is provided")
+		return
 	}
-	log.Printf("provision: method-3 browser is %q (open-source Chromium) — run scripts/install.sh to install Google Chrome (B5 anti-abuse)", real)
+	script := `set -e
+export DEBIAN_FRONTEND=noninteractive
+install -d -m 755 /etc/apt/keyrings
+if [ ! -f /etc/apt/sources.list.d/google-chrome.list ]; then curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg; echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main' > /etc/apt/sources.list.d/google-chrome.list; apt-get update -qq; fi
+dpkg -s google-chrome-stable >/dev/null 2>&1 || { apt-get update -qq; apt-get install -y --no-install-recommends google-chrome-stable; }
+ln -sfn /usr/bin/google-chrome-stable /usr/local/bin/dudenest-browser
+ln -sfn /usr/bin/google-chrome-stable /usr/local/bin/chromium
+apt-get purge -y chromium chromium-sandbox chromium-browser >/dev/null 2>&1 || true
+cat >/usr/local/sbin/dudenest-tz-sync <<'TZS'
+#!/bin/bash
+set -uo pipefail
+TZ_NEW="$(curl -fsS --max-time 10 https://ipapi.co/timezone 2>/dev/null || true)"
+[ -z "$TZ_NEW" ] && TZ_NEW="$(curl -fsS --max-time 10 'http://ip-api.com/line/?fields=timezone' 2>/dev/null || true)"
+if [ -n "$TZ_NEW" ] && [ -f "/usr/share/zoneinfo/$TZ_NEW" ]; then timedatectl set-timezone "$TZ_NEW" && echo "dudenest-tz-sync: timezone → $TZ_NEW"; else echo "dudenest-tz-sync: could not resolve timezone from IP"; fi
+TZS
+chmod 755 /usr/local/sbin/dudenest-tz-sync
+cat >/etc/systemd/system/dudenest-tz-sync.service <<'TZU'
+[Unit]
+Description=Sync system timezone to public egress IP (method-3 anti-abuse)
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dudenest-tz-sync
+[Install]
+WantedBy=multi-user.target
+TZU
+cat >/etc/systemd/system/dudenest-tz-sync.timer <<'TZT'
+[Unit]
+Description=Daily timezone re-sync to public egress IP
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1d
+Persistent=true
+[Install]
+WantedBy=timers.target
+TZT
+if [ -f /etc/systemd/system/dudenest-kiosk.service ]; then perl -0pi -e 's#/usr/local/bin/chromium#/usr/local/bin/dudenest-browser#g; s#/usr/bin/chromium#/usr/local/bin/dudenest-browser#g; s#/usr/bin/google-chrome-stable#/usr/local/bin/dudenest-browser#g' /etc/systemd/system/dudenest-kiosk.service; fi
+systemctl daemon-reload
+systemctl enable --now dudenest-tz-sync.timer >/dev/null 2>&1 || true
+/usr/local/sbin/dudenest-tz-sync || true
+systemctl try-restart dudenest-kiosk.service >/dev/null 2>&1 || true
+`
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Env = os.Environ()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		log.Printf("provision: B5 host migration failed: %v (%s)", err, tail(out, 400))
+		return
+	}
+	log.Printf("provision: B5 host migration ready (Google Chrome + TZ sync + Chromium package purge)")
+}
+
+func isDebianLikeAMD64() bool {
+	out, err := exec.Command("dpkg", "--print-architecture").Output()
+	if err != nil || strings.TrimSpace(string(out)) != "amd64" {
+		return false
+	}
+	data, _ := os.ReadFile("/etc/os-release")
+	s := strings.ToLower(string(data))
+	return strings.Contains(s, "id=debian") || strings.Contains(s, "id=ubuntu") || strings.Contains(s, "id_like=debian")
 }
 
 // ensureSidecarAptDeps installs the OCR/input tools if any is missing — only as root with

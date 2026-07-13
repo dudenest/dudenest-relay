@@ -78,11 +78,9 @@ APT_PKGS=(
   unattended-upgrades apt-listchanges
 )
 APT_OPTS=(-y --no-install-recommends -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confnew)
-# Browser: use REAL Google Chrome (B5). Its fingerprint (branding, WebGL renderer, media, fonts)
-# matches an ordinary consumer desktop; open-source Chromium is distinguishable and trips Google's
-# anti-abuse on OAuth sign-ins. Google ships chrome only for amd64 — arm relays fall back to
-# chromium. We symlink whatever we get to /usr/local/bin/chromium so chromedp.ExecPath("chromium")
-# and the method-3 launcher both resolve it.
+# Browser: use REAL Google Chrome (B5). Open-source Chromium is a known inconsistent
+# fingerprint for Google OAuth, so method-3-capable installs fail closed when Chrome is
+# unavailable instead of silently falling back to Chromium.
 DEB_ARCH="$(dpkg --print-architecture 2>/dev/null || echo unknown)"
 if [[ "$DEB_ARCH" == "amd64" && ( "$DISTRO_ID" == "debian" || "$DISTRO_ID" == "ubuntu" ) ]]; then
   if ! [[ -f /etc/apt/sources.list.d/google-chrome.list ]]; then
@@ -93,8 +91,7 @@ if [[ "$DEB_ARCH" == "amd64" && ( "$DISTRO_ID" == "debian" || "$DISTRO_ID" == "u
   fi
   APT_PKGS+=(google-chrome-stable)
 else
-  warn "Google Chrome unavailable for ${DISTRO_ID}/${DEB_ARCH} — falling back to open-source chromium"
-  APT_PKGS+=(chromium chromium-sandbox)
+  fail "Google Chrome unavailable for ${DISTRO_ID}/${DEB_ARCH}; Remote-Hand real-account OAuth is disabled on this host/arch"
 fi
 MISSING=()
 for p in "${APT_PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 || MISSING+=("$p"); done
@@ -106,17 +103,17 @@ if [[ ${#MISSING[@]} -gt 0 ]]; then
   apt-get install --fix-broken "${APT_OPTS[@]}" 2>/dev/null || true
   apt-get install "${APT_OPTS[@]}" "${MISSING[@]}"
 fi
-# Pick the browser binary the relay can use (chromedp.ExecPath("chromium") relies on $PATH lookup
-# of `chromium`, so we expose the browser under that name). Prefer real Chrome over Chromium.
+# Pick the browser binary the relay can use. `dudenest-browser` is the canonical launcher;
+# `/usr/local/bin/chromium` remains only as a legacy compatibility symlink to Chrome.
 BROWSER_BIN=""
-for cand in /usr/bin/google-chrome-stable /usr/bin/google-chrome /usr/bin/chromium /usr/bin/chromium-browser; do
+for cand in /usr/bin/google-chrome-stable /usr/bin/google-chrome; do
   [[ -x "$cand" ]] && { BROWSER_BIN="$cand"; break; }
 done
-[[ -n "$BROWSER_BIN" ]] || fail "No Chromium/Chrome binary found after apt install"
-if [[ ! -x /usr/local/bin/chromium || "$(readlink -f /usr/local/bin/chromium 2>/dev/null)" != "$BROWSER_BIN" ]]; then
-  ln -sfn "$BROWSER_BIN" /usr/local/bin/chromium
-fi
-ok "All required packages installed (browser: $BROWSER_BIN → /usr/local/bin/chromium)"
+[[ -n "$BROWSER_BIN" ]] || fail "Google Chrome binary not found after apt install"
+ln -sfn "$BROWSER_BIN" /usr/local/bin/dudenest-browser
+ln -sfn "$BROWSER_BIN" /usr/local/bin/chromium  # legacy compatibility; target is Chrome
+apt-get purge -y chromium chromium-sandbox chromium-browser >/dev/null 2>&1 || true
+ok "All required packages installed (browser: $BROWSER_BIN → /usr/local/bin/dudenest-browser)"
 
 # B5: keep the system timezone matching the public egress IP. The method-3 browser reports its
 # JS timezone (Intl/Date) from the system tz; if that disagrees with the IP's geolocation Google
@@ -552,7 +549,7 @@ Environment=DISPLAY=:0 XAUTHORITY=/var/run/lightdm/root/:0 XDG_CURRENT_DESKTOP=X
 # starts before the window manager and ends up with no decorations.
 ExecStartPre=/bin/bash -c 'for i in {1..30}; do [[ -S /tmp/.X11-unix/X0 && -f /var/run/lightdm/root/:0 ]] && pgrep -x xfwm4 >/dev/null && exit 0; sleep 2; done; exit 1'
 # --test-type suppresses the --no-sandbox warning banner. Other flags match relay-poc reference.
-ExecStart=/usr/local/bin/chromium --no-sandbox --test-type --no-first-run --disable-infobars --user-data-dir=/var/lib/dudenest/kiosk-chrome --start-maximized http://localhost:$NOVNC_PORT/dudenest.html
+ExecStart=/usr/local/bin/dudenest-browser --no-sandbox --test-type --no-first-run --disable-infobars --user-data-dir=/var/lib/dudenest/kiosk-chrome --start-maximized http://localhost:$NOVNC_PORT/dudenest.html
 # Chromium's `--start-maximized` is only honored on first launch; after Chrome saves window
 # state, subsequent launches restore the saved (often non-maximized) geometry. wmctrl forces
 # the maximize state every boot, regardless of saved Preferences.
