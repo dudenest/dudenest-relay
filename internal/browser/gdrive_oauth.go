@@ -44,18 +44,31 @@ func LoadClientSecret(path string) (*GDriveClientSecret, error) {
 // BuildOAuthConfig creates an oauth2.Config from client_secret.json.
 // redirectURL is the full callback URI (e.g. from config.CallbackURL(port)).
 //
-// s329 #scope: drive.DriveScope (full access — see/edit/manage/delete) replaces drive.DriveFileScope
-// (per-file, only files created by the app). User decision 2026-05-30: dudenest is designed for full
-// management of connected Drive accounts (browse arbitrary files, future edit/move/delete features) —
-// drive.file was empirically insufficient for whole-Drive bootstrap (lister.ListAll returned 0 files
-// for pre-existing user files on tvquos@gmail.com 6th + getechnics@ 7th accounts). Existing tokens
-// stay on drive.file scope and continue to work for app-created files; user must Reconnect each tile
-// in Settings → Cloud Accounts to upgrade to full scope.
+// #scope: drive.DriveFileScope (per-file — only files this OAuth client created, or that the user
+// opened with it). Reverts the drive.DriveScope (full-access) upgrade made in s329 (2026-05-30).
+//
+// Why back to drive.file — user decision 2026-07-15 ("na tym etapie produkt nie potrzebuje widzieć
+// innych plików których sam nie stworzył"):
+//   - drive / drive.readonly are RESTRICTED scopes → Google requires a CASA security assessment
+//     ($500-4500/yr, re-audited every 12 months). Unverified + restricted = hard 100-user lifetime
+//     cap + "Google hasn't verified this app" consent screen. Both block a store launch.
+//   - Measured on relay-poc 2026-07-15: 943 FileMaps indexed, 0 with Strategy=Foreign — the full
+//     scope had bought nothing; BootstrapWholeDrive produced zero entries in ~6 weeks of running.
+//   - client_secret is shared fleet-wide (entrypoint.sh), so every relay shares one client_id →
+//     files uploaded by ANY relay stay visible to EVERY relay under drive.file. Only files the user
+//     placed on Drive outside dudenest become invisible — that is the accepted trade.
+//
+// Consequence: BootstrapWholeDrive / CloudFullLister.ListAll now see only app-created files (already
+// in the blockmap) → effectively inert. Kept rather than deleted: re-upgrading is this one constant
+// plus a Reconnect, if whole-Drive adoption ever becomes a funded product goal (CASA).
+//
+// Existing tokens keep whatever scope was granted at consent time; user must Reconnect each tile in
+// Settings → Cloud Accounts to move an account onto drive.file.
 func BuildOAuthConfig(cs *GDriveClientSecret, redirectURL string) *oauth2.Config {
 	return &oauth2.Config{
 		ClientID:     cs.Installed.ClientID,
 		ClientSecret: cs.Installed.ClientSecret,
-		Scopes:       []string{drive.DriveScope},
+		Scopes:       []string{drive.DriveFileScope},
 		Endpoint:     google.Endpoint,
 		RedirectURL:  redirectURL,
 	}
@@ -63,12 +76,12 @@ func BuildOAuthConfig(cs *GDriveClientSecret, redirectURL string) *oauth2.Config
 
 // BuildWebOAuthConfig creates an oauth2.Config for the Web Application OAuth client.
 // redirectURL is the full callback URI (e.g. from config.OAuth.WebRedirectURL).
-// Same scope upgrade as BuildOAuthConfig (s329 #scope).
+// Same scope as BuildOAuthConfig (#scope — rationale there).
 func BuildWebOAuthConfig(clientID, clientSecret, redirectURL string) *oauth2.Config {
 	return &oauth2.Config{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
-		Scopes:       []string{drive.DriveScope},
+		Scopes:       []string{drive.DriveFileScope},
 		Endpoint:     google.Endpoint,
 		RedirectURL:  redirectURL,
 	}

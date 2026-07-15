@@ -279,6 +279,12 @@ func (s *Scanner) findProvider(providerID string) types.CloudProvider {
 // uploaded directly to Drive (outside dudenest folder) never showed in /Files. This pass catches them.
 // s321 (carry-over from s320).
 //
+// ⚠️ INERT ON GOOGLE DRIVE since 2026-07-15: the OAuth scope reverted to drive.file (see
+// browser.BuildOAuthConfig #scope), so ListAll returns only app-created files — all of which are
+// already in knownCloudIDs → this registers 0 entries and just burns an API roundtrip. Deliberately
+// kept, not deleted: it is the whole-Drive adoption path and comes back for free if the product ever
+// funds CASA and re-upgrades the scope. Providers other than gdrive are unaffected.
+//
 // Skip cases (return nil silently):
 //   - provider not loaded
 //   - provider doesn't implement CloudFullLister (e.g. mega/local)
