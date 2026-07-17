@@ -24,6 +24,12 @@ const (
 	// StrategyForeign marks files that the user (or another relay) put on the cloud directly —
 	// dudenest indexes them and serves them via CloudID/stream-on-demand without ever owning the bytes.
 	// All other files use the implicit replica strategy (FileMap.Replicas is the source of truth).
+	//
+	// Scope note (2026-07-15): since the OAuth scope moved back to drive.file (see
+	// browser.BuildOAuthConfig #scope), only the "another relay" half of this is reachable on Google
+	// Drive — the fleet shares one client_id, so a peer relay's uploads are still visible. Files the
+	// user placed on Drive outside dudenest are NOT visible under drive.file and can no longer be
+	// discovered; expect ~0 new Foreign entries from gdrive until/unless full scope returns.
 	StrategyForeign = "Foreign"
 )
 

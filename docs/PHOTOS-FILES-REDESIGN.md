@@ -32,7 +32,15 @@ Path classification is **content-type-driven** at upload time (`magic-number` sn
 
 When a new provider is authorized (relay's `auth_done` ws event):
 1. **Phase A (priority)**: walk `/dudenest/photos/` and `/dudenest/files/` — fast import of Dudenest-uploaded content from another relay (e.g. relay-poc files visible immediately on relay-poc2 when same GDrive is added).
-2. **Phase B (background, low priority)**: walk the **entire cloud root** — every other file the user has in that account gets indexed (photos appear under `Photos`, everything else under `Files`).
+2. ~~**Phase B (background, low priority)**: walk the **entire cloud root**~~ — **⚠️ NOT ACTIVE on Google Drive since 2026-07-15.**
+
+> **Scope change (2026-07-15)** — the Google OAuth scope reverted from `drive` (full) to **`drive.file`** (per-file). See `internal/browser/gdrive_oauth.go` → `BuildOAuthConfig` `#scope` for the full rationale.
+>
+> **What this means for scan**: Phase A **still works** — the fleet shares one `client_id`, so files uploaded by any relay stay visible to every relay under `drive.file`. **Phase B (whole cloud root) does not** — files the user placed on Drive outside dudenest are invisible to the app and cannot be discovered.
+>
+> **Why**: `drive`/`drive.readonly` are RESTRICTED scopes → CASA audit ($500–4500/yr, annual) and, while unverified, a hard **100-user lifetime cap** + "Google hasn't verified this app" screen — both block a store launch. Measured on relay-poc 2026-07-15: **943 FileMaps, 0 `Strategy=Foreign`** — Phase B had produced nothing in ~6 weeks, so the restricted scope was pure cost. User decision: the product does not currently need to see files it did not create.
+>
+> `BootstrapWholeDrive` and `CloudFullLister` are kept (inert on gdrive), so re-upgrading is one constant + Reconnect if CASA ever gets funded.
 
 Per-file work: `HEAD`/metadata fetch → MIME sniff → thumbnail (if media) → blockmap entry (Strategy=`Foreign` — see §2.3).
 
